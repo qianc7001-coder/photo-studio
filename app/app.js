@@ -81,7 +81,11 @@
     feather: 10,
     colorMatch: 50,
     maxRes: 3072,
-    tile: 1400,
+    // 大选区分块：默认关闭。
+    // 原因：每块是模型**独立生成**的，重叠区的内容必然不完全一致，
+    // 加权平均后会出现重影/发糊 —— 这是分块方案本身的固有问题，调参数治不好。
+    // 需要时可以手动打开（0 = 关闭）。
+    tile: 0,
     upscaleSmall: true,
     historyBudgetMB: 192,      // 编辑历史内存上限（超过则降采样/丢弃最老的）
     autoSaveSession: true,     // 自动保存编辑会话，进程被杀后可恢复
@@ -114,6 +118,23 @@
     'historyBudgetMB', 'autoSaveSession'
   ];
 
+  /**
+   * 配置迁移：把老版本留下的值改成新版本的正确默认。
+   *
+   * 实现在 core.js（纯函数，便于单测覆盖各种版本组合）。
+   * 这里只是接一下，并把改动记下来以便提示用户。
+   */
+  const CFG_REV = C.CFG_REV;
+
+  function migrateCfg(c, saved) {
+    const r = C.migrateCfg(c, saved);
+    if (r.changed.length) lastCfgMigration = r.changed.slice();
+    return r.cfg;
+  }
+
+  /** 本次启动实际迁移了哪些字段（用于首启提示，让用户知道设置被动过） */
+  let lastCfgMigration = [];
+
   function loadCfg() {
     let c = Object.assign({}, DEFAULT_CFG);
     let saved = null;
@@ -138,6 +159,10 @@
         const p = C.getProvider(c.provider);
         if (p && p.baseUrl) c.baseUrl = p.baseUrl;
       }
+      // 最后跑迁移：会按需覆盖上面读回来的旧值
+      migrateCfg(c, saved);
+    } else {
+      c.__cfgRev = CFG_REV;
     }
     return c;
   }
@@ -154,6 +179,9 @@
       const out = {};
       for (const k of PERSIST_KEYS) out[k] = S.cfg[k];
       out.__savedAt = Date.now();
+      // 记录迁移版本：不写的话下次启动会再迁移一遍，
+      // 把用户手动重新打开的设置又覆盖掉。
+      out.__cfgRev = Number(S.cfg.__cfgRev) || CFG_REV;
       localStorage.setItem(LS_KEY, JSON.stringify(out));
     } catch (e) { /* 隐私模式下可能不可用，忽略 */ }
   }
@@ -175,10 +203,17 @@
         const keep = hasKey
           ? '你的 API 设置已保留，可直接使用。'
           : '还没有配置 API，点「设置」填写接口地址与 API Key。';
+        // 迁移动过设置就要说出来 —— 悄悄改用户配置是很糟糕的体验
+        const migNote = lastCfgMigration.length
+          ? '<div class="ub-sub" style="color:#ffd591">' +
+            '已关闭「大选区自动分块」：分块后各块由模型独立生成，接缝可能出现重影或发糊。' +
+            '如果确实需要，可在「设置」里重新打开。</div>'
+          : '';
         bar.innerHTML =
           '<div class="ub-main">' +
             '<div class="ub-title">已更新到 v' + APP_VERSION + '</div>' +
             '<div class="ub-sub">' + keep + '</div>' +
+            migNote +
           '</div>' +
           (CHANGELOG.length ? '<button class="ghost small" id="ub-whatsnew">更新内容</button>' : '') +
           '<button class="tb-btn icon" id="ub-close"><svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>';
@@ -1395,7 +1430,9 @@
         if (sentSize) {
           const sv = C.validateSize(sentSize, S.cfg.provider);
           if (!sv.ok) {
-            const e = new Error('出图尺寸 ' + sentSize + ' 不符合该接口要求：' + sv.reasons.join('；'));
+            const e = new Error('出图尺寸 ' + sentSize + ' 不符合该接口要求：' + sv.reasons.join('；') +
+              (Number(S.cfg.tile) > 0 ? '' :
+                '\n\n可以试试：框选小一点的区域；或在「设置 → 大选区自动分块」里打开分块（注意分块可能让接缝出现重影）。'));
             e.local = true;
             e.status = 0;
             throw e;
@@ -3366,6 +3403,9 @@
 
   function boot() {
     S.cfg = loadCfg();
+    // 迁移过配置就必须立刻落盘。
+    // 不落盘的话，每次启动都会重新迁移一遍 —— 用户手动改回来的设置会被反复覆盖。
+    if (lastCfgMigration.length) saveCfg();
     undoStack = C.createUndoStack(100);
     refreshBgColor();
     bind();

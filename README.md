@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-802%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-838%20passed-brightgreen.svg)](#测试)
 
 给摄影师用的**局部修图**工具：在照片上框选任意区域，交给生图模型修改，结果自动贴回原位置。
 
@@ -51,8 +51,13 @@
 - 边缘羽化（消除拼接硬边）
 - 接缝色彩匹配（把生成结果色调对齐原图）
 - 细长选区自动按比例裁切贴合，**不会变形**
-- 大选区自动分块 + 重叠区加权融合，**块间无缝**
+- **整块一次生成**（默认不分块）—— 选区再大也整块发送，从根上避免接缝
 - 小选区自动放大后发送（应对接口最小尺寸限制）
+
+> **关于分块**：早期版本会把大选区切成多块分别生成，但每块是模型**独立生成**的，
+> 重叠区内容必然不完全一致，加权平均后接缝处会出现重影或发糊 ——
+> 这是分块方案本身的固有缺陷，不是参数能调好的。因此**默认关闭**。
+> 设置里仍保留开关：万一服务商拒绝大尺寸请求，可以临时打开。
 
 ### 元数据
 - 导出保留 **EXIF**（相机、镜头、光圈、快门、ISO、拍摄时间）
@@ -147,10 +152,11 @@ node tools/bump-version.js
 ```bash
 node tools/core-test.js        # 单元测试（纯逻辑）
 node tools/regression-test.js  # 回归测试（已修复缺陷的防线）
+node tools/migrate-test.js     # 配置迁移（模拟老用户升级路径）
 node tools/e2e-test.js         # 端到端（jsdom + 真实 canvas，逐像素校验）
 ```
 
-当前规模：**802 项**（121 单元 + 418 回归 + 263 端到端）。
+当前规模：**838 项**（143 单元 + 418 回归 + 14 配置迁移 + 263 端到端）。
 
 端到端测试会：
 - 启动一个假生图模型服务器

@@ -315,8 +315,8 @@
           </select>
         </label>
         <label class="field">
-          <span>大选区自动分块 <b id="v-tile">1400 px</b> <i>选区过大时切成多块分别生成</i></span>
-          <input type="range" id="set-tile" min="0" max="2000" step="100" value="1400">
+          <span>大选区自动分块 <b id="v-tile">关闭</b> <i>默认关闭。开启后选区过大时切成多块分别生成，但<b>每块是模型独立生成的，重叠区接缝可能出现重影或发糊</b>，建议只在单次请求被服务商拒绝（选区超出尺寸上限）时才临时打开</i></span>
+          <input type="range" id="set-tile" min="0" max="2000" step="100" value="0">
         </label>
         <label class="switch" style="margin-bottom:12px">
           <input type="checkbox" id="set-upscale" checked>

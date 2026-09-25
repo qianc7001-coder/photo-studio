@@ -37,6 +37,9 @@ jobs:
       - name: 回归测试
         run: node tools/regression-test.js
 
+      - name: 配置迁移测试（老用户升级路径）
+        run: node tools/migrate-test.js
+
       - name: 安装端到端测试依赖
         id: e2e-deps
         continue-on-error: true

@@ -217,5 +217,62 @@ t('estimateCalls', C.estimateCalls({x:0,y:0,w:3000,h:3000},{maxSide:1400,overlap
 })();
 // ===== 历史时间线结束 =====
 
+
+// ===== 配置迁移（测试块） =====
+(() => {
+  // 迁移的核心目的：只改默认值对已安装的用户无效（localStorage 里存着旧值），
+  // 必须显式改一次；而且只能改一次，否则用户手动改回来也白改。
+
+  // 1) 老配置（分块开着）→ 迁移后关闭
+  const old1 = { tile: 1400, apiKey: 'sk-x', model: 'Qwen/Qwen-Image-Edit' };
+  const r1 = C.migrateCfg(Object.assign({}, old1), old1);
+  t('老配置的分块被关闭', r1.cfg.tile === 0, r1.cfg.tile);
+  t('迁移有记录（便于提示用户）', r1.changed.includes('tile'), r1.changed);
+  t('迁移后打上版本标记', r1.cfg.__cfgRev === C.CFG_REV, r1.cfg.__cfgRev);
+
+  // 2) 最关键：用户手动重新打开后，不能再被覆盖
+  const reEnabled = { tile: 1400, __cfgRev: C.CFG_REV };
+  const r2 = C.migrateCfg(Object.assign({}, reEnabled), reEnabled);
+  t('用户手动打开后不再被覆盖', r2.cfg.tile === 1400, r2.cfg.tile);
+  t('无需改动时 changed 为空', r2.changed.length === 0, r2.changed);
+
+  // 3) 已经是新版本的配置：原样保留（含用户自定的其它值）
+  const cur = { tile: 0, __cfgRev: C.CFG_REV, feather: 25, apiKey: 'sk-keep' };
+  const r3 = C.migrateCfg(Object.assign({}, cur), cur);
+  t('当前版本配置不被改动', r3.changed.length === 0 && r3.cfg.feather === 25, r3.changed);
+  t('用户数据完整保留', r3.cfg.apiKey === 'sk-keep');
+
+  // 4) 首次安装（没有存档）：不该记迁移，也不该改任何东西
+  const fresh = { tile: 0 };
+  const r4 = C.migrateCfg(fresh, null);
+  t('首次安装不产生迁移记录', r4.changed.length === 0, r4.changed);
+  t('首次安装打上版本标记', r4.cfg.__cfgRev === C.CFG_REV);
+
+  // 5) 脏数据不能崩
+  t('saved 为 null 安全', C.migrateCfg({}, null).cfg.__cfgRev === C.CFG_REV);
+  t('saved 为 undefined 安全', C.migrateCfg({}, undefined).cfg.__cfgRev === C.CFG_REV);
+  t('cfg 为 null 安全', !!C.migrateCfg(null, {}).cfg);
+  t('cfgRev 是脏字符串也不崩', C.migrateCfg({ tile: 5 }, { __cfgRev: 'abc' }).cfg.tile === 0);
+  t('tile 是脏字符串也不崩', C.migrateCfg({ tile: 'x' }, {}).cfg.tile === 0);
+  t('版本号比当前大时不动它', C.migrateCfg({ tile: 900 }, { __cfgRev: 99 }).cfg.tile === 900);
+
+  // 6) 默认值本身：分块必须是关的
+  const appSrc = require('fs').readFileSync(__dirname + '/../app/app.js', 'utf8');
+  t('默认配置里分块是关闭的', /maxRes: 3072,\s*\n\s*\/\/[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*tile: 0,/.test(appSrc) ||
+    /tile: 0,/.test(appSrc.slice(appSrc.indexOf('DEFAULT_CFG'), appSrc.indexOf('DEFAULT_CFG') + 2000)),
+    'tile 默认值');
+  t('保存配置时记录迁移版本（否则每次启动都重迁）', /__cfgRev/.test(appSrc));
+  t('loadCfg 里调用了迁移', /migrateCfg\(c, saved\)/.test(appSrc));
+  t('有配置存档时才迁移（首次安装不记）', /if \(saved && typeof saved === 'object'\)/.test(appSrc));
+
+  // 7) 设置界面：滑块默认 0，且说明了风险
+  const html = require('fs').readFileSync(__dirname + '/../app/index.html', 'utf8');
+  const tileInput = html.slice(html.indexOf('id="set-tile"') - 300, html.indexOf('id="set-tile"') + 100);
+  t('设置滑块默认值是 0', /id="set-tile"[^>]*value="0"/.test(html), tileInput.slice(-120));
+  t('设置界面说明了分块的风险', /重影|发糊/.test(html));
+  t('设置界面默认标签是「关闭」', /id="v-tile"[^>]*>关闭</.test(html));
+})();
+// ===== 配置迁移结束 =====
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

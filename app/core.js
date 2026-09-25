@@ -2039,6 +2039,49 @@
     return t < c ? { undo: c - t, redo: 0 } : { undo: 0, redo: t - c };
   }
 
+  /* ====================== 7.01c 配置迁移 ====================== */
+
+  /**
+   * 当前配置迁移版本。
+   * 每次需要「强制修正老版本留下的配置」时 +1。
+   */
+  const CFG_REV = 2;
+
+  /**
+   * 把老版本留下的配置迁移到当前版本。
+   *
+   * 为什么必须有这个：只改默认值对**已安装的用户无效** ——
+   * 他们的 localStorage 里已经存了旧值，启动时会被原样读回来，
+   * 新默认值永远不生效。所以要让新默认真正落地，必须显式改一次。
+   *
+   * 关键约束：**只迁移一次**。改完打上 __cfgRev 标记，
+   * 之后用户自己调的值不会再被覆盖（否则用户手动改回来也白改）。
+   *
+   * @param {object} cfg   已经合并好的配置对象（会被就地修改）
+   * @param {object} saved 从存储里读出来的原始对象（用于判断迁移版本）
+   * @returns {{cfg:object, changed:string[]}} changed 列出实际被改动的字段
+   */
+  function migrateCfg(cfg, saved) {
+    const c = cfg || {};
+    const rev = num(saved && saved.__cfgRev, 0);
+    const changed = [];
+    if (rev >= CFG_REV) { c.__cfgRev = rev; return { cfg: c, changed }; }
+
+    // rev 0/1 → 2：关闭「大选区分块」。
+    // 分块后每块由模型独立生成，重叠区内容必然不完全一致，
+    // 加权平均会出现重影/发糊 —— 这是分块方案本身的固有问题，调参数治不好。
+    // 需要的人可以在设置里手动打开（打开后 cfgRev 已是 2，不会再被关掉）。
+    if (rev < 2) {
+      // 注意：不能只判断 num(tile) > 0 —— 脏数据（如字符串 'x'）会被 num 解析成 0
+      // 而绕过这一支，结果非法值被原样留在配置里。这里统一改成合法数值。
+      const n = num(c.tile, 0);
+      if (!Number.isFinite(Number(c.tile)) || n > 0) { c.tile = 0; changed.push('tile'); }
+    }
+
+    c.__cfgRev = CFG_REV;
+    return { cfg: c, changed };
+  }
+
   /* ====================== 7.02 编辑图层（非破坏性） ====================== */
 
   /**
@@ -2838,6 +2881,7 @@
     normalizeLayer, layerAlphaAt, layerAlphaMap, layerCoverage, sortLayers,
     createUndoStack, makeUndoCommand, commandDirection,
     buildTimeline, describeCommand, planHistoryJump,
+    CFG_REV, migrateCfg,
     EXPORT_PRESETS, getExportPreset, planExportSize, stripGpsFromExif, planExportMetadata,
     MODEL_PRICES, DEFAULT_USD_CNY, modelPrice, estimateCost, accumulateSpend, formatUsd, formatCny,
     parseJpegSegments, extractExif, extractICC, readExifOrientation,
