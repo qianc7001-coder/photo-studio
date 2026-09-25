@@ -1,0 +1,22 @@
+# ---------- 构建产物 ----------
+dist/
+android/assets/
+android/keystore.jks
+dist/.build-state.json
+
+# ---------- 依赖 ----------
+node_modules/
+package-lock.json
+
+# ---------- 系统 / 编辑器 ----------
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# ---------- 临时文件 ----------
+*.log
+*.tmp
+/tmp/

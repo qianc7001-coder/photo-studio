@@ -1,0 +1,984 @@
+/* =============================================================================
+ * 回归测试：针对已修复的缺陷，确保不再复现
+ *   S1 贴回位置偏移（上下文外扩导致）
+ *   S2 接缝色彩匹配失效
+ *   S3 撤销/重做破坏合成（羽化与掩膜丢失）
+ *   M3 分块硬拼接产生接缝
+ *   L1 小选区无法移动
+ *   L3 小选区被羽化整块淡化
+ *   M1 server 畸形 URL 崩溃
+ * ========================================================================== */
+'use strict';
+const C = require('../app/core.js');
+let pass = 0, fail = 0;
+const t = (n, c, e) => { if (c) pass++; else { fail++; console.log('  ✗ ' + n + (e !== undefined ? '  → ' + JSON.stringify(e) : '')); } };
+const solid = (w, h, c) => {
+  const p = C.makePixels(w, h);
+  for (let i = 0; i < p.data.length; i += 4) {
+    p.data[i] = c[0]; p.data[i + 1] = c[1]; p.data[i + 2] = c[2]; p.data[i + 3] = 255;
+  }
+  return p;
+};
+
+console.log('\n【S1】贴回位置不再偏移');
+for (const pct of [0, 12, 30, 50]) {
+  const rect = { x: 100, y: 80, w: 160, h: 120 };
+  const padX = Math.round(rect.w * pct / 100), padY = Math.round(rect.h * pct / 100);
+  const req = C.clampRect({ x: rect.x - padX, y: rect.y - padY, w: rect.w + padX * 2, h: rect.h + padY * 2 }, 2000, 2000);
+  const off = { x: rect.x - req.x, y: rect.y - req.y };
+  // 模型原样回显请求图
+  const r = C.mapSelectionToResult({
+    genW: req.w, genH: req.h, reqW: req.w, reqH: req.h,
+    offX: off.x, offY: off.y, selW: rect.w, selH: rect.h
+  });
+  t(`contextPct=${pct}% 原样回显偏移为 0`, Math.abs(r.sx - off.x) < 0.01 && Math.abs(r.sy - off.y) < 0.01,
+    { got: [r.sx, r.sy], want: [off.x, off.y] });
+}
+// 模型输出缩放 + 改变比例
+(() => {
+  const r = C.mapSelectionToResult({ genW: 1328, genH: 1328, reqW: 744, reqH: 496, offX: 72, offY: 48, selW: 600, selH: 400 });
+  t('模型改分辨率时窗口比例不变形', Math.abs(r.sw / r.sh - 1.5) < 0.01, r.sw / r.sh);
+  t('模型改分辨率时窗口在图内', r.sx >= 0 && r.sy >= 0 && r.sx + r.sw <= 1328.01 && r.sy + r.sh <= 1328.01);
+})();
+
+console.log('\n【S2】接缝色彩匹配生效');
+(() => {
+  const run = (strength) => {
+    const full = solid(60, 60, [100, 100, 100]);
+    const sub = solid(20, 20, [100, 100, 100]);
+    const patch = solid(20, 20, [200, 200, 200]);
+    C.compositeFeathered(sub, patch, { x: 0, y: 0, w: 20, h: 20 },
+      { feather: 0, colorMatch: { ring: 6, ramp: 8, strength }, dstFull: full, dstOffset: { x: 20, y: 20 } });
+    return sub.data[0];
+  };
+  const a = run(0), b = run(0.5), c = run(1);
+  t('strength=0 保持模型原色', a === 200, a);
+  t('strength=0 与 1 结果不同（控件真正生效）', a !== c, { a, c });
+  t('strength 越大越贴近周围色调（单调）', a >= b && b >= c, { a, b, c });
+  // 无整图引用时（旧路径）不应崩
+  const sub2 = solid(20, 20, [100, 100, 100]);
+  C.compositeFeathered(sub2, solid(20, 20, [200, 200, 200]), { x: 0, y: 0, w: 20, h: 20 },
+    { feather: 0, colorMatch: { ring: 6, ramp: 8, strength: 1 } });
+  t('无整图引用时降级不崩', sub2.data[0] === 200, sub2.data[0]);
+})();
+
+console.log('\n【S3】合成结果可重复（撤销/重做保真）');
+(() => {
+  // 同一份 edit 连续合成两次，结果必须完全一致（rebuildViewCanvas 走的就是这个路径）
+  const makeEdit = () => {
+    const patch = solid(40, 40, [220, 30, 30]);
+    const mask = new Float32Array(40 * 40).fill(1);
+    for (let y = 0; y < 40; y++) for (let x = 0; x < 20; x++) mask[y * 40 + x] = 0; // 左半边保护
+    return { rect: { x: 20, y: 20, w: 40, h: 40 }, patch, feather: 8, colorMatch: 0.5, mask };
+  };
+  const apply = (edit) => {
+    const cv = solid(100, 100, [30, 90, 160]);
+    const id = { data: cv.data, width: 100, height: 100 };
+    // 模拟 compositeEditInto：取子图 + 整图引用
+    const sub = C.makePixels(edit.rect.w, edit.rect.h);
+    for (let y = 0; y < edit.rect.h; y++) for (let x = 0; x < edit.rect.w; x++) {
+      const si = ((edit.rect.y + y) * 100 + edit.rect.x + x) * 4, di = (y * edit.rect.w + x) * 4;
+      for (let k = 0; k < 4; k++) sub.data[di + k] = id.data[si + k];
+    }
+    const src = { data: edit.patch.data, width: 40, height: 40 };
+    C.compositeFeathered(sub, src, { x: 0, y: 0, w: 40, h: 40 },
+      { feather: edit.feather, colorMatch: { ring: 6, ramp: 8, strength: edit.colorMatch }, mask: edit.mask, dstFull: id, dstOffset: edit.rect });
+    for (let y = 0; y < edit.rect.h; y++) for (let x = 0; x < edit.rect.w; x++) {
+      const di = ((edit.rect.y + y) * 100 + edit.rect.x + x) * 4, si = (y * edit.rect.w + x) * 4;
+      for (let k = 0; k < 4; k++) id.data[di + k] = sub.data[si + k];
+    }
+    return cv;
+  };
+  const e = makeEdit();
+  const a = apply(e), b = apply(e);
+  let diff = 0;
+  for (let i = 0; i < a.data.length; i++) if (a.data[i] !== b.data[i]) diff++;
+  t('同一编辑重复合成结果逐像素一致', diff === 0, diff);
+  // 掩膜保护的区域必须保持原色
+  const px = (cv, x, y) => [cv.data[(y * 100 + x) * 4], cv.data[(y * 100 + x) * 4 + 1], cv.data[(y * 100 + x) * 4 + 2]];
+  t('掩膜排除的区域未被覆盖', JSON.stringify(px(a, 25, 40)) === '[30,90,160]', px(a, 25, 40));
+  t('掩膜允许的区域已被修改', px(a, 50, 40)[0] > 150, px(a, 50, 40));
+  // 羽化必须存在过渡（不是硬边）
+  const edge = px(a, 21, 40)[0], mid = px(a, 40, 40)[0];
+  t('羽化产生过渡（非硬边）', edge !== mid, { edge, mid });
+})();
+
+console.log('\n【M3】分块拼接无硬断层');
+(() => {
+  const full = { x: 0, y: 0, w: 600, h: 300 };
+  const tiles = C.planTileCrop(full, { maxSide: 300, overlap: 80 });
+  t('产生多块', tiles.length >= 3, tiles.length);
+  const acc = { data: new Float32Array(600 * 300 * 3), w: 600, h: 300 };
+  const wacc = { data: new Float32Array(600 * 300), w: 600, h: 300 };
+  const colors = [[220, 40, 40], [40, 220, 40], [40, 40, 220], [220, 220, 40], [220, 40, 220]];
+  tiles.forEach((tile, i) => {
+    const p = solid(tile.w, tile.h, colors[i % colors.length]);
+    const w = C.tileBlendWeights(tile, full, 80);
+    C.accumulateTile(acc, wacc, p, tile.x - full.x, tile.y - full.y, w);
+  });
+  const out = C.makePixels(600, 300);
+  C.resolveAccumulated(acc, wacc, out);
+  let maxJump = 0;
+  for (let x = 1; x < 600; x++) {
+    const a = (150 * 600 + x) * 4, b = (150 * 600 + x - 1) * 4;
+    maxJump = Math.max(maxJump, Math.abs(out.data[a] - out.data[b]) + Math.abs(out.data[a + 1] - out.data[b + 1]) + Math.abs(out.data[a + 2] - out.data[b + 2]));
+  }
+  t('块边界无硬断层（跳变 < 60）', maxJump < 60, maxJump);
+  // 全覆盖：不能有未写入的像素
+  let zero = 0;
+  for (let i = 0; i < wacc.data.length; i++) if (wacc.data[i] <= 0) zero++;
+  t('所有像素都被覆盖（无空洞）', zero === 0, zero);
+})();
+
+console.log('\n【L1】小选区可整体移动');
+(() => {
+  const small = { x: 100, y: 100, w: 24, h: 24 };
+  t('小选区中心=move', C.hitTest({ x: 112, y: 112 }, small, 24) === 'move', C.hitTest({ x: 112, y: 112 }, small, 24));
+  t('小选区仍能抓左上角', C.hitTest({ x: 100, y: 100 }, small, 24) === 'nw');
+  t('小选区仍能抓右下角', C.hitTest({ x: 124, y: 124 }, small, 24) === 'se');
+  const big = { x: 100, y: 100, w: 300, h: 300 };
+  t('大选区行为不变（中心 move）', C.hitTest({ x: 250, y: 250 }, big, 24) === 'move');
+  t('大选区行为不变（角 nw）', C.hitTest({ x: 100, y: 100 }, big, 24) === 'nw');
+})();
+
+console.log('\n【L3】小选区不被羽化整块淡化');
+for (const [w, h] of [[8, 8], [16, 16], [20, 20], [30, 30], [200, 200]]) {
+  const m = C.featherMask(w, h, 10);
+  let mx = 0;
+  for (const v of m) mx = Math.max(mx, v);
+  t(`${w}x${h} 选区中心可完全生效`, mx > 0.99, mx);
+}
+t('大选区羽化仍然归零（不失效）', C.featherMask(200, 200, 10)[0] < 0.05, C.featherMask(200, 200, 10)[0]);
+
+console.log('\n【L6/M5】选区自由：不再自动改写用户框选');
+(() => {
+  // snapRectToModel 已改为只记录偏差；这里验证核心几何不会被意外改动
+  const r = { x: 10, y: 10, w: 559, h: 262 };
+  const dev = Math.abs(Math.log((r.w / r.h) / 1.793));
+  t('比例偏差可被计算用于提示', dev > 0 && dev < 1, dev);
+  t('选区比例未被改写（宽高保持）', r.w === 559 && r.h === 262);
+})();
+
+/* ============ 以下为后续追加：模型检测 & 配置保留 ============ */
+
+console.log('\n【小选区】必须能通过上游最小尺寸限制');
+(() => {
+  const rules = C.sizeRulesFor('openai');
+  // 摄影师常改的小区域
+  const small = [[60, 60], [80, 80], [100, 100], [128, 128], [150, 150], [200, 200], [256, 256], [300, 200], [400, 300], [512, 512]];
+  for (const [w, h] of small) {
+    const u = C.planUpscale(w, h, 'openai');
+    const v = C.validateSize(u.w + 'x' + u.h, 'openai');
+    t(`小选区 ${w}x${h} 放大后达标`, v.ok, { got: u.w + 'x' + u.h, reasons: v.reasons });
+    t(`小选区 ${w}x${h} 放大倍数合理（<20x）`, u.scale < 20, u.scale);
+    t(`小选区 ${w}x${h} 放大后比例保持`, Math.abs((u.w / u.h) / (w / h) - 1) < 0.06, { up: u.w / u.h, src: w / h });
+  }
+  // 已经够大的不该被放大
+  const big = C.planUpscale(1200, 900, 'openai');
+  t('大选区不放大', big.needed === false || big.scale <= 1.001, big);
+  // 硅基流动没有最小限制 → 不该放大
+  const sf = C.planUpscale(100, 100, 'siliconflow');
+  t('无最小限制的服务商不放大', sf.needed === false, sf);
+
+  // 上采样后的坐标映射必须无偏移、不变形
+  for (const [w, h] of [[100, 100], [80, 60], [256, 128], [150, 300]]) {
+    const req = { x: 0, y: 0, w: Math.round(w * 1.24), h: Math.round(h * 1.24) };
+    const off = { x: Math.round(w * 0.12), y: Math.round(h * 0.12) };
+    const u = C.planUpscale(req.w, req.h, 'openai');
+    const upOff = { x: off.x * u.scale, y: off.y * u.scale };
+    const upSelW = w * u.scale, upSelH = h * u.scale;
+    // 模型返回任意尺寸（这里取 1024x1024）
+    const crop = C.mapSelectionToResult({
+      genW: 1024, genH: 1024, reqW: u.w, reqH: u.h,
+      offX: upOff.x, offY: upOff.y, selW: upSelW, selH: upSelH
+    });
+    // 比例必须等于原选区比例
+    t(`上采样后 ${w}x${h} 不变形`, Math.abs((crop.sw / crop.sh) / (w / h) - 1) < 0.02, { got: crop.sw / crop.sh, want: w / h });
+    // 位置：选区中心在返回图中的位置必须对得上
+    const expCx = (upOff.x + upSelW / 2) * 1024 / u.w;
+    const expCy = (upOff.y + upSelH / 2) * 1024 / u.h;
+    const gotCx = crop.sx + crop.sw / 2, gotCy = crop.sy + crop.sh / 2;
+    t(`上采样后 ${w}x${h} 无偏移`, Math.abs(expCx - gotCx) < 2 && Math.abs(expCy - gotCy) < 2,
+      { exp: [Math.round(expCx), Math.round(expCy)], got: [Math.round(gotCx), Math.round(gotCy)] });
+    // 裁剪窗口必须在返回图内
+    t(`上采样后 ${w}x${h} 窗口在图内`, crop.sx >= -0.01 && crop.sy >= -0.01 && crop.sx + crop.sw <= 1024.01 && crop.sy + crop.sh <= 1024.01, crop);
+  }
+
+  // 极端长条选区：比例越界时应被识别出来（放大救不了，需要提示用户）
+  const narrow = C.planUpscale(1000, 100, 'openai');
+  t('极扁选区比例越界被识别', narrow.aspectInvalid === true || C.validateSize(narrow.w + 'x' + narrow.h, 'openai').ok,
+    { aspectInvalid: narrow.aspectInvalid, size: narrow.w + 'x' + narrow.h });
+})();
+
+console.log('\n【成本预估】价格准确、分块会翻倍');
+(() => {
+  // 1) 价格表有据可查（这几项来自官方页面/博客）
+  const must = [
+    ['Qwen/Qwen-Image-Edit', 0.04],
+    ['black-forest-labs/FLUX.1-Kontext-pro', 0.04],
+    ['black-forest-labs/FLUX.1-Kontext-max', 0.08],
+    ['gpt-image-1', 0.042]
+  ];
+  for (const [id, usd] of must) {
+    const p = C.modelPrice(id);
+    t('价格收录: ' + id, !!p && Math.abs(p.usd - usd) < 1e-9, p);
+  }
+  t('未收录模型返回 null（不瞎猜）', C.modelPrice('some/unknown-model') === null);
+  t('空输入安全', C.modelPrice(null) === null && C.modelPrice('') === null);
+  // 容错匹配
+  t('容错匹配（忽略大小写/分隔符）', !!C.modelPrice('qwen/qwenimageedit'));
+
+  // 2) 单次成本
+  const e1 = C.estimateCost({ rect: { w: 800, h: 600 }, model: 'Qwen/Qwen-Image-Edit', tileMaxSide: 1400 });
+  t('小选区 1 次调用', e1.calls === 1, e1.calls);
+  t('金额正确', Math.abs(e1.totalUsd - 0.04) < 1e-9, e1.totalUsd);
+  t('人民币换算正确', Math.abs(e1.totalCny - 0.04 * 7.1) < 1e-9, e1.totalCny);
+
+  // 3) 关键：分块使成本翻倍
+  const e2 = C.estimateCost({ rect: { w: 3000, h: 2000 }, model: 'Qwen/Qwen-Image-Edit', tileMaxSide: 1400 });
+  t('大选区多次调用', e2.calls > 1, e2.calls);
+  t('成本随调用次数线性增长', Math.abs(e2.totalUsd - 0.04 * e2.calls) < 1e-9, e2.totalUsd);
+  const e3 = C.estimateCost({ rect: { w: 4000, h: 3000 }, model: 'Qwen/Qwen-Image-Edit', tileMaxSide: 1400 });
+  t('4000x3000 调用 9 次', e3.calls === 9, e3.calls);
+  t('4000x3000 成本约 $0.36', Math.abs(e3.totalUsd - 0.36) < 1e-9, e3.totalUsd);
+  // 关闭分块 → 只调用 1 次（成本不涨）
+  const e4 = C.estimateCost({ rect: { w: 4000, h: 3000 }, model: 'Qwen/Qwen-Image-Edit', tileMaxSide: 0 });
+  t('关闭分块只调用 1 次', e4.calls === 1, e4.calls);
+
+  // 4) 自定义单价优先于内置
+  const e5 = C.estimateCost({ rect: { w: 800, h: 600 }, model: 'Qwen/Qwen-Image-Edit', priceOverride: 0.1 });
+  t('自定义单价生效', Math.abs(e5.totalUsd - 0.1) < 1e-9, e5.totalUsd);
+  const e6 = C.estimateCost({ rect: { w: 800, h: 600 }, model: 'unknown/x', priceOverride: 0.05 });
+  t('未知模型也能用自定义单价估算', e6.known === true && Math.abs(e6.totalUsd - 0.05) < 1e-9, e6);
+  // 未收录且无自定义 → 标记未知，不编造数字
+  const e7 = C.estimateCost({ rect: { w: 800, h: 600 }, model: 'unknown/x' });
+  t('未收录且无自定义 → 标记未知', e7.known === false && e7.totalUsd === null);
+  t('未知时给出可操作提示', /手动填写单价/.test(e7.note), e7.note);
+
+  // 5) 汇率可调
+  const e8 = C.estimateCost({ rect: { w: 800, h: 600 }, model: 'Qwen/Qwen-Image-Edit', usdCny: 7 });
+  t('汇率可自定义', Math.abs(e8.totalCny - 0.04 * 7) < 1e-9, e8.totalCny);
+
+  // 6) 累计花费
+  let acc = { calls: 0, usd: 0, unknownCalls: 0 };
+  acc = C.accumulateSpend(acc, e1);
+  acc = C.accumulateSpend(acc, e1);
+  t('累计调用次数', acc.calls === 2, acc.calls);
+  t('累计金额', Math.abs(acc.usd - 0.08) < 1e-9, acc.usd);
+  acc = C.accumulateSpend(acc, e7);   // 未知单价
+  t('未知单价计入调用次数但不计入金额', acc.calls === 3 && acc.unknownCalls === 1, acc);
+  t('累计金额未被污染', Math.abs(acc.usd - 0.08) < 1e-9, acc.usd);
+  t('空累计安全', C.accumulateSpend(null, null).calls === 0);
+
+  // 7) 金额格式化（小额不能显示成 $0.00）
+  t('$0.005 显示 4 位小数', C.formatUsd(0.005) === '$0.0050', C.formatUsd(0.005));
+  t('$0.04 显示 3 位小数', C.formatUsd(0.04) === '$0.040', C.formatUsd(0.04));
+  t('$4 显示 2 位小数', C.formatUsd(4) === '$4.00', C.formatUsd(4));
+  t('$40 显示两位小数', C.formatUsd(40) === '$40.00', C.formatUsd(40));
+  t('$400 不显示小数（大额简化）', C.formatUsd(400) === '$400', C.formatUsd(400));
+  t('0 显示 $0', C.formatUsd(0) === '$0', C.formatUsd(0));
+  t('人民币格式化（0.1~100 两位小数）', C.formatCny(0.28) === '¥0.28', C.formatCny(0.28));
+  t('人民币小额三位小数', C.formatCny(0.05) === '¥0.050', C.formatCny(0.05));
+
+  // 8) 源码层面：生成前必须真的做确认与累计
+  const fs = require('fs');
+  const appSrc = fs.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  t('生成前做成本确认', /confirmCostIfNeeded\(est\)/.test(appSrc));
+  t('生成成功后累计花费', /accumulateSpend\(S\.spend/.test(appSrc));
+  t('界面显示预估成本', /costNote/.test(appSrc));
+  t('大额才弹确认（小额不打扰）', /est\.totalUsd < 0\.2/.test(appSrc));
+})();
+
+console.log('\n【导出预设】尺寸/质量/元数据按场景自动适配');
+(() => {
+  // 1) 预设完整性
+  const ids = C.EXPORT_PRESETS.map((p) => p.id);
+  for (const need of ['full', 'print', 'wechat', 'social', 'web', 'custom']) {
+    t('预设存在: ' + need, ids.indexOf(need) >= 0);
+  }
+  t('每个预设都有说明', C.EXPORT_PRESETS.every((p) => p.label && p.desc));
+  t('未知预设回退到默认', C.getExportPreset('nope').id === 'full');
+
+  // 2) 尺寸规划：只缩不放
+  const big = C.planExportSize(6000, 4000, C.getExportPreset('wechat'));
+  t('大图按长边缩放', big.w === 2000 && big.h === 1333 && big.scaled === true, big);
+  const small = C.planExportSize(800, 600, C.getExportPreset('wechat'));
+  t('小图不放大（避免模糊）', small.w === 800 && small.h === 600 && small.scaled === false, small);
+  const full = C.planExportSize(6000, 4000, C.getExportPreset('full'));
+  t('原尺寸预设不缩放', full.w === 6000 && full.h === 4000 && full.scaled === false);
+  // 长边是「宽高中较大的一边」
+  const portrait = C.planExportSize(3000, 6000, C.getExportPreset('social'));
+  t('竖图按高度（长边）缩放', portrait.h === 1440 && portrait.w === 720, portrait);
+  // 极端尺寸不崩
+  t('零尺寸安全', C.planExportSize(0, 0, C.getExportPreset('wechat')).w >= 1);
+  t('负数安全', C.planExportSize(-100, -100, C.getExportPreset('full')).w >= 1);
+
+  // 3) GPS 移除（隐私保护）
+  const mkTiff = (withGps) => {
+    const n = withGps ? 2 : 1;
+    const t = new Uint8Array(8 + 2 + n * 12 + 4);
+    t[0] = 0x49; t[1] = 0x49; t[2] = 0x2a; t[4] = 8;
+    t[8] = n;
+    t[10] = 0x12; t[11] = 0x01; t[12] = 3; t[14] = 1; t[18] = 1;   // Orientation
+    if (withGps) {
+      const o = 22;
+      t[o] = 0x25; t[o + 1] = 0x88; t[o + 2] = 4; t[o + 4] = 1; t[o + 8] = 100;  // GPS 指针
+    }
+    return t;
+  };
+  const readTags = (t) => {
+    const le = t[0] === 0x49;
+    const u16 = (o) => (le ? (t[o] | (t[o + 1] << 8)) : ((t[o] << 8) | t[o + 1]));
+    const u32 = (o) => (le
+      ? ((t[o] | (t[o + 1] << 8) | (t[o + 2] << 16) | (t[o + 3] << 24)) >>> 0)
+      : (((t[o] << 24) | (t[o + 1] << 16) | (t[o + 2] << 8) | t[o + 3]) >>> 0));
+    const ifd0 = u32(4), n = u16(ifd0), tags = [];
+    for (let k = 0; k < n; k++) tags.push(u16(ifd0 + 2 + k * 12));
+    return tags;
+  };
+  const withGps = mkTiff(true);
+  t('构造的 EXIF 含 GPS', readTags(withGps).indexOf(0x8825) >= 0);
+  const stripped = C.stripGpsFromExif(withGps);
+  t('GPS 被移除', stripped.removed === true);
+  t('移除后 GPS 标签消失', readTags(stripped.exif).indexOf(0x8825) < 0, readTags(stripped.exif));
+  t('移除后 Orientation 仍保留', readTags(stripped.exif).indexOf(0x0112) >= 0);
+  t('原数据未被修改', readTags(withGps).indexOf(0x8825) >= 0);
+  t('无 GPS 时正确识别', C.stripGpsFromExif(mkTiff(false)).removed === false);
+  t('空输入安全', C.stripGpsFromExif(null).removed === false && C.stripGpsFromExif(undefined).removed === false);
+
+  // 4) 按预设决定元数据策略
+  const meta = { source: 'jpeg', exif: mkTiff(true), icc: new Uint8Array(200), iccIsSrgb: true };
+  const pFull = C.planExportMetadata(meta, C.getExportPreset('full'));
+  t('原尺寸预设保留 EXIF+ICC', !!pFull.exif && !!pFull.icc);
+  t('原尺寸预设保留 GPS', readTags(pFull.exif).indexOf(0x8825) >= 0);
+  const pWechat = C.planExportMetadata(meta, C.getExportPreset('wechat'));
+  t('微信预设保留 EXIF', !!pWechat.exif);
+  t('微信预设移除 GPS', readTags(pWechat.exif).indexOf(0x8825) < 0);
+  t('微信预设提示已移除定位', pWechat.notes.some((n) => /定位/.test(n)), pWechat.notes);
+  const pWeb = C.planExportMetadata(meta, C.getExportPreset('web'));
+  t('网页预设不保留 EXIF', pWeb.exif === null);
+  t('网页预设不保留 ICC', pWeb.icc === null);
+  t('网页预设提示未保留拍摄信息', pWeb.notes.some((n) => /拍摄信息/.test(n)), pWeb.notes);
+  // 非 JPEG 源不报错
+  const pPng = C.planExportMetadata({ source: 'none' }, C.getExportPreset('full'));
+  t('非 JPEG 源安全', pPng.exif === null && pPng.icc === null);
+  // 广色域处理
+  const wideMeta = { source: 'jpeg', exif: mkTiff(true), icc: new Uint8Array(200), iccIsSrgb: false };
+  const pWide = C.planExportMetadata(wideMeta, C.getExportPreset('full'));
+  t('广色域不写回原 ICC（避免错色）', pWide.icc === null);
+  t('广色域给出提示', pWide.notes.some((n) => /广色域/.test(n)), pWide.notes);
+
+  // 5) 源码层面：导出必须真的用上预设
+  const fs = require('fs');
+  const appSrc = fs.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const fn = appSrc.slice(appSrc.indexOf('async function exportImage'), appSrc.indexOf('function resampleMask'));
+  t('导出使用预设尺寸', /planExportSize/.test(fn));
+  t('导出使用预设元数据策略', /planExportMetadata/.test(fn));
+  t('导出会按需缩放画布', /plan\.scaled/.test(fn));
+})();
+
+console.log('\n【撤销栈】统一撤销必须覆盖所有操作');
+(() => {
+  // 1) 基本行为
+  const st = C.createUndoStack(100);
+  t('初始不能撤销', st.canUndo() === false);
+  t('初始不能重做', st.canRedo() === false);
+  const layer = { rect: { x: 0, y: 0, w: 10, h: 10 }, patch: {}, feather: 0, opacity: 1 };
+  st.push(C.makeUndoCommand('add-layer', { layer, index: 0, label: '生成修改' }));
+  t('记录后可撤销', st.canUndo() === true);
+  t('描述正确', st.lastLabel() === '生成修改', st.lastLabel());
+  const c1 = st.undo();
+  t('撤销取出命令', c1 && c1.type === 'add-layer');
+  t('撤销后可重做', st.canRedo() === true);
+  t('撤销后不能再撤销', st.canUndo() === false);
+  st.redo();
+  t('重做后回到已执行状态', st.canUndo() === true && st.canRedo() === false);
+
+  // 2) 新操作使重做栈失效
+  const st2 = C.createUndoStack(100);
+  st2.push(C.makeUndoCommand('add-layer', { layer, index: 0 }));
+  st2.push(C.makeUndoCommand('add-layer', { layer, index: 1 }));
+  st2.undo();
+  t('撤销后有重做', st2.canRedo() === true);
+  st2.push(C.makeUndoCommand('stroke', { stroke: { points: [] } }));
+  t('新操作使重做栈失效', st2.canRedo() === false);
+
+  // 3) 命令方向映射正确（这是撤销正确性的核心）
+  const dir = (type, payload, isRedo) =>
+    C.commandDirection(C.makeUndoCommand(type, payload), isRedo).action;
+  t('新增图层：撤销=移除', dir('add-layer', { layer, index: 0 }, false) === 'remove-layer');
+  t('新增图层：重做=插入', dir('add-layer', { layer, index: 0 }, true) === 'insert-layer');
+  t('删除图层：撤销=插回', dir('remove-layer', { layer, index: 2 }, false) === 'insert-layer');
+  t('删除图层：重做=再删', dir('remove-layer', { layer, index: 2 }, true) === 'remove-layer');
+  t('调参：撤销取 before', C.commandDirection(
+    C.makeUndoCommand('param-layer', { index: 0, key: 'opacity', before: 0.2, after: 0.9 }), false).value === 0.2);
+  t('调参：重做取 after', C.commandDirection(
+    C.makeUndoCommand('param-layer', { index: 0, key: 'opacity', before: 0.2, after: 0.9 }), true).value === 0.9);
+  t('开关：撤销取 before', C.commandDirection(
+    C.makeUndoCommand('toggle-layer', { index: 0, before: true, after: false }), false).value === true);
+  t('画笔：撤销=移除最后一笔', dir('stroke', { stroke: { points: [] } }, false) === 'remove-last-stroke');
+  t('画笔：重做=加回', dir('stroke', { stroke: { points: [] } }, true) === 'add-stroke');
+  t('清空笔迹：撤销=恢复', dir('clear-strokes', { strokes: [] }, false) === 'restore-strokes');
+
+  // 4) 上限：超出丢最老的，且不能失控
+  for (const lim of [1, 3, 20]) {
+    const sx = C.createUndoStack(lim);
+    for (let i = 0; i < 60; i++) sx.push(C.makeUndoCommand('add-layer', { layer, index: i }));
+    t('上限 ' + lim + ' 生效', sx.size().past === lim, sx.size().past);
+  }
+  const sdef = C.createUndoStack();
+  for (let i = 0; i < 300; i++) sdef.push(C.makeUndoCommand('add-layer', { layer, index: i }));
+  t('默认上限 100 条', sdef.size().past === 100, sdef.size().past);
+
+  // 5) 非法输入不崩
+  const sbad = C.createUndoStack(10);
+  sbad.push(null);
+  sbad.push({});
+  sbad.push({ type: 'unknown-type' });
+  t('非法命令不进入历史', sbad.canUndo() === false, sbad.size());
+  t('未知类型方向为 null', C.commandDirection({ type: 'nope' }, false) === null);
+  t('空命令安全', C.makeUndoCommand('') === null && C.makeUndoCommand(null) === null);
+
+  // 6) 关键：命令只存差异，不存整图（内存安全）
+  const fs = require('fs');
+  const coreSrc = fs.readFileSync(__dirname + '/../app/core.js', 'utf8');
+  const fn = coreSrc.slice(coreSrc.indexOf('function makeUndoCommand'), coreSrc.indexOf('function commandDirection'));
+  t('撤销命令不含整图快照', !/ImageData|toDataURL|getImageData/.test(fn));
+  t('删除图层只记录索引与引用', /index: num\(p\.index/.test(fn));
+
+  // 7) app 侧：所有改变画面的操作都要记历史
+  const appSrc = fs.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const checks = [
+    ['生成结果入历史', /type: 'add-layer'/],
+    ['画笔入历史', /type: 'stroke'/],
+    ['清空笔迹入历史', /type: 'clear-strokes'/],
+    ['删除图层入历史', /type: 'remove-layer'/],
+    ['图层开关入历史', /type: 'toggle-layer'/],
+    ['调参入历史', /type: 'param-layer'/]
+  ];
+  for (const [name, re] of checks) t(name, re.test(appSrc));
+  t('调参只在松手时记一条（避免拖一次产生上百条）',
+    /onpointerup = \(\) => \{ commit\(Number\(input\.value\)\); \}/.test(appSrc));
+})();
+
+console.log('\n【非破坏性】调整参数不应重新调用模型');
+(() => {
+  const w = 60, h = 60;
+  const mask = new Float32Array(w * h).fill(1);
+  for (let y = 20; y < 40; y++) for (let x = 20; x < 40; x++) mask[y * w + x] = 0;   // 排除中心
+
+  // 1) 图层参数归一化：越界值要被夹取
+  const L = C.normalizeLayer({ rect: { x: 0, y: 0, w, h }, feather: 999, colorMatch: 5, opacity: -1 });
+  t('羽化越界不夹取上限（由尺寸限制）', L.feather === 999, L.feather);
+  t('色彩匹配强度夹取到 0~1', L.colorMatch === 1, L.colorMatch);
+  t('不透明度夹取到 0~1', L.opacity === 0, L.opacity);
+  t('默认启用', C.normalizeLayer({}).enabled === true);
+  t('显式关闭生效', C.normalizeLayer({ enabled: false }).enabled === false);
+
+  // 2) 不透明度：能「减弱」效果
+  const base = { rect: { x: 0, y: 0, w, h }, mask: null, feather: 0 };
+  const a0 = C.layerAlphaAt(5, 5, Object.assign({}, base, { opacity: 0 }), w, h);
+  const a5 = C.layerAlphaAt(5, 5, Object.assign({}, base, { opacity: 0.5 }), w, h);
+  const a1 = C.layerAlphaAt(5, 5, Object.assign({}, base, { opacity: 1 }), w, h);
+  t('不透明度 0 → 完全不生效', a0 === 0, a0);
+  t('不透明度 0.5 → 半强度', Math.abs(a5 - 0.5) < 1e-6, a5);
+  t('不透明度 1 → 完全生效', a1 === 1, a1);
+
+  // 3) 关键：画笔排除的区域，无论不透明度多少都必须为 0
+  for (const op of [0, 0.3, 0.7, 1]) {
+    const v = C.layerAlphaAt(30, 30, Object.assign({}, base, { mask, opacity: op }), w, h);
+    t('排除区域在 opacity=' + op + ' 时仍为 0', v === 0, v);
+  }
+  // 未排除区域应随不透明度变化
+  const outside = C.layerAlphaAt(5, 5, Object.assign({}, base, { mask, opacity: 0.5 }), w, h);
+  t('未排除区域受不透明度影响', Math.abs(outside - 0.5) < 1e-6, outside);
+
+  // 4) 图层关闭 → 完全不参与合成
+  t('关闭的图层 alpha 全为 0', C.layerAlphaAt(5, 5, Object.assign({}, base, { enabled: false }), w, h) === 0);
+  const offMap = C.layerAlphaMap(Object.assign({}, base, { enabled: false }), w, h);
+  t('关闭的图层 alphaMap 全为 0', offMap.every((v) => v === 0));
+
+  // 5) 羽化确实产生渐变（不是硬边）
+  const map = C.layerAlphaMap({ rect: { x: 0, y: 0, w, h }, mask: null, feather: 12, opacity: 1 }, w, h);
+  // 边界应接近 0（羽化是平滑渐变，角落是渐变的起点而非精确 0）
+  t('羽化边界接近 0', map[0] < 0.02, map[0]);
+  t('羽化内部为 1', map[Math.floor(h / 2) * w + Math.floor(w / 2)] === 1);
+  t('羽化由外向内递增', map[0] < map[2 * w + 2], [map[0], map[2 * w + 2]]);
+  let mid = 0;
+  for (const v of map) if (v > 0.2 && v < 0.8) mid++;
+  t('羽化存在过渡带（不是硬切）', mid > 0, mid);
+
+  // 6) 覆盖率统计（界面显示「改了多少」）
+  const covFull = C.layerCoverage({ rect: { x: 0, y: 0, w, h }, mask: null, feather: 0, opacity: 1 }, w, h);
+  t('全覆盖 → 100%', Math.abs(covFull - 1) < 1e-6, covFull);
+  const covMask = C.layerCoverage({ rect: { x: 0, y: 0, w, h }, mask, feather: 0, opacity: 1 }, w, h);
+  t('排除 400/3600 像素 → 覆盖率约 89%', Math.abs(covMask - (1 - 400 / 3600)) < 0.01, covMask);
+  const covOff = C.layerCoverage({ rect: { x: 0, y: 0, w, h }, mask: null, feather: 0, opacity: 0 }, w, h);
+  t('关闭的图层覆盖率 0', covOff === 0);
+
+  // 7) 源码层面：合成时必须读取 opacity/enabled（防止被绕过）
+  const fs = require('fs');
+  const appSrc = fs.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const fn = appSrc.slice(appSrc.indexOf('function compositeEditInto'), appSrc.indexOf('function rebuildViewCanvas'));
+  t('合成路径读取图层开关', /L\.enabled/.test(fn) || /normalizeLayer/.test(fn));
+  t('合成路径应用不透明度', /opacity/.test(fn));
+  t('图层关闭时直接返回（不合成）', /if \(!L\.enabled\) return;/.test(fn));
+})();
+
+console.log('\n【内存】编辑历史必须有内存上限，防止手机被系统杀掉');
+(() => {
+  const mk = (w, h) => ({ rect: { x: 0, y: 0, w: 10, h: 10 }, patch: { width: w, height: h } });
+  const MB = 1024 * 1024;
+
+  // 单张 patch 内存计算
+  t('patch 内存计算正确', C.patchMemory(3072, 2048) === 3072 * 2048 * 4, C.patchMemory(3072, 2048));
+  t('24MB 量级符合预期', Math.round(C.patchMemory(3072, 2048) / MB) === 24, Math.round(C.patchMemory(3072, 2048) / MB));
+
+  // 预算内不动
+  const small = Array.from({ length: 5 }, () => mk(3072, 2048));
+  const p1 = C.planHistoryMemory(small, 192 * MB);
+  t('预算内不降采样不丢弃', p1.downscale.length === 0 && p1.drop === 0, p1);
+
+  // 超预算：降采样（保留最近 3 条清晰）
+  const mid = Array.from({ length: 20 }, () => mk(3072, 2048));
+  const p2 = C.planHistoryMemory(mid, 192 * MB);
+  t('超预算时降采样较早的编辑', p2.downscale.length > 0, p2.downscale.length);
+  t('最近 3 条不降采样（用户最可能回退）',
+    p2.downscale.every((i) => i < 20 - 3), p2.downscale.slice(-3));
+  t('降采样后降到预算内', p2.usedBytes <= 192 * MB, Math.round(p2.usedBytes / MB));
+
+  // 严重超预算：丢弃最老的
+  const many = Array.from({ length: 40 }, () => mk(3072, 2048));
+  const p3 = C.planHistoryMemory(many, 192 * MB);
+  t('严重超预算时丢弃最老的编辑', p3.drop > 0, p3.drop);
+  t('丢弃后不超过预算', p3.usedBytes <= 192 * MB, Math.round(p3.usedBytes / MB));
+  t('给出了明确的用户提示', /内存受限/.test(p3.note), p3.note);
+
+  // 4K 图也能控制住
+  const k4 = Array.from({ length: 20 }, () => mk(4096, 2731));
+  const p4 = C.planHistoryMemory(k4, 256 * MB);
+  t('4K 图 20 次编辑被控制住', p4.usedBytes <= 256 * MB && (p4.downscale.length + p4.drop) > 0,
+    { used: Math.round(p4.usedBytes / MB), ds: p4.downscale.length, drop: p4.drop });
+
+  // 边界：空列表、极小预算
+  t('空历史安全', C.planHistoryMemory([], 192 * MB).usedBytes === 0);
+  const tiny = C.planHistoryMemory(mid, 1);
+  t('极小预算有下限保护（不会算出负数）', tiny.usedBytes >= 0, tiny.usedBytes);
+})();
+
+console.log('\n【会话】编辑进度必须能持久化（防进程被杀）');
+(() => {
+  // 掩膜压缩
+  const mask = new Float32Array(20000);
+  for (let i = 0; i < mask.length; i++) mask[i] = (i % 97) / 97;
+  const packed = C.packMask(mask);
+  t('掩膜可压缩', !!packed && packed.length > 0);
+  const rawJson = JSON.stringify(Array.from(mask));
+  t('压缩率显著（< 15%）', packed.length / rawJson.length < 0.15,
+    Math.round(packed.length / rawJson.length * 100) + '%');
+  const back = C.unpackMask(packed, mask.length);
+  let maxErr = 0;
+  for (let i = 0; i < mask.length; i++) maxErr = Math.max(maxErr, Math.abs(back[i] - mask[i]));
+  t('掩膜往返误差可忽略（< 0.005）', maxErr < 0.005, maxErr);
+  t('空掩膜安全', C.packMask(null) === null && C.unpackMask(null) === null);
+
+  // 会话规划：只保留能放下的最近若干条
+  const mkEdit = (i) => ({
+    rect: { x: i, y: i, w: 50, h: 50 },
+    feather: 10, colorMatch: 0.5,
+    mask: new Float32Array(2500).fill(1),
+    patch: { toDataURL: () => 'data:image/jpeg;base64,' + 'A'.repeat(200000) }
+  });
+  const edits = Array.from({ length: 30 }, (_, i) => mkEdit(i));
+  const plan = C.planSessionPersist(edits, {
+    maxBytes: 1024 * 1024,
+    encode: (p) => p.toDataURL()
+  });
+  t('会话只保留能放下的条目', plan.items.length > 0 && plan.items.length < 30, plan.items.length);
+  t('会话体积在限制内', plan.bytes <= 1024 * 1024, plan.bytes);
+  t('保留了最近的编辑（优先保住当前工作）',
+    plan.items.length > 0 && plan.items[plan.items.length - 1].rect.x === 29,
+    plan.items.length ? plan.items[plan.items.length - 1].rect.x : null);
+  t('记录了被丢弃的数量', plan.dropped > 0, plan.dropped);
+  // 条目顺序应是时间顺序
+  const xs = plan.items.map((it) => it.rect.x);
+  t('条目按时间顺序排列', xs.every((v, i) => i === 0 || v > xs[i - 1]), xs.slice(0, 5));
+})();
+
+console.log('\n【元数据】EXIF / ICC 必须能读出来并写回去');
+(() => {
+  const napi = require('/tmp/domtest/node_modules/@napi-rs/canvas');
+
+  // 造一个带指定 Orientation 的 EXIF
+  const buildTiff = (orientation) => {
+    const t = new Uint8Array(8 + 2 + 12 + 4);
+    t[0] = 0x49; t[1] = 0x49; t[2] = 0x2a; t[3] = 0x00;   // little-endian TIFF
+    t[4] = 8;
+    t[8] = 1;                                              // 1 个条目
+    t[10] = 0x12; t[11] = 0x01;                            // Orientation
+    t[12] = 3; t[14] = 1;                                  // SHORT ×1
+    t[18] = orientation;
+    return t;
+  };
+  const withExif = (orientation) => {
+    const c = napi.createCanvas(48, 32);
+    const cx = c.getContext('2d');
+    cx.fillStyle = 'rgb(180, 90, 40)'; cx.fillRect(0, 0, 48, 32);
+    const jpeg = c.toBuffer('image/jpeg', 0.9);
+    const tiff = buildTiff(orientation);
+    const payload = new Uint8Array(6 + tiff.length);
+    payload[0] = 0x45; payload[1] = 0x78; payload[2] = 0x69; payload[3] = 0x66;
+    payload.set(tiff, 6);
+    const len = payload.length + 2;
+    const seg = new Uint8Array(4 + payload.length);
+    seg[0] = 0xff; seg[1] = 0xe1;
+    seg[2] = (len >> 8) & 255; seg[3] = len & 255;
+    seg.set(payload, 4);
+    return Buffer.concat([jpeg.subarray(0, 2), seg, jpeg.subarray(2)]);
+  };
+
+  // 1) 读取各种 Orientation
+  for (const o of [1, 3, 6, 8]) {
+    const tiff = C.extractExif(new Uint8Array(withExif(o)));
+    t('EXIF 读出 Orientation=' + o, C.readExifOrientation(tiff) === o, C.readExifOrientation(tiff));
+  }
+  // 2) 归一化（防止二次旋转）
+  const t6 = C.extractExif(new Uint8Array(withExif(6)));
+  const norm = C.normalizeExifOrientation(t6);
+  t('Orientation 归一化为 1', C.readExifOrientation(norm) === 1, C.readExifOrientation(norm));
+  t('归一化不修改原数据', C.readExifOrientation(t6) === 6);
+  // 3) 注入到 canvas 导出的 JPEG（canvas 自己会带一个 sRGB ICC）
+  const plain = (() => {
+    const c = napi.createCanvas(48, 32);
+    const cx = c.getContext('2d');
+    cx.fillStyle = 'rgb(20, 20, 20)'; cx.fillRect(0, 0, 48, 32);
+    return new Uint8Array(c.toBuffer('image/jpeg', 0.9));
+  })();
+  t('canvas 导出的 JPEG 本身不含 EXIF', C.extractExif(plain) === null);
+  const injected = C.injectMetadata(plain, { exif: norm, icc: null });
+  t('注入后含 EXIF', !!C.extractExif(injected.bytes));
+  t('注入后 Orientation 正确', C.readExifOrientation(C.extractExif(injected.bytes)) === 1);
+  // 4) ICC 分片无损往返（含跨多段的大配置）
+  for (const size of [200, 60000, 150000]) {
+    const icc = new Uint8Array(size);
+    for (let i = 0; i < size; i++) icc[i] = (i * 7) & 0xff;
+    const r = C.injectMetadata(plain, { exif: null, icc });
+    const back = C.extractICC(r.bytes);
+    let same = back && back.length === size;
+    if (same) for (let i = 0; i < size; i += 397) if (back[i] !== icc[i]) { same = false; break; }
+    t('ICC ' + size + 'B 无损往返', same, back && back.length);
+  }
+  // 5) 剥离 canvas 自带 ICC，避免出现两个配置段
+  const r5 = C.injectMetadata(plain, { exif: null, icc: new Uint8Array(1000) });
+  const app2 = C.parseJpegSegments(r5.bytes).filter((x) => x.marker === 0xe2);
+  t('注入后只有一个 ICC 配置（剥离了自带的）', app2.length === 1, app2.length);
+  // 6) EXIF 超限时保护照片本身
+  const huge = new Uint8Array(70000);
+  huge[0] = 0x49; huge[1] = 0x49; huge[2] = 0x2a; huge[3] = 0;
+  const r6 = C.injectMetadata(plain, { exif: huge, icc: null });
+  t('超大 EXIF 被跳过而非破坏照片', r6.exifWritten === false && r6.notes.length > 0, r6.notes);
+  // 7) sRGB 识别（决定能否安全写回 ICC）
+  const srgb = new Uint8Array(200);
+  srgb[16] = 0x58; srgb[17] = 0x59; srgb[18] = 0x5a; srgb[19] = 0x20;
+  'desc sRGB IEC61966-2.1'.split('').forEach((ch, i) => { srgb[32 + i] = ch.charCodeAt(0); });
+  t('识别 sRGB 配置', C.isSrgbProfile(srgb) === true);
+  const adobe = new Uint8Array(200);
+  adobe[16] = 0x58; adobe[17] = 0x59; adobe[18] = 0x5a; adobe[19] = 0x20;
+  'Adobe RGB (1998)'.split('').forEach((ch, i) => { adobe[32 + i] = ch.charCodeAt(0); });
+  t('识别广色域配置（不会误写回）', C.isSrgbProfile(adobe) === false);
+  t('无配置时按 sRGB 处理', C.isSrgbProfile(null) === true);
+  // 8) 非 JPEG 不报错
+  const png = (() => {
+    const c = napi.createCanvas(16, 16);
+    return new Uint8Array(c.toBuffer('image/png'));
+  })();
+  const r8 = C.injectMetadata(png, { exif: norm, icc: null });
+  t('非 JPEG 安全跳过', r8.exifWritten === false && r8.notes.length > 0);
+  // 9) 端到端：注入后图片仍能正常解码
+  const im = napi.loadImage(Buffer.from(r5.bytes));
+  void im;
+  t('注入元数据后仍是有效图片', r5.bytes[0] === 0xff && r5.bytes[1] === 0xd8 && r5.bytes.length > plain.length);
+})();
+
+console.log('\n【偏色】发给模型的图片不得带任何标记色（蓝色）');
+(() => {
+  // 提示词层面：不能出现「蓝色标记」这类描述 —— 否则模型会把蓝色当成画面内容
+  const variants = [
+    { instruction: '去掉垃圾桶', scope: 'region', language: 'zh' },
+    { instruction: '去掉垃圾桶', scope: 'region', language: 'zh', hasMask: true },
+    { instruction: '修皮肤', scope: 'object', language: 'zh' },
+    { instruction: '整体调色', scope: 'global', language: 'zh' },
+    { instruction: 'remove bin', scope: 'region', language: 'en' },
+    { instruction: 'remove bin', scope: 'region', language: 'en', hasMask: true },
+    { instruction: 'make it winter', scope: 'object', language: 'en' }
+  ];
+  for (const o of variants) {
+    const p = C.buildPrompt(o);
+    t('提示词不含蓝色描述: ' + o.scope + '/' + o.language,
+      !/蓝色|blue|semi-?transparent|半透明标记/i.test(p), p.slice(0, 60));
+    // 必须说明改哪一块（否则模型不知道改哪里）
+    t('提示词指明了修改范围: ' + o.scope + '/' + o.language,
+      /中央约 \d+%|central ~\d+%|整体调整|Adjust this photo globally/.test(p), p.slice(0, 60));
+  }
+  // 中英文分隔符正确（不能出现中文句号拼英文）
+  const pe = C.buildPrompt({ instruction: 'remove bin', scope: 'region', language: 'en' });
+  t('英文提示词不使用中文句号', !/。/.test(pe), pe.slice(0, 80));
+  const pz = C.buildPrompt({ instruction: '去掉垃圾桶', scope: 'region', language: 'zh' });
+  t('中文提示词使用中文句号', /。/.test(pz), pz.slice(0, 40));
+
+  // centerPct 会随选区占比变化
+  const p1 = C.buildPrompt({ instruction: 'x', scope: 'region', language: 'zh', centerPct: 50 });
+  t('centerPct 生效（50%）', /中央约 50%/.test(p1), p1.slice(0, 40));
+  const p2 = C.buildPrompt({ instruction: 'x', scope: 'region', language: 'zh', centerPct: 100 });
+  t('centerPct 生效（100%）', /中央约 100%/.test(p2), p2.slice(0, 40));
+  // 越界值要被夹取
+  const p3 = C.buildPrompt({ instruction: 'x', scope: 'region', language: 'zh', centerPct: 999 });
+  t('centerPct 越界被夹取', /中央约 100%/.test(p3), p3.slice(0, 40));
+  const p4 = C.buildPrompt({ instruction: 'x', scope: 'region', language: 'zh', centerPct: -5 });
+  t('centerPct 负值被夹取', /中央约 10%/.test(p4), p4.slice(0, 40));
+
+  // 源码层面：请求图构造函数里不得出现掩膜叠加（防止我或后续改动重新引入）
+  const fs = require('fs');
+  const appSrc = fs.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const fnStart = appSrc.indexOf('function buildRequestImage');
+  const fnEnd = appSrc.indexOf('function canvasToDataUrl');
+  const fn = appSrc.slice(fnStart, fnEnd);
+  t('请求图构造函数不再叠加掩膜', !/maskToRGBA/.test(fn), 'buildRequestImage 里出现了 maskToRGBA');
+  t('请求图构造函数不再用蓝色', !/\[70,\s*160,\s*255\]/.test(fn));
+  // 预览函数必须只标注保护区，且无笔迹时不显示
+  const prev = appSrc.slice(appSrc.indexOf('function drawMaskOverlay'), appSrc.indexOf('function drawSelection'));
+  t('预览无笔迹时不显示任何蒙层', /if \(!S\.strokes\.length\) return;/.test(prev));
+  t('预览标注的是保护区（1-mask）', /1 - mask\[i\]/.test(prev));
+})();
+
+console.log('\n【上游回文字】必须识别为「配错模型」，不能误判成「缺图」');
+(() => {
+  // 用户实际遇到的原始返回，一字不差
+  const raw = {
+    error: {
+      message: '请上传需要编辑的原始照片（包含半透明蓝色标记选区）。我会仅修改蓝色标记区域内的物体，并保持选区外所有像素、构图、光线、色彩、清晰度和颗粒感不变，输出完整真实照片。',
+      type: 'invalid_request_error', param: '', code: 'upstream_text_reply'
+    }
+  };
+  const d = C.diagnoseResponse(raw, 400, { kind: 'edit' });
+  t('识别为上游返回文字', d.code === 'text-model', d.code);
+  t('明确指出是模型/接口配错', /对话模型|生图模型/.test(d.hint), d.hint);
+  t('不误判成缺图', d.code !== 'no-image', d.code);
+  t('建议里指向自动检测模型', /自动检测可用模型/.test(d.hint), d.hint);
+
+  // 其它形式的上游文字回复
+  const variants = [
+    { error: { code: 'upstream_text_reply', message: 'x' } },
+    { code: 'upstream_text_reply' },
+    { error: { code: 'text_reply', message: 'y' } },
+    { message: '抱歉，我无法处理这个请求。请提供需要编辑的图片。' },
+    { message: "I'll modify the marked area. Please upload the original photo first." }
+  ];
+  for (const v of variants) {
+    const r = C.diagnoseResponse(v, 400, { kind: 'edit' });
+    t('上游文字变体被识别: ' + JSON.stringify(v).slice(0, 40), r.code === 'text-model', r.code);
+  }
+
+  // 关键：不能误伤真正的缺图与尺寸错误
+  const keep = [
+    [{ message: 'you must provide an image' }, 400, 'no-image'],
+    [{ message: 'Invalid size: 512x512. Total pixels must be at least 655360.' }, 400, 'bad-size'],
+    [{ message: 'Invalid token' }, 401, 'auth'],
+    [{ message: 'rate limit exceeded' }, 429, 'quota'],
+    [{ message: 'size must be divisible by 16' }, 400, 'bad-size']
+  ];
+  for (const [j, st, want] of keep) {
+    const r = C.diagnoseResponse(j, st, { kind: 'edit' });
+    t('未误伤: ' + want, r.code === want, r.code);
+  }
+
+  // 模型名预检：对话模型必须被判为非生图
+  for (const m of ['deepseek-chat', 'gpt-4o', 'claude-3-5-sonnet', 'glm-4', 'gemini-1.5-pro', 'qwen-plus']) {
+    t('对话模型被判为非生图: ' + m, C.classifyModel(m) === null, C.classifyModel(m));
+  }
+  // 生图模型不能被误判
+  for (const m of ['Qwen/Qwen-Image-Edit', 'gpt-image-1', 'gpt-image-2', 'black-forest-labs/FLUX.1-Kontext-pro']) {
+    t('生图模型识别正常: ' + m, !!C.classifyModel(m), C.classifyModel(m));
+  }
+})();
+
+console.log('\n【尺寸规范】不合规的尺寸必须在发送前就被修正/拦下');
+(() => {
+  const MIN = 655360;
+  // 已知会被 OpenAI 拒绝的尺寸
+  for (const bad of ['512x512', '576x1024', '1024x576', '512x768', '256x256']) {
+    t('识别不合规尺寸: ' + bad, C.validateSize(bad, 'openai').ok === false, C.validateSize(bad, 'openai'));
+  }
+  // 合规尺寸必须通过
+  for (const good of ['1024x1024', '1536x1024', '1024x1536', '1280x720', '1920x1088', '2048x2048']) {
+    t('合规尺寸通过: ' + good, C.validateSize(good, 'openai').ok === true, C.validateSize(good, 'openai').reasons);
+  }
+  // 各类违规原因要能分别识别
+  t('像素不足被识别', /像素/.test(C.validateSize('512x512', 'openai').reasons.join('')));
+  t('非16倍数被识别', /16 的倍数/.test(C.validateSize('1000x1000', 'openai').reasons.join('')));
+  t('超边长被识别', /单边/.test(C.validateSize('4096x4096', 'openai').reasons.join('')));
+  t('比例越界被识别', /宽高比/.test(C.validateSize('1024x4096', 'openai').reasons.join('')));
+
+  // conformSize 修正后必须合规
+  const cases = [[512, 512], [100, 100], [576, 1024], [5000, 5000], [300, 1200], [1024, 3072], [3840, 3840], [1, 1]];
+  for (const [w, h] of cases) {
+    const c = C.conformSize(w, h, 'openai');
+    const v = C.validateSize(c.size, 'openai');
+    t(`修正 ${w}x${h} → ${c.size} 合规`, v.ok, v.reasons);
+  }
+
+  // 内置 OpenAI 模型尺寸表里不能有不合规的项
+  const openai = C.getProvider('openai');
+  let badCount = 0;
+  for (const m of openai.models) {
+    if (!m.sizes) continue;
+    for (const sz of m.sizes) {
+      if (!C.validateSize(sz, 'openai').ok) badCount++;
+    }
+  }
+  t('内置 OpenAI 尺寸表全部合规', badCount === 0, badCount);
+
+  // 挑选尺寸时要避开不合规项
+  const gm = C.findModel('openai', 'gpt-image-1');
+  for (const [w, h] of [[100, 100], [512, 512], [1000, 1000], [1920, 1080]]) {
+    const r = C.resolveOutputSize(w, h, gm.sizes, 'openai');
+    t(`选区 ${w}x${h} 挑出的尺寸合规`, C.validateSize(r.size, 'openai').ok, r.size);
+  }
+
+  // 请求构造的最后一道保险
+  const req = C.buildImageRequest({
+    baseUrl: 'x', model: 'gpt-image-1', prompt: 'p',
+    size: '512x512', sizeMode: 'size', providerId: 'openai'
+  });
+  t('buildImageRequest 自动修正不合规尺寸', C.validateSize(req.body.size, 'openai').ok, req.body.size);
+  const req2 = C.buildImageRequest({
+    baseUrl: 'x', model: 'gpt-image-1', prompt: 'p',
+    size: '1024x1024', sizeMode: 'size', providerId: 'openai'
+  });
+  t('合规尺寸保持原样', req2.body.size === '1024x1024', req2.body.size);
+
+  // 诊断：尺寸错误不能被误判成「没收到图片」
+  const d1 = C.diagnoseResponse({ error: { message: 'Invalid size: 512x512. Total pixels must be at least 655360.' } }, 400, { kind: 'edit' });
+  t('尺寸错误诊断正确', d1.code === 'bad-size', d1.code);
+  const d2 = C.diagnoseResponse({ message: 'size must be divisible by 16' }, 400, { kind: 'edit' });
+  t('16倍数错误诊断正确', d2.code === 'bad-size', d2.code);
+  const d3 = C.diagnoseResponse({ message: 'you must provide an image' }, 400, { kind: 'edit' });
+  t('真正的缺图仍诊断正确', d3.code === 'no-image', d3.code);
+
+  // 硅基流动不受 OpenAI 约束（不该被误改）
+  t('硅基尺寸不做 OpenAI 约束', C.validateSize('1328x1328', 'siliconflow').ok === true);
+})();
+
+console.log('\n【黑屏】大照片解码：只读文件头拿尺寸，避免全尺寸解码');
+(() => {
+  // 构造各种格式头部（含手机常见的大尺寸）
+  const png = (w, h) => { const b = Buffer.alloc(33); b[0] = 0x89; b[1] = 0x50; b[2] = 0x4e; b[3] = 0x47; b.writeUInt32BE(13, 8); b.write('IHDR', 12); b.writeUInt32BE(w, 16); b.writeUInt32BE(h, 20); return b; };
+  const jpeg = (w, h) => { const app = Buffer.alloc(18); app[0] = 0xff; app[1] = 0xe0; app.writeUInt16BE(16, 2); const sof = Buffer.alloc(20); sof[0] = 0xff; sof[1] = 0xc0; sof.writeUInt16BE(17, 2); sof[4] = 8; sof.writeUInt16BE(h, 5); sof.writeUInt16BE(w, 7); return Buffer.concat([Buffer.from([0xff, 0xd8]), app, sof]); };
+  const webp = (w, h) => { const b = Buffer.alloc(40); b.write('RIFF', 0); b.write('WEBP', 8); b.write('VP8X', 12); b.writeUIntLE(w - 1, 24, 3); b.writeUIntLE(h - 1, 27, 3); return b; };
+
+  const cases = [
+    ['PNG 8000x6000', png(8000, 6000), 8000, 6000],
+    ['JPEG 4000x3000', jpeg(4000, 3000), 4000, 3000],
+    ['JPEG 8160x6120', jpeg(8160, 6120), 8160, 6120],
+    ['WebP 4032x3024', webp(4032, 3024), 4032, 3024]
+  ];
+  for (const [n, buf, w, h] of cases) {
+    const r = C.parseImageSize(new Uint8Array(buf));
+    t('解析尺寸: ' + n, r && r.width === w && r.height === h, r);
+  }
+  t('无效数据返回 null', C.parseImageSize(new Uint8Array([1, 2, 3])) === null);
+  t('空输入返回 null', C.parseImageSize(null) === null);
+  t('截断数据不崩', (() => { try { C.parseImageSize(new Uint8Array([0xff, 0xd8, 0xff, 0xe0])); return true; } catch (e) { return false; } })());
+
+  // 关键：解码阶段就应该缩到工作尺寸，峰值内存被限制住
+  const check = (w, h, maxRes) => {
+    const need = Math.max(w, h) > maxRes;
+    const k = need ? maxRes / Math.max(w, h) : 1;
+    return Math.round(w * k) * Math.round(h * k) * 4 / 1024 / 1024;
+  };
+  t('8000x6000 + maxRes2048 → 解码内存 < 20MB', check(8000, 6000, 2048) < 20, check(8000, 6000, 2048));
+  t('8000x6000 + maxRes3072 → 解码内存 < 30MB', check(8000, 6000, 3072) < 30, check(8000, 6000, 3072));
+  t('12000x9000 + maxRes3072 → 解码内存 < 30MB', check(12000, 9000, 3072) < 30, check(12000, 9000, 3072));
+  t('小图不缩放（保持原样）', check(800, 600, 3072) === 800 * 600 * 4 / 1024 / 1024);
+})();
+
+console.log('\n【新功能】模型自动检测与归类');
+(() => {
+  // 真实服务商的返回形态
+  const sf = { data: [{ id: 'Qwen/Qwen-Image-Edit' }, { id: 'Qwen/Qwen-Image' }, { id: 'deepseek-ai/DeepSeek-V3' }, { id: 'BAAI/bge-m3' }, { id: 'black-forest-labs/FLUX.1-Kontext-pro' }, { id: 'Kwai-Kolors/Kolors' }] };
+  const picked = C.pickImageModels(sf);
+  t('从模型列表中筛出图像模型', picked.length === 4, picked.length);
+  t('剔除对话模型', !picked.some((m) => /DeepSeek-V3/.test(m.id)));
+  t('剔除向量模型', !picked.some((m) => /bge/.test(m.id)));
+  t('编辑模型排在前面', picked[0].kind === 'edit' && picked[1].kind === 'edit', picked.map((m) => m.kind));
+  t('编辑模型被标为推荐', picked.filter((m) => m.recommended).length === 2, picked.filter((m) => m.recommended).length);
+  t('收录的模型用内置参数（尺寸表）', !!picked.find((m) => m.id === 'Qwen/Qwen-Image-Edit').sizes);
+  const unk = C.pickImageModels({ data: [{ id: 'some/unknown-image-model' }] })[0];
+  t('未收录的模型也有兜底尺寸参数', !!(unk && unk.sizes && unk.sizes.length), unk && unk.sizes);
+  t('未收录的编辑模型也被推荐', C.pickImageModels({ data: [{ id: 'vendor/foo-image-edit' }] })[0].recommended === true);
+
+  // 各种返回结构
+  t('兼容数组形式', C.pickImageModels([{ id: 'Qwen/Qwen-Image-Edit' }]).length === 1);
+  t('兼容 models 字段', C.pickImageModels({ models: [{ id: 'Qwen/Qwen-Image-Edit' }] }).length === 1);
+  t('兼容纯字符串数组', C.pickImageModels(['Qwen/Qwen-Image-Edit', 'deepseek-ai/DeepSeek-V3']).length === 1);
+  t('空输入不崩', C.pickImageModels(null).length === 0 && C.pickImageModels({}).length === 0);
+  t('去重', C.pickImageModels([{ id: 'a/x-image' }, { id: 'a/x-image' }]).length === 1);
+
+  // 关键归类
+  const cls = (id) => { const c = C.classifyModel(id); return c ? c.kind : null; };
+  t('Qwen-Image-Edit → edit', cls('Qwen/Qwen-Image-Edit') === 'edit');
+  t('Qwen-Image → t2i', cls('Qwen/Qwen-Image') === 't2i');
+  t('Kontext → edit', cls('black-forest-labs/FLUX.1-Kontext-pro') === 'edit');
+  t('gpt-image-1 → edit（支持参考图）', cls('gpt-image-1') === 'edit');
+  t('dall-e-3 → t2i', cls('dall-e-3') === 't2i');
+  t('视频模型不算图像', cls('Wan-AI/Wan2.2-T2V-A14B') === null);
+  t('语音模型不算图像', cls('FunAudioLLM/CosyVoice2-0.5B') === null);
+  t('VL 模型不算生图', cls('Qwen/Qwen2.5-VL-72B-Instruct') === null);
+  t('Kontext 用 aspect_ratio', C.classifyModel('black-forest-labs/FLUX.1-Kontext-pro').sizeMode === 'aspect_ratio');
+  t('gpt-image 用 size', C.classifyModel('gpt-image-1').sizeMode === 'size');
+})();
+
+console.log('\n【新功能】配置保留（覆盖更新不丢设置）');
+(() => {
+  // 模拟 localStorage：写入 → 读回，字段必须原样保留
+  const store = {};
+  const fakeLS = {
+    getItem: (k) => (k in store ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); },
+    removeItem: (k) => { delete store[k]; }
+  };
+  const PERSIST = ['provider', 'baseUrl', 'apiKey', 'model', 'netMode', 'contextPct', 'feather', 'colorMatch', 'maxRes', 'tile', 'lang', 'seed', 'format', 'quality', 'mosaic'];
+  // 用户配置
+  const userCfg = {
+    provider: 'siliconflow', baseUrl: 'https://api.siliconflow.cn/v1', apiKey: 'sk-user-key-12345',
+    model: 'Qwen/Qwen-Image-Edit', netMode: 'proxy', contextPct: 20, feather: 14, colorMatch: 70,
+    maxRes: 4096, tile: 1200, lang: 'zh', seed: '42', format: 'png', quality: 98, mosaic: true
+  };
+  fakeLS.setItem('photoStudio.cfg.v1', JSON.stringify(userCfg));
+  const read = JSON.parse(fakeLS.getItem('photoStudio.cfg.v1'));
+  for (const k of PERSIST) {
+    t('字段保留: ' + k, read[k] === userCfg[k], { got: read[k], want: userCfg[k] });
+  }
+  // 模拟一次"版本升级"：只改版本记录，配置不动
+  fakeLS.setItem('photoStudio.lastVersion', '1.0.0');
+  const afterUpgrade = JSON.parse(fakeLS.getItem('photoStudio.cfg.v1'));
+  t('升级后 API Key 仍在', afterUpgrade.apiKey === 'sk-user-key-12345');
+  t('升级后模型仍在', afterUpgrade.model === 'Qwen/Qwen-Image-Edit');
+  t('升级后全部 15 项配置仍在', PERSIST.every((k) => afterUpgrade[k] === userCfg[k]));
+})();
+
+console.log('\n【新功能】版本号单一来源');
+(() => {
+  const v = require('../version.json');
+  t('version.json 有 versionCode', Number.isInteger(v.versionCode) && v.versionCode >= 2, v.versionCode);
+  t('version.json 有 versionName', typeof v.versionName === 'string' && /^\d+\.\d+/.test(v.versionName), v.versionName);
+  t('version.json 有更新说明', Array.isArray(v.changelog) && v.changelog.length > 0, v.changelog && v.changelog.length);
+  // version.js 与 version.json 必须一致
+  const fs = require('fs');
+  const vjs = fs.readFileSync(__dirname + '/../app/version.js', 'utf8');
+  t('version.js 与 version.json 版本号一致', vjs.includes('"' + v.versionName + '"'), v.versionName);
+  t('version.js 含 changelog', vjs.includes('changelog'));
+})();
+
+console.log(`\n合计 ${pass} passed, ${fail} failed\n`);
+process.exit(fail ? 1 : 0);

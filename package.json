@@ -1,0 +1,34 @@
+{
+  "name": "photo-studio",
+  "version": "2.3.0",
+  "description": "给摄影师用的局部修图工具：框选照片任意区域交给生图模型修改，结果自动贴回原位置",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "npm run test:unit && npm run test:regression",
+    "test:unit": "node tools/core-test.js",
+    "test:regression": "node tools/regression-test.js",
+    "test:e2e": "node tools/e2e-test.js",
+    "test:all": "npm run test && npm run test:e2e",
+    "build": "bash tools/build-apk.sh",
+    "build:web": "node tools/build-single.js",
+    "serve": "node app/server.js",
+    "version:check": "node tools/bump-version.js",
+    "lint": "node tools/lint.js"
+  },
+  "keywords": [
+    "photo-editing",
+    "inpainting",
+    "image-generation",
+    "photographer",
+    "android",
+    "webview"
+  ],
+  "repository": {
+    "type": "git",
+    "url": ""
+  }
+}

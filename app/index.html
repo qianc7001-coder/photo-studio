@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#0e1014">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>修图台 · Photo Studio</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ======================= 顶栏 ======================= -->
+  <header id="topbar">
+    <button class="tb-btn" id="btn-open" title="打开照片">
+      <svg viewBox="0 0 24 24"><path d="M4 6h5l2 2h9v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z"/></svg>
+      <span>打开</span>
+    </button>
+    <div id="file-info">
+      <div id="file-name">未打开照片</div>
+      <div id="file-meta">点「打开」导入手机里的照片</div>
+    </div>
+    <button class="tb-btn icon" id="btn-undo" title="撤销" disabled>
+      <svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg>
+    </button>
+    <button class="tb-btn icon" id="btn-redo" title="重做" disabled>
+      <svg viewBox="0 0 24 24"><path d="m15 14 5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/></svg>
+    </button>
+    <button class="tb-btn icon" id="btn-save" title="导出" disabled>
+      <svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+    </button>
+    <button class="tb-btn icon" id="btn-settings" title="设置">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    </button>
+  </header>
+
+  <!-- ======================= 画布区 ======================= -->
+  <main id="stage">
+    <canvas id="cv"></canvas>
+
+    <!-- 空状态 -->
+    <div id="empty">
+      <div class="empty-card">
+        <svg class="empty-ico" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
+        <h2>导入一张照片开始修图</h2>
+        <p>框选任意位置和大小 → 写一句要求 → 生图模型改完自动贴回原处</p>
+        <button class="primary" id="btn-pick">选择照片</button>
+        <button class="ghost" id="btn-demo">用示例图试试</button>
+      </div>
+    </div>
+
+    <!-- 顶部提示条 -->
+    <div id="toast" hidden></div>
+
+    <!-- 生成中 -->
+    <div id="busy" hidden>
+      <div class="busy-card">
+        <div class="spinner"></div>
+        <div class="busy-title" id="busy-title">正在生成…</div>
+        <div class="busy-sub" id="busy-sub"></div>
+        <button class="ghost small" id="btn-cancel">取消</button>
+      </div>
+    </div>
+
+    <!-- 悬浮控件 -->
+    <div id="hud" hidden>
+      <div class="hud-group">
+        <button class="hud-btn" id="zoom-out" title="缩小">−</button>
+        <button class="hud-btn wide" id="zoom-label" title="适应窗口">100%</button>
+        <button class="hud-btn" id="zoom-in" title="放大">＋</button>
+      </div>
+      <div class="hud-group" id="sel-info"></div>
+    </div>
+
+    <!-- 升级提示（常驻，直到用户关闭） -->
+    <div id="upgrade-bar" hidden></div>
+
+    <!-- 生成失败说明 -->
+    <div id="gen-error" hidden></div>
+
+    <!-- 对比预览 -->
+    <div id="compare" hidden>
+      <canvas id="cmp-cv"></canvas>
+      <div class="cmp-handle" id="cmp-handle"><span></span></div>
+      <div class="cmp-tag left">修改前</div>
+      <div class="cmp-tag right">修改后</div>
+      <div class="cmp-actions">
+        <button class="ghost" id="cmp-discard">放弃</button>
+        <button class="ghost" id="cmp-retry">重试</button>
+        <button class="primary" id="cmp-apply">应用</button>
+      </div>
+      <div class="cmp-hint">拖动中间竖线对比 · 双击画面放大查看</div>
+    </div>
+  </main>
+
+  <!-- ======================= 底栏 ======================= -->
+  <footer id="bottombar">
+    <!-- 工具行 -->
+    <div id="tools">
+      <button class="tool active" data-mode="select">
+        <svg viewBox="0 0 24 24"><path d="M3 3h6M3 3v6M21 21h-6M21 21v-6M21 3h-6M21 3v6M3 21h6M3 21v-6"/></svg>
+        <span>框选</span>
+      </button>
+      <button class="tool" data-mode="brush">
+        <svg viewBox="0 0 24 24"><path d="M9.5 14.5 3 21"/><path d="m14 3 7 7-8.5 8.5a2 2 0 0 1-2.8 0l-3.2-3.2a2 2 0 0 1 0-2.8z"/></svg>
+        <span>画笔</span>
+      </button>
+      <button class="tool" data-mode="pan">
+        <svg viewBox="0 0 24 24"><path d="M18 11V6a2 2 0 0 0-4 0v5"/><path d="M14 10V4a2 2 0 0 0-4 0v6"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2a8 8 0 0 1-8-8"/></svg>
+        <span>平移</span>
+      </button>
+      <button class="tool" id="btn-fit">
+        <svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M16 21h3a2 2 0 0 0 2-2v-3M8 21H5a2 2 0 0 1-2-2v-3"/></svg>
+        <span>适应</span>
+      </button>
+      <button class="tool" id="btn-reset-sel">
+        <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 12h16M12 4v16"/></svg>
+        <span>重置框</span>
+      </button>
+      <button class="tool" id="btn-layers">
+        <svg viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/></svg>
+        <span>修改记录</span>
+        <b id="layer-count" hidden>0</b>
+      </button>
+    </div>
+
+    <!-- 画笔参数 -->
+    <div id="brush-bar" hidden>
+      <span class="lbl">笔刷</span>
+      <input type="range" id="brush-size" min="8" max="400" value="80">
+      <span class="val" id="brush-size-val">80</span>
+      <button class="chip on" id="brush-erase" aria-pressed="true">不改这里</button>
+      <button class="chip" id="brush-restore">改这里</button>
+      <button class="chip" id="brush-clear">全部重来</button>
+    </div>
+    <div id="brush-tip" hidden>默认整块选区都会修改。涂抹过的地方会标成灰色，表示「这里不要动」。</div>
+
+    <!-- 选区参数 -->
+    <div id="sel-bar">
+      <span class="lbl">比例</span>
+      <div class="chips" id="ratio-chips"></div>
+    </div>
+
+    <!-- 提示词面板 -->
+    <div id="prompt-panel">
+      <div class="row">
+        <select id="style-select" title="修图预设"></select>
+        <select id="scope-select" title="修改范围"></select>
+      </div>
+      <div class="row">
+        <textarea id="prompt" rows="2" placeholder="描述要怎么改，例如：把这块背景换成傍晚的海边，光线自然"></textarea>
+      </div>
+      <div class="row wrap" id="quick-chips"></div>
+      <div class="row">
+        <button class="model-btn" id="btn-model">
+          <span class="dot" id="model-dot"></span>
+          <span id="model-label">未配置模型</span>
+          <svg viewBox="0 0 24 24" class="chev"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <button class="primary grow" id="btn-generate" disabled>
+          <svg viewBox="0 0 24 24"><path d="m12 3 1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15.5 19.8 18l2.2.8-2.2.8-.8 2.4-.8-2.4-2.2-.8 2.2-.8z"/></svg>
+          <span id="gen-label">生成并贴回</span>
+        </button>
+      </div>
+      <div class="row tiny" id="gen-hint">先框选一块区域，再点生成</div>
+    </div>
+  </footer>
+</div>
+
+<!-- ======================= 修改记录（图层）面板 ======================= -->
+<div id="layers" class="sheet" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-body">
+    <div class="sheet-head">
+      <h3>修改记录</h3>
+      <button class="tb-btn icon" data-close>
+        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="sheet-scroll">
+      <div class="tip" style="margin:0 0 12px">
+        这里记录你对这张照片做过的每一处修改。<b>调整下面的参数不会重新调用模型</b>，
+        可以随时减弱效果、临时关闭对比、或删掉某一次修改。
+      </div>
+      <div id="layer-list"></div>
+      <div id="layer-empty" class="tip" style="text-align:center;padding:20px 0">
+        还没有任何修改。框选一块区域并生成后，这里会出现记录。
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= 设置面板 ======================= -->
+<div id="settings" class="sheet" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-body">
+    <div class="sheet-head">
+      <h3>设置</h3>
+      <button class="tb-btn icon" data-close>
+        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="sheet-scroll">
+
+      <section>
+        <h4>生图模型</h4>
+        <label class="field">
+          <span>服务商</span>
+          <select id="set-provider"></select>
+        </label>
+        <label class="field">
+          <span>接口地址 (Base URL)</span>
+          <input type="url" id="set-baseurl" placeholder="https://api.siliconflow.cn/v1" autocapitalize="off" autocorrect="off" spellcheck="false">
+        </label>
+        <label class="field">
+          <span>API Key</span>
+          <input type="password" id="set-apikey" placeholder="sk-..." autocapitalize="off" autocorrect="off" spellcheck="false">
+        </label>
+        <label class="field">
+          <span>模型</span>
+          <input type="text" id="set-model" list="model-list" placeholder="Qwen/Qwen-Image-Edit" autocapitalize="off" autocorrect="off" spellcheck="false">
+          <datalist id="model-list"></datalist>
+        </label>
+        <div class="field-row">
+          <button class="ghost small" id="btn-test">测试连接</button>
+          <button class="ghost small" id="btn-detect">自动检测可用模型</button>
+          <span class="status" id="test-status"></span>
+        </div>
+
+        <!-- 自动检测结果 -->
+        <div id="detect-box" hidden>
+          <div class="detect-head">
+            <span id="detect-summary"></span>
+            <button class="chip" id="detect-close">收起</button>
+          </div>
+          <div id="detect-list" class="detect-list"></div>
+          <div class="tip">点任意一项即可选用。标「可编辑」的模型支持参考原图做局部修改，是本应用的首选。</div>
+        </div>
+
+        <div class="tip" id="provider-tip"></div>
+      </section>
+
+      <section>
+        <h4>网络</h4>
+        <label class="field">
+          <span>请求方式</span>
+          <select id="set-netmode">
+            <option value="auto">自动（优先本地代理，失败则直连）</option>
+            <option value="proxy">只用本地代理（推荐，无跨域问题）</option>
+            <option value="direct">只用浏览器直连</option>
+          </select>
+        </label>
+        <div class="tip" id="net-tip"></div>
+      </section>
+
+      <section>
+        <h4>贴回质量</h4>
+        <label class="field">
+          <span>上下文外扩 <b id="v-ctx">12%</b> <i>让模型看到选区周边的环境</i></span>
+          <input type="range" id="set-ctx" min="0" max="60" value="12">
+        </label>
+        <label class="field">
+          <span>边缘羽化 <b id="v-feather">10 px</b> <i>消除拼接硬边</i></span>
+          <input type="range" id="set-feather" min="0" max="60" value="10">
+        </label>
+        <label class="field">
+          <span>接缝色彩匹配 <b id="v-cm">50%</b> <i>把生成结果的整体色调对齐原图</i></span>
+          <input type="range" id="set-cm" min="0" max="100" value="50">
+        </label>
+        <label class="field">
+          <span>工作分辨率上限</span>
+          <select id="set-maxres">
+            <option value="2048">2048 px（省内存）</option>
+            <option value="3072" selected>3072 px（推荐）</option>
+            <option value="4096">4096 px（更清晰）</option>
+            <option value="0">不缩放（原始尺寸）</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>大选区自动分块 <b id="v-tile">1400 px</b> <i>选区过大时切成多块分别生成</i></span>
+          <input type="range" id="set-tile" min="0" max="2000" step="100" value="1400">
+        </label>
+        <label class="switch" style="margin-bottom:12px">
+          <input type="checkbox" id="set-upscale" checked>
+          <span>小选区自动放大后发送</span>
+        </label>
+        <label class="field">
+          <span>编辑历史内存上限 <b id="v-mem">192 MB</b> <i>超出时较早的编辑会降采样保存，仍超出则丢弃最早的</i></span>
+          <input type="range" id="set-mem" min="64" max="512" step="32" value="192">
+        </label>
+        <label class="switch" style="margin-bottom:12px">
+          <input type="checkbox" id="set-autosave" checked>
+          <span>自动保存编辑进度（应用被系统回收后可恢复）</span>
+        </label>
+        <div class="tip">部分接口对输入图有最小尺寸要求（如总像素不少于 0.66MP）。
+          开启后，框选区域太小时会先放大到合规尺寸再发送，贴回时按原分辨率还原。
+          若你的接口没有此限制、或发现放大后画质下降，可以关掉。</div>
+      </section>
+
+      <section>
+        <h4>成本预估</h4>
+        <label class="field">
+          <span>单价（美元/张） <i>留空则使用内置价格表；填了就以你填的为准</i></span>
+          <input type="number" id="set-price" placeholder="例如 0.04" min="0" step="0.001">
+        </label>
+        <label class="field">
+          <span>汇率（1 美元 = ? 元） <i>仅用于显示人民币参考价</i></span>
+          <input type="number" id="set-usdcny" placeholder="7.1" min="1" max="20" step="0.1">
+        </label>
+        <div class="field-row">
+          <button class="ghost small" id="btn-reset-spend">重置已花统计</button>
+          <span class="status" id="spend-status"></span>
+        </div>
+        <div class="tip" id="price-tip"></div>
+      </section>
+
+      <section>
+        <h4>生成参数</h4>
+        <label class="field">
+          <span>提示词语言</span>
+          <select id="set-lang">
+            <option value="auto">自动跟随输入</option>
+            <option value="zh">中文</option>
+            <option value="en">English</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>随机种子 <i>留空为随机</i></span>
+          <input type="number" id="set-seed" placeholder="留空" min="0" max="9999999999">
+        </label>
+        <label class="field">
+          <span>导出预设</span>
+          <select id="set-preset"></select>
+          <i id="preset-desc"></i>
+        </label>
+        <div id="custom-export" hidden>
+          <label class="field">
+            <span>导出格式</span>
+            <select id="set-format">
+              <option value="jpeg">JPEG（体积小）</option>
+              <option value="png">PNG（无损）</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>JPEG 质量 <b id="v-quality">95%</b></span>
+            <input type="range" id="set-quality" min="70" max="100" value="95">
+          </label>
+        </div>
+      </section>
+
+      <section>
+        <h4>隐私</h4>
+        <label class="switch">
+          <input type="checkbox" id="set-mosaic">
+          <span>发送前对选区外的无关区域打码</span>
+        </label>
+        <div class="tip">照片只会发送到你自己配置的接口地址，本应用不做任何上传。</div>
+      </section>
+
+      <section>
+        <button class="ghost" id="btn-whatsnew" style="width:100%;margin-bottom:10px">查看本次更新内容</button>
+        <button class="danger" id="btn-clear">清空所有本地数据</button>
+        <div class="tip" id="about"></div>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<input type="file" id="file-input" accept="image/*" hidden>
+
+<script src="version.js"></script>
+<script src="core.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
