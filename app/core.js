@@ -383,6 +383,34 @@
     const strength = useCM ? clamp01(cm.strength) : 0;
     const customMask = opts.mask || null;
 
+    // ---- 无缝融合：把生成块对齐到周围环境 ----
+    // 校正量随「离接缝的距离」衰减，但不是衰减到 0：
+    //   贴边处 100% 校正（否则必然出现色差/亮度台阶）
+    //   中心处保留一部分（默认 35%）——色偏是模型带来的瑕疵，不是用户的意图，
+    //   所以中心也要压一部分；但压太多会把用户想要的改动一起抹掉。
+    const fus = opts.fusion || null;
+    const useFusion = !!(fus && fus.strength > 0);
+    let plan = null, grain = null;
+    if (useFusion) {
+      plan = planFusion({
+        src, rect: { x: rect.x, y: rect.y, w, h },
+        dst, dstFull: opts.dstFull, dstOffset: opts.dstOffset,
+        ring: fus.ring || 10
+      });
+      // 颗粒补偿：模型输出比真实照片平滑，接缝处「那块太干净」也很显眼
+      if (fus.grain > 0 && opts.dstFull) {
+        grain = planGrain({
+          src, w, h,
+          dst: opts.dstFull, dstRect: { x: rect.x, y: rect.y, w, h },
+          stride: 2, max: 10 * clamp01(fus.grain),
+          seed: num(fus.seed, 1)
+        });
+      }
+    }
+    const centerFloor = fus && fus.centerFloor != null ? clamp01(fus.centerFloor) : 0.35;
+    const fuseStrength = useFusion ? clamp01(fus.strength) : 0;
+    const grainAmt = grain && grain.ok ? grain.amount : 0;
+
     for (let y = 0; y < h; y++) {
       const dy = rect.y + y;
       if (dy < 0 || dy >= dst.height) continue;
@@ -402,6 +430,32 @@
           const t = clamp01(d / ramp);
           const k = (1 - t) * strength;
           r += delta[0] * k; g += delta[1] * k; b += delta[2] * k;
+        }
+        // 无缝融合：分两类处理，这是避免「把用户要的颜色改掉」的关键。
+        //
+        //   结构性差异（光照梯度、对比度）—— 模型系统性偏差，延伸到中心更自然
+        //   内容性差异（整体色调）—— 用户可能就是要改成那个颜色，只在接缝附近施加
+        //
+        // 若两类都用同一强度，用户要的纯红会被均值对齐拉成偏暗的浊红，
+        // 相当于融合在跟用户意图对着干（实现中真实踩到的坑）。
+        if (useFusion) {
+          const t = clamp01(d / ramp);
+          const edgeFactor = 1 - smoothstep(0, 1, t);        // 贴边 1 → ramp 处 0
+          const kStruct = fuseStrength * (centerFloor + (1 - centerFloor) * edgeFactor);
+          // 均值：接缝处 100%，中心 0% —— 保证中心是用户要的颜色
+          const kMean = fuseStrength * edgeFactor;
+          const fused = fuseColor(r, g, b, (x + 0.5) / w, (y + 0.5) / h,
+            { mean: kMean, struct: kStruct }, plan);
+          r = fused[0]; g = fused[1]; b = fused[2];
+        }
+        // 颗粒补偿：只在接缝附近补，中心不补（中心是用户要的内容，加噪只会变脏）
+        if (grainAmt > 0) {
+          const t = clamp01(d / ramp);
+          const gk = (1 - smoothstep(0, 1, t)) * grainAmt;
+          if (gk > 0.05) {
+            const n = grainNoise(x, y, grain.seed);
+            r += n * gk; g += n * gk; b += n * gk;
+          }
         }
         const ia = 1 - a;
         dst.data[di] = r * a + dst.data[di] * ia;
@@ -2595,6 +2649,8 @@
       mask: L.mask || null,
       feather: Math.max(0, num(L.feather, 10)),
       colorMatch: clamp01(num(L.colorMatch, 0.5)),
+      // 无缝融合强度：null 表示「跟随全局设置」，数字表示该图层单独指定
+      fusion: L.fusion == null ? null : clamp01(num(L.fusion, 0.7)),
       opacity: clamp01(num(L.opacity, 1)),          // 整体混合强度（0=不生效 1=完全生效）
       enabled: L.enabled !== false,                 // 图层开关
       label: typeof L.label === 'string' ? L.label : '',
@@ -2667,6 +2723,407 @@
       list.sort((a, b) => a.i - b.i);   // 时间顺序
     }
     return list.map((x) => x.e);
+  }
+
+  /* ====================== 7.04 无缝融合（模型输出对齐原图） ====================== */
+
+  /**
+   * 为什么需要这一层：
+   *
+   * 提示词只能**请求**模型「保持光线、色彩、质感一致」，但模型看不到你照片的
+   * 像素统计 —— 它只能猜。所以生成结果和周围环境总是差一点，表现为：
+   *   - 色调能对上，但**明暗梯度**对不上（原图越往右越暗，生成块却是平的）
+   *   - **对比度**对不上（模型出图常偏灰，或反而过艳）
+   *   - **纹理**对不上（模型输出更平滑，接缝处一眼看出「那块是贴的」）
+   *
+   * 这些都无法靠提示词解决，但可以在**合成阶段强制对齐** ——
+   * 而且这一步是免费的：不重新调用模型，只做像素运算。
+   *
+   * 下面几个函数各管一个层面，全部是纯函数，便于单测。
+   */
+
+  /**
+   * 在环带上采样，返回 RGB 均值与**标准差**。
+   *
+   * 相比只取均值，多出来的标准差是关键：
+   *   标准差 = 这一带的「明暗起伏程度」，也就是对比度。
+   *   均值相同但标准差不同 → 一个平、一个艳，看着就是不契合。
+   *
+   * @param {object} o { pixels, rect, ring, full, offset }
+   * @returns {{mean:number[], std:number[], n:number}}
+   */
+  function ringMoments(o) {
+    const opt = o || {};
+    const pix = opt.pixels;
+    const rect = opt.rect || { x: 0, y: 0, w: 0, h: 0 };
+    const ring = Math.max(1, round(num(opt.ring, 6)));
+    const full = opt.full || null;
+    const fox = full && full.offset ? num(full.offset.x, 0) : 0;
+    const foy = full && full.offset ? num(full.offset.y, 0) : 0;
+
+    const acc = { r: 0, g: 0, b: 0, count: 0 };
+    const acc2 = { r: 0, g: 0, b: 0 };
+    if (!pix || !pix.data) return { mean: [0, 0, 0], std: [0, 0, 0], n: 0 };
+
+    const x0 = rect.x - ring, y0 = rect.y - ring;
+    const x1 = rect.x + rect.w + ring, y1 = rect.y + rect.h + ring;
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const inside = x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
+        if (inside) continue;                      // 只要环带
+        let R, G, B;
+        if (full) {
+          const gx = x + fox, gy = y + foy;
+          if (gx < 0 || gy < 0 || gx >= full.width || gy >= full.height) continue;
+          const i = (gy * full.width + gx) * 4;
+          R = full.data[i]; G = full.data[i + 1]; B = full.data[i + 2];
+        } else {
+          if (x < 0 || y < 0 || x >= pix.width || y >= pix.height) continue;
+          const i = (y * pix.width + x) * 4;
+          R = pix.data[i]; G = pix.data[i + 1]; B = pix.data[i + 2];
+        }
+        acc.r += R; acc.g += G; acc.b += B; acc.count++;
+        acc2.r += R * R; acc2.g += G * G; acc2.b += B * B;
+      }
+    }
+    const c = Math.max(1, acc.count);
+    const mean = [acc.r / c, acc.g / c, acc.b / c];
+    const std = [
+      Math.sqrt(Math.max(0, acc2.r / c - mean[0] * mean[0])),
+      Math.sqrt(Math.max(0, acc2.g / c - mean[1] * mean[1])),
+      Math.sqrt(Math.max(0, acc2.b / c - mean[2] * mean[2]))
+    ];
+    return { mean, std, n: acc.count };
+  }
+
+  /**
+   * 整块统计（不取环带）—— 用于生成块自身。
+   *
+   * 生成块只有 rect 那么大，没有「外围环带」，所以不能套用 ringMoments。
+   */
+  function rectMoments(pixels) {
+    if (!pixels || !pixels.data) return { mean: [0, 0, 0], std: [0, 0, 0], n: 0 };
+    const w = pixels.width, h = pixels.height;
+    let r = 0, g = 0, b = 0, r2 = 0, g2 = 0, b2 = 0;
+    const n = w * h;
+    for (let i = 0; i < n; i++) {
+      const o = i * 4;
+      const R = pixels.data[o], G = pixels.data[o + 1], B = pixels.data[o + 2];
+      r += R; g += G; b += B;
+      r2 += R * R; g2 += G * G; b2 += B * B;
+    }
+    const c = Math.max(1, n);
+    const mean = [r / c, g / c, b / c];
+    return {
+      mean,
+      std: [
+        Math.sqrt(Math.max(0, r2 / c - mean[0] * mean[0])),
+        Math.sqrt(Math.max(0, g2 / c - mean[1] * mean[1])),
+        Math.sqrt(Math.max(0, b2 / c - mean[2] * mean[2]))
+      ],
+      n
+    };
+  }
+
+  /**
+   * 光照梯度拟合：用最小二乘拟合一个平面 `v ≈ a·u + b·v + c`。
+   *
+   * 解决什么：均值匹配是**常数偏移**，只能整体调亮调暗。
+   * 但真实照片的光照是**渐变**的 —— 比如侧光下左边亮右边暗。
+   * 如果原图有渐变、生成块是平的，接缝处就会出现一道「亮度台阶」，
+   * 这是「一眼看出贴过」最常见的原因。
+   *
+   * @returns {{a:number[], b:number[], c:number[], ok:boolean}}
+   */
+  function fitLightPlane(o) {
+    const opt = o || {};
+    const pix = opt.pixels;
+    const rect = opt.rect || { x: 0, y: 0, w: 0, h: 0 };
+    const ring = Math.max(1, round(num(opt.ring, 8)));
+    const full = opt.full || null;
+    const fox = full && full.offset ? num(full.offset.x, 0) : 0;
+    const foy = full && full.offset ? num(full.offset.y, 0) : 0;
+    const none = { a: [0, 0, 0], b: [0, 0, 0], c: [0, 0, 0], ok: false };
+    if (!pix || !pix.data) return none;
+
+    let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0, syy = 0;
+    const sv = [0, 0, 0], svx = [0, 0, 0], svy = [0, 0, 0];
+    const x0 = rect.x - ring, y0 = rect.y - ring;
+    const x1 = rect.x + rect.w + ring, y1 = rect.y + rect.h + ring;
+    const W = Math.max(1, rect.w), H = Math.max(1, rect.h);
+
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const inside = x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
+        if (inside) continue;
+        let R, G, B;
+        if (full) {
+          const gx = x + fox, gy = y + foy;
+          if (gx < 0 || gy < 0 || gx >= full.width || gy >= full.height) continue;
+          const i = (gy * full.width + gx) * 4;
+          R = full.data[i]; G = full.data[i + 1]; B = full.data[i + 2];
+        } else {
+          if (x < 0 || y < 0 || x >= pix.width || y >= pix.height) continue;
+          const i = (y * pix.width + x) * 4;
+          R = pix.data[i]; G = pix.data[i + 1]; B = pix.data[i + 2];
+        }
+        // 相对选区的归一化坐标
+        const u = (x - rect.x) / W, v = (y - rect.y) / H;
+        n++; sx += u; sy += v; sxx += u * u; sxy += u * v; syy += v * v;
+        sv[0] += R; sv[1] += G; sv[2] += B;
+        svx[0] += R * u; svx[1] += G * u; svx[2] += B * u;
+        svy[0] += R * v; svy[1] += G * v; svy[2] += B * v;
+      }
+    }
+    if (n < 12) return none;
+
+    // 解 3×3 正规方程（三个通道共用系数矩阵）
+    const M = [[sxx, sxy, sx], [sxy, syy, sy], [sx, sy, n]];
+    const det3 = (m) =>
+      m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+      m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+      m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    const D = det3(M);
+    // 退化（环带太窄、或全在一行/一列）时放弃梯度，退回均值匹配
+    if (!Number.isFinite(D) || Math.abs(D) < 1e-9) return none;
+
+    const solve = (rhs) => {
+      const sub = (col) => M.map((row, i) => row.map((val, j) => (j === col ? rhs[i] : val)));
+      return [det3(sub(0)) / D, det3(sub(1)) / D, det3(sub(2)) / D];
+    };
+    const a = [0, 0, 0], b = [0, 0, 0], c = [0, 0, 0];
+    for (let ch = 0; ch < 3; ch++) {
+      const sol = solve([svx[ch], svy[ch], sv[ch]]);
+      a[ch] = sol[0]; b[ch] = sol[1]; c[ch] = sol[2];
+    }
+    return { a, b, c, ok: true };
+  }
+
+  /**
+   * 规划一次「无缝融合」所需的全部校正参数。
+   *
+   * 综合三件事，全部由环带统计推出：
+   *   1. 均值差（delta）—— 整体色偏
+   *   2. 梯度平面（plane）—— 光照方向/渐变
+   *   3. 对比度比（gain）—— 模型出图偏灰或过艳
+   *
+   * @param {object} o { src, rect, dst, dstFull, dstOffset, ring }
+   */
+  function planFusion(o) {
+    const opt = o || {};
+    const rect = opt.rect || { x: 0, y: 0, w: 0, h: 0 };
+    const ring = Math.max(2, round(num(opt.ring, 10)));
+    const full = opt.dstFull
+      ? { pixels: opt.dstFull, offset: opt.dstOffset || { x: 0, y: 0 } }
+      : null;
+
+    // 关键：src（生成块）只有 rect.w × rect.h 这么大，**没有环带**。
+    // 所以不能在它身上采环带 —— 那样必然全越界，均值变成 0，
+    // 校正量会等于「目标均值 - 0」，直接把画面推爆（这是实现中踩到的坑）。
+    // 正确做法：整块取均值（srcRect 用 patch 自身尺寸）。
+    const srcMom = rectMoments(opt.src);
+
+    // dst（原图）才有环带可采
+    const dstMom = ringMoments({
+      pixels: opt.dst, rect: { x: rect.x, y: rect.y, w: rect.w, h: rect.h },
+      ring, full: full ? full.pixels : null, offset: full ? full.offset : null
+    });
+
+    const delta = [
+      dstMom.mean[0] - srcMom.mean[0],
+      dstMom.mean[1] - srcMom.mean[1],
+      dstMom.mean[2] - srcMom.mean[2]
+    ];
+    // 对比度增益：目标标准差 / 当前标准差。夹在合理范围，避免噪声被放大
+    const gain = [1, 1, 1];
+    for (let i = 0; i < 3; i++) {
+      const s = srcMom.std[i], d = dstMom.std[i];
+      if (s > 2 && d > 0.5) gain[i] = clamp(d / s, 0.75, 1.35);
+    }
+    const plane = fitLightPlane({
+      pixels: opt.dst, rect, ring: ring + 6,
+      full: full ? full.pixels : null, offset: full ? full.offset : null
+    });
+
+    return {
+      rect, ring, delta, gain, plane,
+      srcMean: srcMom.mean, srcStd: srcMom.std,
+      dstMean: dstMom.mean, dstStd: dstMom.std,
+      samples: { src: srcMom.n, dst: dstMom.n }
+    };
+  }
+
+  /**
+   * 按融合计划校正一个像素的颜色。
+   *
+   * 顺序很重要：
+   *   ① 对比度：围绕**生成块自身均值**缩放（相对量，必须先做）
+   *   ② 均值偏移：整体平移到目标色调
+   *   ③ 光照梯度：叠加平面，修正明暗走向
+   *
+   * 最后按 `k` 衰减：k=1 完全校正（贴边处），k=0 不校正（中心处）。
+   *
+   * @param {number} r,g,b 生成块原始颜色
+   * @param {number} u,v   相对选区的归一化坐标（0 左/上 → 1 右/下）
+   * @param {number} k     校正强度 0~1
+   */
+  function fuseColor(r, g, b, u, v, k, plan) {
+    const src = [r, g, b];
+    if (!plan) return src;
+    // 兼容旧签名：k 是数字时表示「均值与结构用同一强度」
+    const kMean = typeof k === 'object' && k !== null ? clamp01(k.mean) : clamp01(k);
+    const kStruct = typeof k === 'object' && k !== null ? clamp01(k.struct) : clamp01(k);
+    if (kMean <= 0 && kStruct <= 0) return src;
+
+    const gain = plan.gain || [1, 1, 1];
+    const delta = plan.delta || [0, 0, 0];
+    const plane = plan.plane || { a: [0, 0, 0], b: [0, 0, 0], ok: false };
+    const srcMean = plan.srcMean || [128, 128, 128];
+    const out = [0, 0, 0];
+
+    for (let i = 0; i < 3; i++) {
+      let val = src[i];
+      // ① 对比度（结构性：模型系统性偏差，可以延伸到中心）
+      if (kStruct > 0) {
+        val = srcMean[i] + (val - srcMean[i]) * (1 + (gain[i] - 1) * kStruct);
+      }
+      // ② 均值偏移（内容性：用户可能就是要改色调，所以只在接缝附近施加）
+      val += delta[i] * kMean;
+      // ③ 光照梯度（结构性）：只取相对平面中心的偏差，避免与 ② 重复平移
+      if (plane.ok && kStruct > 0) {
+        const grad = plane.a[i] * (u - 0.5) + plane.b[i] * (v - 0.5);
+        val += grad * kStruct;
+      }
+      out[i] = val;
+    }
+    // 按「结构性」强度在原值与校正值之间插值（均值部分已按 kMean 单独缩放）
+    return [
+      clamp(round(src[0] + (out[0] - src[0]) * Math.max(kStruct, kMean)), 0, 255),
+      clamp(round(src[1] + (out[1] - src[1]) * Math.max(kStruct, kMean)), 0, 255),
+      clamp(round(src[2] + (out[2] - src[2]) * Math.max(kStruct, kMean)), 0, 255)
+    ];
+  }
+
+  /**
+   * 估计「纹理强度」（高频能量），用相邻像素亮度差的平均绝对值衡量。
+   *
+   * 解决什么：模型输出普遍比真实照片**更平滑**（扩散模型倾向于抹掉噪点）。
+   * 结果是一块干净的补丁贴在有颗粒感的照片上 —— 即使颜色完全一致，
+   * 也会因为「那块太干净」而显得突兀。
+   */
+  function textureEnergy(pixels, rect, stride) {
+    if (!pixels || !pixels.data) return 0;
+    const r = rect || { x: 0, y: 0, w: pixels.width, h: pixels.height };
+    const st = Math.max(1, round(num(stride, 2)));
+    let sum = 0, n = 0;
+    const yEnd = Math.min(r.y + r.h, pixels.height), xEnd = Math.min(r.x + r.w, pixels.width);
+    for (let y = Math.max(0, r.y); y < yEnd - st; y += st) {
+      for (let x = Math.max(0, r.x); x < xEnd - st; x += st) {
+        const i = (y * pixels.width + x) * 4;
+        const j = (y * pixels.width + x + st) * 4;
+        const k = ((y + st) * pixels.width + x) * 4;
+        const l1 = 0.299 * pixels.data[i] + 0.587 * pixels.data[i + 1] + 0.114 * pixels.data[i + 2];
+        const l2 = 0.299 * pixels.data[j] + 0.587 * pixels.data[j + 1] + 0.114 * pixels.data[j + 2];
+        const l3 = 0.299 * pixels.data[k] + 0.587 * pixels.data[k + 1] + 0.114 * pixels.data[k + 2];
+        sum += Math.abs(l2 - l1) + Math.abs(l3 - l1);
+        n += 2;
+      }
+    }
+    return n ? sum / n : 0;
+  }
+
+  /**
+   * 规划颗粒补偿量：生成块比周围干净多少，就补多少。
+   *
+   * @returns {{amount:number, seed:number, ok:boolean, srcEnergy:number, dstEnergy:number}}
+   */
+  function planGrain(o) {
+    const opt = o || {};
+    const srcE = textureEnergy(opt.src, { x: 0, y: 0, w: opt.w, h: opt.h }, opt.stride);
+    const dstE = textureEnergy(opt.dst, opt.dstRect, opt.stride);
+    // 周围比生成块更「有质感」时才补；反过来不补（不主动降质）
+    const amount = Math.max(0, Math.min(num(opt.max, 10), (dstE - srcE) * 0.5));
+    return {
+      amount, seed: num(opt.seed, 1) | 0,
+      ok: amount > 0.3,
+      srcEnergy: Math.round(srcE * 100) / 100,
+      dstEnergy: Math.round(dstE * 100) / 100
+    };
+  }
+
+  /**
+   * 确定性伪随机（同一 seed 每次结果一致）。
+   *
+   * 必须确定性：否则每次重绘（拖动滑块、撤销）颗粒位置都会变，
+   * 画面会「闪烁」，用户会以为出了问题。
+   */
+  function grainNoise(x, y, seed) {
+    let h = (x * 374761393 + y * 668265263 + (seed | 0) * 1442695041) | 0;
+    h = (h ^ (h >>> 13)) | 0;
+    h = Math.imul(h, 1274126177) | 0;
+    h = (h ^ (h >>> 16)) >>> 0;
+    return (h / 4294967295) * 2 - 1;      // -1 ~ 1
+  }
+
+  /**
+   * 评估「贴得好不好」—— 量化接缝两侧的差异，给用户一个客观分数。
+   *
+   * 为什么需要：用户调完羽化/匹配后，无法判断「是不是够好了」。
+   * 给一个 0~100 的契合度评分 + 具体问题（色差/亮度台阶/对比度差异），
+   * 用户就知道该往哪个方向调。
+   */
+  function assessSeam(o) {
+    const opt = o || {};
+    const rect = opt.rect || { x: 0, y: 0, w: 0, h: 0 };
+    const ring = Math.max(2, round(num(opt.ring, 6)));
+    const full = opt.dstFull
+      ? { pixels: opt.dstFull, offset: opt.dstOffset || { x: 0, y: 0 } }
+      : null;
+
+    // 同 planFusion：src 是生成块本身，没有环带，用整块统计
+    const srcMom = rectMoments(opt.src);
+    const dstMom = ringMoments({
+      pixels: opt.dst, rect, ring,
+      full: full ? full.pixels : null, offset: full ? full.offset : null
+    });
+
+    // 色差：Oklab 感知距离（比 RGB 欧氏距离更贴近人眼）
+    const dE = colorDistance(srcMom.mean, dstMom.mean);
+    const lumOf = (c) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+    const lumStep = Math.abs(lumOf(dstMom.mean) - lumOf(srcMom.mean));
+    // 对比度差异：两边都「很平」时视为一致。
+    // 不能用 max(1, std) 做分母 —— 纯色块 std=0，会算出比值 0、
+    // 判定为「100% 不一致」，把完全相同的两块误报成有问题（真实踩到的坑）。
+    let contrastMismatch = 0;
+    const FLAT = 3;      // 低于这个标准差视为「没有起伏」
+    for (let i = 0; i < 3; i++) {
+      const ss = srcMom.std[i], ds = dstMom.std[i];
+      if (ss < FLAT && ds < FLAT) continue;            // 两边都平 → 一致
+      const denom = Math.max(FLAT, ss, ds);
+      contrastMismatch = Math.max(contrastMismatch, Math.abs(ss - ds) / denom);
+    }
+
+    const issues = [];
+    if (dE > 0.06) issues.push('接缝处有色差');
+    if (lumStep > 8) issues.push('接缝处有亮度台阶');
+    if (contrastMismatch > 0.35) issues.push('对比度与周围不一致');
+
+    let score = 100;
+    score -= Math.min(45, dE * 400);
+    score -= Math.min(35, lumStep * 1.6);
+    score -= Math.min(20, contrastMismatch * 40);
+    score = Math.max(0, Math.round(score));
+
+    return {
+      score, issues,
+      detail: {
+        deltaE: Math.round(dE * 1000) / 1000,
+        lumStep: Math.round(lumStep * 10) / 10,
+        contrastMismatch: Math.round(contrastMismatch * 100) / 100,
+        srcMean: srcMom.mean.map((v) => Math.round(v)),
+        dstMean: dstMom.mean.map((v) => Math.round(v))
+      }
+    };
   }
 
   /* ====================== 7.05 编辑历史内存管理 ====================== */
@@ -3390,6 +3847,9 @@
     planCompat, compatClassNames,
     // 对比视图手势
     planCompareDrag, planCompareDoubleTap, describeCompareZoom, placeCompareSplit,
+    // 无缝融合（模型输出对齐原图）
+    ringMoments, rectMoments, fitLightPlane, planFusion, fuseColor,
+    textureEnergy, planGrain, grainNoise, assessSeam,
     EXPORT_PRESETS, getExportPreset, planExportSize, stripGpsFromExif, planExportMetadata,
     MODEL_PRICES, DEFAULT_USD_CNY, modelPrice, estimateCost, accumulateSpend, formatUsd, formatCny,
     parseJpegSegments, extractExif, extractICC, readExifOrientation,

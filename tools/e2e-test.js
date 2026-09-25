@@ -1014,7 +1014,8 @@ async function run() {
 
   // 关键：把不透明度调到 0 —— 应完全恢复原图，且不产生任何模型调用
   const ndSliders = ndItems[0].querySelectorAll('input[type=range]');
-  t('记录里有 3 个可调参数', ndSliders.length === 3, ndSliders.length);
+  // 4 个：效果强度 / 边缘羽化 / 色彩匹配 / 无缝融合
+  t('记录里有 4 个可调参数', ndSliders.length === 4, ndSliders.length);
   const ndOpacity = ndSliders[0];
   ndOpacity.value = '0';
   ndOpacity.dispatchEvent(new window.Event('input'));

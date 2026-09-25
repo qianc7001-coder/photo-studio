@@ -1450,5 +1450,113 @@ console.log('\n【图标】桌面图标必须清晰可辨（对比度 + 自适�
 
 
 /* ---------- 应用图标 ---------- */
+/* ---------- 无缝融合 ---------- */
+console.log('\n【融合】生成块必须贴合周围环境（光照/对比度/颗粒）');
+
+(() => {
+  const fs = require('fs');
+  const path = require('path');
+  const C2 = require(path.join(__dirname, '..', 'app', 'core.js'));
+  const appSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'app', 'index.html'), 'utf8');
+
+  function mk(w, h, fn) {
+    const p = { width: w, height: h, data: new Uint8ClampedArray(w * h * 4) };
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const c = fn(x, y);
+        const i = (y * w + x) * 4;
+        p.data[i] = c[0]; p.data[i + 1] = c[1]; p.data[i + 2] = c[2]; p.data[i + 3] = 255;
+      }
+    }
+    return p;
+  }
+  const clone = (p) => ({ width: p.width, height: p.height, data: new Uint8ClampedArray(p.data) });
+
+  // 1) 核心能力：光照梯度必须被拟合出来
+  //    这是「一眼看出贴过」最常见的原因 —— 原图有明暗走向，生成块是平的
+  const grad = mk(200, 200, (x) => { const v = 200 - x * 0.5; return [v, v, v]; });
+  const plane = C2.fitLightPlane({ pixels: grad, rect: { x: 60, y: 60, w: 80, h: 80 }, ring: 14 });
+  t('能拟合出光照梯度', plane.ok === true);
+  t('梯度方向正确（左亮右暗为负斜率）', plane.a[0] < -5, plane.a[0]);
+  t('无上下渐变时 y 斜率为 0', Math.abs(plane.b[0]) < 1, plane.b[0]);
+
+  // 2) 回归：生成块没有环带，必须用整块统计
+  //    早期版本对 src 也取环带 → 全越界 → 均值 0 → 校正量巨大，画面被推爆
+  const patch = mk(60, 50, (x, y) => {
+    const n = ((x * 7 + y * 13) % 11) / 11;
+    return [140 + n * 20, 140 + n * 20, 140 + n * 20];
+  });
+  const doc = mk(300, 300, () => [150, 150, 150]);
+  const plan = C2.planFusion({
+    src: patch, rect: { x: 120, y: 120, w: 60, h: 50 },
+    dst: doc, dstFull: doc, dstOffset: { x: 0, y: 0 }, ring: 10
+  });
+  t('生成块均值被正确取到（不是 0）', plan.srcMean[0] > 100, plan.srcMean);
+  t('校正量在合理范围（不会推爆画面）',
+    plan.delta.every((d) => Math.abs(d) < 100), plan.delta);
+
+  // 3) 回归：中心必须保留用户意图
+  //    用户要的纯红不能被「均值对齐」拉成浊红（实现中真实踩到的坑）
+  const red = mk(100, 80, () => [220, 40, 40]);
+  const blue = mk(400, 300, () => [30, 90, 160]);
+  const r = { x: 150, y: 110, w: 100, h: 80 };
+  const d = clone(blue);
+  C2.compositeFeathered(d, red, r, {
+    feather: 12, colorMatch: { ring: 8, ramp: 12, strength: 0 },
+    fusion: { strength: 1, ring: 12, centerFloor: 0.35 },
+    dstFull: d, dstOffset: { x: 0, y: 0 }
+  });
+  const ci = (r.y + 40) * 400 + r.x + 50;
+  t('中心保留用户要的颜色',
+    d.data[ci * 4] === 220 && d.data[ci * 4 + 1] === 40 && d.data[ci * 4 + 2] === 40,
+    [d.data[ci * 4], d.data[ci * 4 + 1], d.data[ci * 4 + 2]]);
+
+  // 4) 回归：纯色块不能被误报「对比度不一致」
+  //    早期用 max(1,std) 做分母，std=0 时算出 100% 不一致
+  const flatSeam = C2.assessSeam({
+    src: mk(60, 60, () => [128, 128, 128]), rect: { x: 0, y: 0, w: 60, h: 60 },
+    dst: mk(200, 200, () => [128, 128, 128]), ring: 6
+  });
+  t('完全一致时评分为满分', flatSeam.score === 100, flatSeam);
+  t('完全一致时无误报问题', flatSeam.issues.length === 0, flatSeam.issues);
+
+  // 5) 关闭融合时行为与旧版完全一致（不能破坏既有能力）
+  const base = mk(300, 300, () => [100, 110, 120]);
+  const p2 = mk(80, 60, () => [200, 60, 60]);
+  const r2 = { x: 100, y: 100, w: 80, h: 60 };
+  const legacy = { feather: 10, colorMatch: { ring: 8, ramp: 10, strength: 0.5 } };
+  const a1 = clone(base), a2 = clone(base);
+  C2.compositeFeathered(a1, p2, r2, Object.assign({}, legacy, { fusion: null }));
+  C2.compositeFeathered(a2, p2, r2, legacy);
+  let same = true;
+  for (let i = 0; i < a1.data.length; i += 4) if (a1.data[i] !== a2.data[i]) { same = false; break; }
+  t('关闭融合时与旧版逐像素一致', same);
+
+  // 6) 确定性：颗粒必须可复现，否则拖动滑块时画面会闪烁
+  t('颗粒噪声可复现', C2.grainNoise(5, 9, 3) === C2.grainNoise(5, 9, 3));
+  t('颗粒噪声随位置变化', C2.grainNoise(5, 9, 3) !== C2.grainNoise(6, 9, 3));
+
+  // 7) 接线：纯函数必须真的接进合成路径
+  //    注意这些在 core.js（合成器所在），不在 app.js
+  const coreSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'core.js'), 'utf8');
+  t('合成路径接了融合计划', /planFusion\(/.test(coreSrc));
+  t('合成时分离了「结构」与「均值」强度',
+    /kMean = fuseStrength \* edgeFactor/.test(coreSrc) && /kStruct = fuseStrength \*/.test(coreSrc));
+  t('app 层传入了融合参数', /fusion: fuseStrength > 0 \?/.test(appSrc));
+  t('图层可单独调融合强度', /mkParam\('无缝融合'/.test(appSrc));
+  t('图层显示契合度评分', /assessLayerSeam/.test(appSrc));
+  t('设置里有全局融合开关', /id="set-fusion"/.test(html));
+  t('融合参数会持久化', /'fusion', 'fusionCenter', 'fusionGrain'/.test(appSrc));
+  t('调融合参数会重绘但不重新生成',
+    /bindField\('set-fusion'[\s\S]{0,400}rebuildViewCanvas\(\)/.test(appSrc) &&
+    !/bindField\('set-fusion'[\s\S]{0,400}runGenerate\(\)/.test(appSrc));
+})();
+
+
+/* ---------- 无缝融合 ---------- */
+/* ---------- 无缝融合 ---------- */
+/* ---------- 无缝融合 ---------- */
+/* ---------- 无缝融合 ---------- */
 console.log(`\n合计 ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

@@ -720,5 +720,256 @@ t('estimateCalls', C.estimateCalls({x:0,y:0,w:3000,h:3000},{maxSide:1400,overlap
 
 
 /* ---------- 对比视图手势 ---------- */
+// ===== 无缝融合（测试块） =====
+(() => {
+  function mk(w, h, fn) {
+    const p = { width: w, height: h, data: new Uint8ClampedArray(w * h * 4) };
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const c = fn(x, y);
+        const i = (y * w + x) * 4;
+        p.data[i] = c[0]; p.data[i + 1] = c[1]; p.data[i + 2] = c[2]; p.data[i + 3] = 255;
+      }
+    }
+    return p;
+  }
+  const clone = (p) => {
+    const q = { width: p.width, height: p.height, data: new Uint8ClampedArray(p.data) };
+    return q;
+  };
+  const lum = (c) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+
+  // 1) ringMoments：环带统计（均值 + 标准差）
+  const flat = mk(80, 80, () => [100, 100, 100]);
+  const m1 = C.ringMoments({ pixels: flat, rect: { x: 20, y: 20, w: 40, h: 40 }, ring: 6 });
+  t('ringMoments 取到环带样本', m1.n > 0, m1.n);
+  t('ringMoments 均值正确', Math.abs(m1.mean[0] - 100) < 0.01, m1.mean);
+  t('ringMoments 纯色标准差为 0', m1.std[0] < 0.01, m1.std);
+  // 标准差要能反映「起伏程度」——这是对比度匹配的依据
+  const noisy = mk(80, 80, (x) => [x % 2 ? 60 : 140, x % 2 ? 60 : 140, x % 2 ? 60 : 140]);
+  const m2 = C.ringMoments({ pixels: noisy, rect: { x: 20, y: 20, w: 40, h: 40 }, ring: 6 });
+  t('ringMoments 标准差能反映起伏', m2.std[0] > 30, m2.std);
+  t('ringMoments 对 null 安全', C.ringMoments(null).n === 0);
+  t('ringMoments 对空 rect 安全', typeof C.ringMoments({ pixels: flat }).n === 'number');
+
+  // 2) rectMoments：整块统计（生成块没有环带，必须用这个）
+  const rm = C.rectMoments(flat);
+  t('rectMoments 整块均值正确', Math.abs(rm.mean[0] - 100) < 0.01, rm.mean);
+  t('rectMoments 样本数等于像素数', rm.n === 80 * 80, rm.n);
+  t('rectMoments 对 null 安全', C.rectMoments(null).n === 0);
+
+  // 3) fitLightPlane：光照梯度拟合
+  //    造一张「左亮右暗」的图，拟合出的 x 斜率必须为负
+  const grad = mk(200, 200, (x) => { const v = 200 - x * 0.5; return [v, v, v]; });
+  const pl = C.fitLightPlane({ pixels: grad, rect: { x: 60, y: 60, w: 80, h: 80 }, ring: 14 });
+  t('梯度拟合成功', pl.ok === true);
+  t('x 方向斜率为负（左亮右暗）', pl.a[0] < -5, pl.a[0]);
+  t('y 方向斜率接近 0（无上下渐变）', Math.abs(pl.b[0]) < 1, pl.b[0]);
+  // 反向：右亮左暗 → 斜率应为正
+  const grad2 = mk(200, 200, (x) => { const v = 80 + x * 0.5; return [v, v, v]; });
+  const pl2 = C.fitLightPlane({ pixels: grad2, rect: { x: 60, y: 60, w: 80, h: 80 }, ring: 14 });
+  t('反向渐变斜率为正', pl2.a[0] > 5, pl2.a[0]);
+  // 纯色：无梯度
+  const pl3 = C.fitLightPlane({ pixels: flat, rect: { x: 20, y: 20, w: 40, h: 40 }, ring: 6 });
+  t('纯色图无梯度', Math.abs(pl3.a[0]) < 1 && Math.abs(pl3.b[0]) < 1, [pl3.a[0], pl3.b[0]]);
+  // 退化输入不能崩
+  t('fitLightPlane 对 null 安全', C.fitLightPlane(null).ok === false);
+  t('环带太小则放弃梯度（不硬算）', (() => {
+    const p = C.fitLightPlane({ pixels: flat, rect: { x: 0, y: 0, w: 2, h: 2 }, ring: 1 });
+    return p.ok === false || (Number.isFinite(p.a[0]) && Number.isFinite(p.b[0]));
+  })());
+
+  // 4) planFusion：色偏 + 对比度
+  const doc = mk(400, 300, () => [150, 140, 120]);
+  const rect = { x: 150, y: 100, w: 100, h: 80 };
+  const patch = mk(rect.w, rect.h, (x, y) => {
+    const n = ((x * 7 + y * 13) % 11) / 11;
+    const v = 120 + n * 25;
+    return [v * 0.85, v * 0.95, v * 1.15];      // 偏冷、偏暗
+  });
+  const plan = C.planFusion({
+    src: patch, rect, dst: doc, dstFull: doc, dstOffset: { x: 0, y: 0 }, ring: 10
+  });
+  t('planFusion 取到生成块均值（非 0）', plan.srcMean[0] > 50, plan.srcMean);
+  t('planFusion 取到环境均值', plan.dstMean[0] > 100, plan.dstMean);
+  t('delta 方向正确（环境更暖→红通道为正）', plan.delta[0] > 0, plan.delta);
+  t('delta 方向正确（生成块偏蓝→蓝通道为负）', plan.delta[2] < 0, plan.delta);
+  t('gain 在安全范围内', plan.gain.every((g) => g >= 0.75 && g <= 1.35), plan.gain);
+
+  // 5) fuseColor：核心校正
+  //    ① 均值对齐必须精确
+  const plan2 = C.planFusion({
+    src: patch, rect, dst: doc, dstFull: doc, dstOffset: { x: 0, y: 0 }, ring: 10
+  });
+  const fused = mk(rect.w, rect.h, (x, y) => {
+    const i = (y * rect.w + x) * 4;
+    return C.fuseColor(patch.data[i], patch.data[i + 1], patch.data[i + 2],
+      (x + 0.5) / rect.w, (y + 0.5) / rect.h, { mean: 1, struct: 1 }, plan2);
+  });
+  let s = [0, 0, 0];
+  const np = rect.w * rect.h;
+  for (let i = 0; i < np; i++) { s[0] += fused.data[i * 4]; s[1] += fused.data[i * 4 + 1]; s[2] += fused.data[i * 4 + 2]; }
+  const err = s.map((v, i) => Math.abs(v / np - plan2.dstMean[i]));
+  t('均值对齐精确（误差 < 2）', err.every((v) => v < 2), err.map((v) => Math.round(v * 10) / 10));
+
+  //    ② 关键设计：中心必须保留用户意图
+  //    这是实现中真实踩到的坑 —— 早期版本把用户要的纯红拉成了偏暗的浊红
+  const pure = C.fuseColor(220, 40, 40, 0.5, 0.5, { mean: 0, struct: 1 }, plan2);
+  t('中心处（mean=0）保留用户要的颜色', pure[0] === 220 && pure[1] === 40 && pure[2] === 40, pure);
+  const tinted = C.fuseColor(220, 40, 40, 0.5, 0.5, { mean: 1, struct: 0 }, plan2);
+  t('接缝处（mean=1）色偏被校正', tinted[0] !== 220 || tinted[1] !== 40 || tinted[2] !== 40, tinted);
+  t('强度为 0 时原样返回', JSON.stringify(C.fuseColor(10, 20, 30, 0.5, 0.5, 0, plan2)) === '[10,20,30]');
+  t('无计划时原样返回', JSON.stringify(C.fuseColor(10, 20, 30, 0.5, 0.5, 1, null)) === '[10,20,30]');
+  t('输出被夹在 0~255', (() => {
+    const r = C.fuseColor(255, 255, 255, 0, 0, { mean: 1, struct: 1 }, plan2);
+    return r.every((v) => v >= 0 && v <= 255);
+  })());
+
+  // 6) textureEnergy + planGrain：颗粒补偿
+  const smooth = mk(80, 80, () => [128, 128, 128]);
+  const rough = mk(80, 80, (x, y) => {
+    const n = ((x * 13 + y * 29) % 17) / 17;
+    const v = 100 + n * 56;
+    return [v, v, v];
+  });
+  const eS = C.textureEnergy(smooth, { x: 0, y: 0, w: 80, h: 80 }, 2);
+  const eR = C.textureEnergy(rough, { x: 0, y: 0, w: 80, h: 80 }, 2);
+  t('平滑图纹理能量低', eS < 1, eS);
+  t('粗糙图纹理能量高', eR > 5, eR);
+  t('textureEnergy 对 null 安全', C.textureEnergy(null) === 0);
+  const g = C.planGrain({ src: smooth, w: 80, h: 80, dst: rough, dstRect: { x: 0, y: 0, w: 80, h: 80 }, stride: 2 });
+  t('周围更粗糙时会补颗粒', g.ok === true && g.amount > 0, g);
+  const g2 = C.planGrain({ src: rough, w: 80, h: 80, dst: smooth, dstRect: { x: 0, y: 0, w: 80, h: 80 }, stride: 2 });
+  t('周围更平滑时不补颗粒（不主动降质）', g2.ok === false, g2);
+  t('颗粒量有上限', g.amount <= 10 + 1e-9, g.amount);
+
+  // 7) grainNoise：必须确定性（否则每次重绘画面会闪烁）
+  t('同一 seed 结果一致', C.grainNoise(10, 20, 7) === C.grainNoise(10, 20, 7));
+  t('不同坐标结果不同', C.grainNoise(10, 20, 7) !== C.grainNoise(11, 20, 7));
+  t('不同 seed 结果不同', C.grainNoise(10, 20, 7) !== C.grainNoise(10, 20, 8));
+  t('噪声范围在 -1~1', (() => {
+    for (let i = 0; i < 500; i++) {
+      const v = C.grainNoise(i, i * 3, 1);
+      if (v < -1 || v > 1) return false;
+    }
+    return true;
+  })());
+
+  // 8) assessSeam：契合度评分
+  const same = C.assessSeam({
+    src: mk(60, 60, () => [128, 128, 128]), rect: { x: 0, y: 0, w: 60, h: 60 },
+    dst: mk(200, 200, () => [128, 128, 128]), dstFull: null, ring: 6
+  });
+  t('完全一致时评分满分', same.score === 100, same);
+  t('完全一致时无问题项', same.issues.length === 0, same.issues);
+  const bad = C.assessSeam({
+    src: mk(60, 60, () => [220, 40, 40]), rect: { x: 0, y: 0, w: 60, h: 60 },
+    dst: mk(200, 200, () => [30, 90, 160]), dstFull: null, ring: 6
+  });
+  t('差异大时评分低', bad.score < 50, bad.score);
+  t('差异大时报告具体问题', bad.issues.length > 0, bad.issues);
+  t('评分在 0~100 之间', same.score >= 0 && same.score <= 100 && bad.score >= 0 && bad.score <= 100);
+  t('报告含 ΔE', typeof bad.detail.deltaE === 'number', bad.detail);
+  t('报告含亮度台阶', typeof bad.detail.lumStep === 'number', bad.detail);
+
+  // 9) 集成：融合必须真的改善接缝
+  //    场景：原图有强光照梯度，生成块是平的 —— 这是「一眼看出贴过」的典型
+  const base = mk(400, 300, (x) => {
+    const v = 230 - (x / 400) * 150;
+    return [v, v * 0.95, v * 0.85];
+  });
+  const r2 = { x: 200, y: 100, w: 100, h: 80 };
+  const flatPatch = mk(r2.w, r2.h, () => [150, 143, 128]);
+  const runComposite = (useFusion) => {
+    const d = clone(base);
+    const opts = { feather: 14, colorMatch: { ring: 8, ramp: 14, strength: 0.5 } };
+    if (useFusion) {
+      opts.fusion = { strength: 1, ring: 12, centerFloor: 0.35 };
+      opts.dstFull = d; opts.dstOffset = { x: 0, y: 0 };
+    }
+    C.compositeFeathered(d, flatPatch, r2, opts);
+    return d;
+  };
+  const d1 = runComposite(false), d2 = runComposite(true);
+  // 沿接缝取剖面：梯度不匹配时台阶会随位置变化（看得见的「明暗带」）
+  const profile = (d) => {
+    const out = [];
+    for (let x = r2.x + 8; x < r2.x + r2.w - 8; x += 20) {
+      const o = (r2.y - 3) * 400 + x, i = (r2.y + 3) * 400 + x;
+      const lo = 0.299 * d.data[o * 4] + 0.587 * d.data[o * 4 + 1] + 0.114 * d.data[o * 4 + 2];
+      const li = 0.299 * d.data[i * 4] + 0.587 * d.data[i * 4 + 1] + 0.114 * d.data[i * 4 + 2];
+      out.push(li - lo);
+    }
+    return out;
+  };
+  const rms = (a) => Math.sqrt(a.reduce((s2, v) => s2 + v * v, 0) / a.length);
+  const p1 = profile(d1), p2 = profile(d2);
+  t('融合降低了接缝处的亮度台阶', rms(p2) < rms(p1),
+    { withoutFusion: rms(p1).toFixed(2), withFusion: rms(p2).toFixed(2) });
+  t('融合让台阶更均匀（波动更小）', (() => {
+    const sd = (a) => { const m = a.reduce((s2, v) => s2 + v, 0) / a.length;
+      return Math.sqrt(a.reduce((s2, v) => s2 + (v - m) * (v - m), 0) / a.length); };
+    return sd(p2) <= sd(p1) + 0.01;
+  })(), { before: p1.map((v) => Math.round(v * 10) / 10), after: p2.map((v) => Math.round(v * 10) / 10) });
+
+  // 9.5) 关键设计回归：中心必须保留用户意图（走真实合成路径）
+  //       早期版本把「均值校正」也施加到中心，导致用户要的纯红被拉成浊红。
+  //       这条必须走 compositeFeathered —— 只测 fuseColor 抓不到强度分配的错误。
+  const intentDoc = mk(400, 300, () => [30, 90, 160]);      // 深蓝环境
+  const intentRect = { x: 120, y: 90, w: 100, h: 80 };
+  const pureRed = mk(intentRect.w, intentRect.h, () => [220, 40, 40]);   // 用户要的纯红
+  const dIntent = clone(intentDoc);
+  C.compositeFeathered(dIntent, pureRed, intentRect, {
+    feather: 12,
+    colorMatch: { ring: 8, ramp: 12, strength: 0 },          // 关掉旧的色彩匹配，隔离变量
+    fusion: { strength: 1, ring: 12, centerFloor: 0.35 },
+    dstFull: dIntent, dstOffset: { x: 0, y: 0 }
+  });
+  const cxi = (intentRect.y + Math.round(intentRect.h / 2)) * 400 + intentRect.x + Math.round(intentRect.w / 2);
+  const centerPx = [dIntent.data[cxi * 4], dIntent.data[cxi * 4 + 1], dIntent.data[cxi * 4 + 2]];
+  t('中心保留用户要的颜色（不被均值对齐拉走）',
+    centerPx[0] === 220 && centerPx[1] === 40 && centerPx[2] === 40, centerPx);
+  // 但接缝附近必须被校正（否则会有一圈突兀的色边）
+  const edgeIdx = (intentRect.y + 1) * 400 + intentRect.x + Math.round(intentRect.w / 2);
+  const edgePx = [dIntent.data[edgeIdx * 4], dIntent.data[edgeIdx * 4 + 1], dIntent.data[edgeIdx * 4 + 2]];
+  t('接缝附近会被校正（向环境靠拢）', edgePx[0] !== 220 || edgePx[2] !== 40, edgePx);
+
+  // 10) 关闭融合时行为与旧版一致（不能破坏既有能力）
+  const dOff = clone(base);
+  const dNoFusion = clone(base);
+  const legacyOpts = { feather: 10, colorMatch: { ring: 8, ramp: 10, strength: 0.5 } };
+  C.compositeFeathered(dOff, flatPatch, r2, Object.assign({}, legacyOpts, { fusion: null }));
+  C.compositeFeathered(dNoFusion, flatPatch, r2, legacyOpts);
+  let identical = true;
+  for (let i = 0; i < dOff.data.length; i += 4) {
+    if (dOff.data[i] !== dNoFusion.data[i]) { identical = false; break; }
+  }
+  t('fusion=null 时与旧版行为完全一致', identical);
+  t('强度为 0 时不做任何校正', (() => {
+    const a = clone(base), b = clone(base);
+    C.compositeFeathered(a, flatPatch, r2, Object.assign({}, legacyOpts, { fusion: { strength: 0 } }));
+    C.compositeFeathered(b, flatPatch, r2, legacyOpts);
+    for (let i = 0; i < a.data.length; i += 4) if (a.data[i] !== b.data[i]) return false;
+    return true;
+  })());
+
+  // 11) 接线检查
+  const fs4 = require('fs');
+  const appSrc4 = fs4.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html4 = fs4.readFileSync(__dirname + '/../app/index.html', 'utf8');
+  t('合成路径接了融合', /fusion: fuseStrength > 0 \?/.test(appSrc4));
+  t('图层 UI 有无缝融合滑块', /mkParam\('无缝融合'/.test(appSrc4));
+  t('图层显示契合度评分', /assessLayerSeam/.test(appSrc4));
+  t('设置界面有无缝融合', /id="set-fusion"/.test(html4));
+  t('设置界面有中心保留', /id="set-fusionc"/.test(html4));
+  t('设置界面有颗粒补偿', /id="set-fusiong"/.test(html4));
+  t('融合参数会被持久化', /'fusion', 'fusionCenter', 'fusionGrain'/.test(appSrc4));
+  t('融合默认开启', /fusion: 0\.7,/.test(appSrc4));
+  t('评分缓存会随参数失效', /seamCache\.clear\(\)/.test(appSrc4));
+})();
+// ===== 融合块结束 =====
+
+
+/* ---------- 无缝融合 ---------- */
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

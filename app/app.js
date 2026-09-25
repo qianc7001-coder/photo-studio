@@ -107,6 +107,11 @@
     historyBudgetMB: 192,      // 编辑历史内存上限（超过则降采样/丢弃最老的）
     autoSaveSession: true,     // 自动保存编辑会话，进程被杀后可恢复
     keepAlive: true,           // 后台保活：生成时钉住进程，避免切走被杀导致请求白花钱
+    // 无缝融合：把模型输出对齐到周围环境（光照梯度/对比度/颗粒）。
+    // 这是解决「生成结果和周围不契合」的关键手段，且不重新调用模型。
+    fusion: 0.7,               // 总强度（0 = 关闭）
+    fusionCenter: 0.35,        // 中心区域保留多少校正（0 = 中心完全不干预）
+    fusionGrain: 0.6,          // 颗粒补偿强度（模型输出比真照片平滑）
     keepAliveAlways: false,    // 一直保活（长时间连续修图时有用，代价是常驻通知）
     lang: 'auto',
     seed: '',
@@ -139,7 +144,8 @@
     'lang', 'seed', 'format', 'quality', 'mosaic', 'upscaleSmall', 'exportPreset',
     'priceOverride', 'usdCny',
     'historyBudgetMB', 'autoSaveSession',
-    'keepAlive', 'keepAliveAlways'
+    'keepAlive', 'keepAliveAlways',
+    'fusion', 'fusionCenter', 'fusionGrain'
   ];
 
   /**
@@ -649,6 +655,60 @@
    * 色彩匹配就会静默失效（delta 恒为 0）。
    * 这个函数被「应用」「撤销重做重放」「导出」三处共用，保证三者结果一致。
    */
+  /**
+   * 评估一个图层「贴得好不好」。
+   *
+   * 做法：把图层**排除掉**再合成一遍，然后比较「该图层边界内外」的差异。
+   * 这样得到的分数反映的是「这个图层本身带来的色差/亮度台阶」，
+   * 而不是原图本来就有的差异。
+   *
+   * 结果会缓存（按图层参数 + 文档版本），因为 renderLayers 每次都会调用。
+   */
+  let seamCache = new Map();
+
+  function assessLayerSeam(edit) {
+    if (!edit || !edit.patch || !S.docCanvas) return null;
+    const L = C.normalizeLayer(edit);
+    if (!L.enabled || L.opacity <= 0.01) return null;
+    const key = [S.docRev, edit.createdAt, edit.rect.x, edit.rect.y, edit.rect.w, edit.rect.h,
+      Math.round(L.feather), Math.round(L.colorMatch * 100), Math.round(L.opacity * 100),
+      L.fusion == null ? 'auto' : Math.round(L.fusion * 100)].join('|');
+    if (seamCache.has(key)) return seamCache.get(key);
+
+    let result = null;
+    try {
+      const r = edit.rect;
+      // 把整图当前状态读出来（不含本图层），作为「周围环境」的参考
+      const full = S.docCtx.getImageData(0, 0, S.docCanvas.width, S.docCanvas.height);
+      // 反向抵消：把该图层先去掉，得到「没有这一块」的底图
+      const base = makeCanvas(r.w, r.h);
+      const bx = base.getContext('2d', { willReadFrequently: true });
+      bx.drawImage(S.docCanvas, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+      // patch 缩放到选区尺寸
+      let patchSrc = edit.patch;
+      if (patchSrc.width !== r.w || patchSrc.height !== r.h) {
+        const tmp = makeCanvas(r.w, r.h);
+        tmp.getContext('2d').drawImage(patchSrc, 0, 0, patchSrc.width, patchSrc.height, 0, 0, r.w, r.h);
+        patchSrc = tmp;
+      }
+      const src = patchSrc.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, r.w, r.h);
+      result = C.assessSeam({
+        src,
+        rect: { x: r.x, y: r.y, w: r.w, h: r.h },
+        dst: full,
+        dstFull: full,
+        dstOffset: { x: 0, y: 0 },
+        ring: 6
+      });
+    } catch (e) {
+      result = null;      // 取不到像素（画布被污染等）时不影响界面
+    }
+    // 缓存不要无限增长
+    if (seamCache.size > 60) seamCache.clear();
+    seamCache.set(key, result);
+    return result;
+  }
+
   function compositeEditInto(targetCtx, edit) {
     const r = edit.rect;
     const id = targetCtx.getImageData(r.x, r.y, r.w, r.h);
@@ -669,7 +729,9 @@
     // 子图之外没有像素 —— 所以额外把「整图当前状态」读一份传给合成器当参考。
     // 只在真正需要色彩匹配时才读，避免白白复制一份整图。
     let fullPix = null;
-    if (edit.colorMatch > 0 && targetCtx.canvas) {
+    const needFull = edit.colorMatch > 0 || edit.fusion > 0 ||
+      (edit.fusion == null && S.cfg.fusion > 0);
+    if (needFull && targetCtx.canvas) {
       try {
         fullPix = targetCtx.getImageData(0, 0, targetCtx.canvas.width, targetCtx.canvas.height);
       } catch (e) { fullPix = null; }
@@ -688,6 +750,9 @@
       }
       return out;
     })();
+    // 无缝融合：把生成块对齐到周围环境（光照梯度/对比度/颗粒）。
+    // 这一步是免费的 —— 纯像素运算，不重新调用模型，所以可以随时调、随时看效果。
+    const fuseStrength = C.clamp01(edit.fusion != null ? edit.fusion : (S.cfg.fusion != null ? S.cfg.fusion : 0.7));
     C.compositeFeathered(id, src, { x: 0, y: 0, w: r.w, h: r.h }, {
       feather: edit.feather,
       colorMatch: {
@@ -695,6 +760,15 @@
         ramp: Math.max(6, edit.feather || 8),
         strength: edit.colorMatch
       },
+      fusion: fuseStrength > 0 ? {
+        strength: fuseStrength,
+        ring: 10,
+        // 中心保留多少校正：0 = 中心完全不干预（改动原样保留）
+        //                  1 = 中心也完全对齐（最贴合，但可能削弱用户的改动）
+        centerFloor: S.cfg.fusionCenter != null ? S.cfg.fusionCenter : 0.35,
+        grain: S.cfg.fusionGrain != null ? S.cfg.fusionGrain : 0.6,
+        seed: 7
+      } : null,
       mask: maskForComposite,
       dstOffset: { x: r.x, y: r.y },
       dstFull: fullPix
@@ -1964,6 +2038,28 @@
           S.edits[i].colorMatch = v / 100;
           rebuildViewCanvas(); draw();
         }));
+
+      // 无缝融合：修正「生成块和周围环境不契合」的主要手段
+      const curFusion = e.fusion == null ? (S.cfg.fusion != null ? S.cfg.fusion : 0.7) : e.fusion;
+      item.appendChild(mkParam('无缝融合', Math.round(curFusion * 100), 0, 100, 1,
+        (v) => v + '%', 'fusion',
+        (v) => {
+          S.edits[i].fusion = v / 100;
+          rebuildViewCanvas(); draw();
+        }));
+
+      // 契合度评分：让用户知道「现在贴得好不好」、该往哪调
+      const assess = assessLayerSeam(S.edits[i]);
+      if (assess) {
+        const sc = document.createElement('div');
+        sc.className = 'layer-score' + (assess.score >= 80 ? ' good' : assess.score >= 55 ? ' fair' : ' poor');
+        sc.innerHTML = '<span class="ls-num">' + assess.score + '</span>' +
+          '<span class="ls-lbl">契合度</span>' +
+          (assess.issues.length
+            ? '<span class="ls-issues">' + esc(assess.issues.join(' · ')) + '</span>'
+            : '<span class="ls-issues">接缝看不出差异</span>');
+        item.appendChild(sc);
+      }
 
       const note = document.createElement('div');
       note.className = 'layer-note';
@@ -3290,6 +3386,10 @@
     $('set-ctx').value = S.cfg.contextPct;
     $('set-feather').value = S.cfg.feather;
     $('set-cm').value = S.cfg.colorMatch;
+    // 无缝融合
+    $('set-fusion').value = Math.round((S.cfg.fusion != null ? S.cfg.fusion : 0.7) * 100);
+    $('set-fusionc').value = Math.round((S.cfg.fusionCenter != null ? S.cfg.fusionCenter : 0.35) * 100);
+    $('set-fusiong').value = Math.round((S.cfg.fusionGrain != null ? S.cfg.fusionGrain : 0.6) * 100);
     $('set-maxres').value = String(S.cfg.maxRes);
     $('set-tile').value = S.cfg.tile;
     $('set-lang').value = S.cfg.lang;
@@ -3336,6 +3436,9 @@
     $('v-ctx').textContent = S.cfg.contextPct + '%';
     $('v-feather').textContent = S.cfg.feather + ' px';
     $('v-cm').textContent = S.cfg.colorMatch + '%';
+    $('v-fusion').textContent = Math.round((S.cfg.fusion != null ? S.cfg.fusion : 0.7) * 100) + '%';
+    $('v-fusionc').textContent = Math.round((S.cfg.fusionCenter != null ? S.cfg.fusionCenter : 0.35) * 100) + '%';
+    $('v-fusiong').textContent = Math.round((S.cfg.fusionGrain != null ? S.cfg.fusionGrain : 0.6) * 100) + '%';
     $('v-tile').textContent = S.cfg.tile > 0 ? S.cfg.tile + ' px' : '关闭';
     $('v-quality').textContent = S.cfg.quality + '%';
     $('v-mem').textContent = (S.cfg.historyBudgetMB || 192) + ' MB';
@@ -3756,6 +3859,22 @@
     bindField('set-ctx', 'contextPct', (el) => Number(el.value));
     bindField('set-feather', 'feather', (el) => Number(el.value));
     bindField('set-cm', 'colorMatch', (el) => Number(el.value));
+    // 无缝融合：改了要重绘（纯像素运算，不重新调用模型）
+    bindField('set-fusion', 'fusion', (el) => Number(el.value) / 100, () => {
+      seamCache.clear();      // 参数变了，评分缓存要失效
+      if (S.edits.length) { rebuildViewCanvas(); draw(); }
+      renderLayers();
+    });
+    bindField('set-fusionc', 'fusionCenter', (el) => Number(el.value) / 100, () => {
+      seamCache.clear();
+      if (S.edits.length) { rebuildViewCanvas(); draw(); }
+      renderLayers();
+    });
+    bindField('set-fusiong', 'fusionGrain', (el) => Number(el.value) / 100, () => {
+      seamCache.clear();
+      if (S.edits.length) { rebuildViewCanvas(); draw(); }
+      renderLayers();
+    });
     bindField('set-tile', 'tile', (el) => Number(el.value));
     bindField('set-lang', 'lang');
     bindField('set-seed', 'seed');

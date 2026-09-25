@@ -339,6 +339,20 @@
           <input type="range" id="set-cm" min="0" max="100" value="50">
         </label>
         <label class="field">
+          <span>无缝融合 <b id="v-fusion">70%</b> <i>对齐<b>光照渐变、对比度、颗粒</b> —— 这是解决「生成块和周围不契合」的主要手段</i></span>
+          <input type="range" id="set-fusion" min="0" max="100" value="70">
+        </label>
+        <label class="field">
+          <span>中心保留改动 <b id="v-fusionc">35%</b> <i>选区中心少做多少校正。调高 = 更忠实你的修改意图；调低 = 更贴合周围环境</i></span>
+          <input type="range" id="set-fusionc" min="0" max="100" value="35">
+        </label>
+        <label class="field">
+          <span>颗粒补偿 <b id="v-fusiong">60%</b> <i>模型输出比真实照片平滑，补上颗粒可避免「那块太干净」</i></span>
+          <input type="range" id="set-fusiong" min="0" max="100" value="60">
+        </label>
+        <div class="tip">「无缝融合」做的是<b>像素级对齐</b>：模型看不到你照片的明暗走向和质感，
+          只能靠提示词猜，所以总差一点。融合在贴回时强制对齐 —— 而且<b>不重新调用模型，不花钱</b>。</div>
+        <label class="field">
           <span>工作分辨率上限</span>
           <select id="set-maxres">
             <option value="2048">2048 px（省内存）</option>
