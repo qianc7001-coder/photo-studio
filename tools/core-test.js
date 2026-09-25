@@ -274,5 +274,177 @@ t('estimateCalls', C.estimateCalls({x:0,y:0,w:3000,h:3000},{maxSide:1400,overlap
 })();
 // ===== 配置迁移结束 =====
 
+// ===== 作品库单元测试开始 =====
+(() => {
+  // 1) 存储占用按 UTF-16 计费（1 字符 = 2 字节），算错会严重低估占用
+  t('storageBytes 按 UTF-16 计费', C.storageBytes('abc') === 6, C.storageBytes('abc'));
+  t('storageBytes 处理 null', C.storageBytes(null) === 0);
+  t('storageBytes 处理 undefined', C.storageBytes(undefined) === 0);
+  t('storageBytes 处理数字', C.storageBytes(123) === 6);
+
+  // 2) 单条记录的体积估算：元数据 + 缩略图 + 会话
+  const bare = { id: 'a', thumb: '', before: '', session: null };
+  t('estimateWorkBytes 有空记录的基础开销', C.estimateWorkBytes(bare) >= 400, C.estimateWorkBytes(bare));
+  t('estimateWorkBytes 计入缩略图', C.estimateWorkBytes({ id: 'a', thumb: 'x'.repeat(100) }) >
+    C.estimateWorkBytes(bare));
+  t('estimateWorkBytes 计入完整会话',
+    C.estimateWorkBytes({ id: 'a', session: { base: 'y'.repeat(1000) } }) >
+    C.estimateWorkBytes(bare) + 1500);
+  t('estimateWorkBytes 对 null 安全', typeof C.estimateWorkBytes(null) === 'number');
+
+  // 3) 归一化：脏数据不能把界面搞崩
+  const n1 = C.normalizeWork(null);
+  t('normalizeWork 对 null 安全', n1.id === '' && n1.name === '照片' && n1.edits === 0);
+  t('normalizeWork 丢掉非字符串 id', C.normalizeWork({ id: 123 }).id === '');
+  t('normalizeWork 补齐缺失名字', C.normalizeWork({ id: 'a' }).name === '照片');
+  t('normalizeWork 负数尺寸归零', C.normalizeWork({ id: 'a', imgW: -50 }).imgW === 0);
+  t('normalizeWork 小数尺寸取整', C.normalizeWork({ id: 'a', docW: 100.7 }).docW === 101);
+  t('normalizeWork 脏字符串尺寸归零', C.normalizeWork({ id: 'a', imgH: 'x' }).imgH === 0);
+  t('normalizeWork 非对象 session 置 null', C.normalizeWork({ id: 'a', session: 'oops' }).session === null);
+  t('normalizeWork 保留合法 session', C.normalizeWork({ id: 'a', session: { v: 1 } }).session.v === 1);
+  t('normalizeWork createdAt 回退到 at', C.normalizeWork({ id: 'a', at: 5000 }).createdAt === 5000);
+  t('normalizeWork 保留传入的 createdAt', C.normalizeWork({ id: 'a', at: 5000, createdAt: 100 }).createdAt === 100);
+
+  // 4) 排序：新的在前，且不改原数组
+  const orig = [{ id: 'a', at: 100 }, { id: 'b', at: 300 }, { id: 'c', at: 200 }];
+  const sorted = C.sortWorksNewestFirst(orig);
+  t('sortWorksNewestFirst 新的在前', sorted.map((e) => e.id).join('') === 'bca', sorted.map((e) => e.id));
+  t('sortWorksNewestFirst 不改原数组', orig.map((e) => e.id).join('') === 'abc');
+  t('sortWorksNewestFirst 对空安全', C.sortWorksNewestFirst(null).length === 0);
+
+  // 5) 自然日边界：这是「昨天」判断的核心
+  const day = 86400000;
+  const now = new Date(2024, 8, 23, 10, 0, 0).getTime();   // 9月23日 10:00
+  t('dayStartTs 取当天零点', C.dayStartTs(now) === new Date(2024, 8, 23, 0, 0, 0).getTime());
+  t('dayStartTs 对脏值返回 0', C.dayStartTs('x') === 0);
+  t('今天', C.describeWorkAge(now, now) === '今天');
+  t('昨天（跨自然日，哪怕只差 2 小时）',
+    C.describeWorkAge(new Date(2024, 8, 22, 23, 30, 0).getTime(), new Date(2024, 8, 23, 1, 30, 0).getTime()) === '昨天');
+  t('同一天深夜仍算今天',
+    C.describeWorkAge(new Date(2024, 8, 23, 0, 5, 0).getTime(), new Date(2024, 8, 23, 23, 55, 0).getTime()) === '今天');
+  t('3 天前', C.describeWorkAge(now - 3 * day, now) === '3 天前');
+  t('6 天前仍是相对描述', C.describeWorkAge(now - 6 * day, now) === '6 天前');
+  t('7 天前改显示日期', /月/.test(C.describeWorkAge(now - 7 * day, now)), C.describeWorkAge(now - 7 * day, now));
+  t('跨年显示年份', C.describeWorkAge(new Date(2023, 8, 23).getTime(), now).indexOf('2023') === 0,
+    C.describeWorkAge(new Date(2023, 8, 23).getTime(), now));
+  t('同年不显示年份', C.describeWorkAge(new Date(2024, 0, 5).getTime(), now).indexOf('2024') < 0,
+    C.describeWorkAge(new Date(2024, 0, 5).getTime(), now));
+  t('describeWorkAge 对脏值返回空', C.describeWorkAge('x', now) === '');
+
+  t('formatWorkClock 补零', C.formatWorkClock(new Date(2024, 8, 23, 9, 5).getTime()) === '09:05');
+  // 时间戳损坏时不能显示成 "00:00"（看起来像真的凌晨编辑），要与 describeWorkAge 一样返回空
+  t('formatWorkClock 对脏字符串返回空', C.formatWorkClock('x') === '', C.formatWorkClock('x'));
+  t('formatWorkClock 对 0 返回空', C.formatWorkClock(0) === '', C.formatWorkClock(0));
+  t('formatWorkClock 对 null 返回空', C.formatWorkClock(null) === '', C.formatWorkClock(null));
+  t('formatWorkClock 对 undefined 返回空', C.formatWorkClock(undefined) === '');
+  t('formatWorkClock 对负数返回空', C.formatWorkClock(-1) === '', C.formatWorkClock(-1));
+
+  // 6) 分组：同一天要合并成一组，且按天倒序
+  const groups = C.groupWorksByDay([
+    { id: 'a', at: new Date(2024, 8, 23, 9, 0).getTime() },
+    { id: 'b', at: new Date(2024, 8, 23, 18, 0).getTime() },
+    { id: 'c', at: new Date(2024, 8, 22, 9, 0).getTime() }
+  ], now);
+  t('分组数量正确', groups.length === 2, groups.length);
+  t('今天那组含两条', groups[0].items.length === 2, groups[0].items.length);
+  t('今天那组标签是今天', groups[0].label === '今天', groups[0].label);
+  t('昨天那组标签是昨天', groups[1].label === '昨天', groups[1].label);
+  t('组内新的在前', groups[0].items[0].id === 'b', groups[0].items.map((x) => x.id));
+  t('分组丢掉无 id 的脏条目',
+    C.groupWorksByDay([{ at: 1 }, { id: 'ok', at: 1 }], now).reduce((s, g) => s + g.items.length, 0) === 1);
+  t('分组对空数组安全', C.groupWorksByDay([], now).length === 0);
+  // 时间戳损坏的记录不能产生「没有标题」的分隔条
+  const gBad = C.groupWorksByDay([{ id: 'x', at: 0 }, { id: 'y', at: 'oops' }], now);
+  t('损坏时间的记录仍会显示', gBad.reduce((s, g) => s + g.items.length, 0) === 2,
+    gBad.map((g) => g.items.length));
+  t('损坏时间的分组有兜底标题', gBad.every((g) => !!g.label), gBad.map((g) => g.label));
+  t('损坏时间的分组归为一组', gBad.length === 1, gBad.length);
+  t('兜底标题是「时间未知」', gBad[0].label === '时间未知', gBad[0].label);
+
+  // 7) 淘汰规划：先降级（丢会话）再淘汰，尽量多留可见历史
+  const mk = (id, at, sessBytes, thumbBytes) => ({
+    id, at,
+    thumb: 't'.repeat(thumbBytes || 10),
+    session: sessBytes ? { base: 'b'.repeat(sessBytes) } : null
+  });
+  // 预算很小，逼出淘汰
+  const many = [];
+  for (let i = 0; i < 10; i++) many.push(mk('w' + i, 1000 + i * 1000, 2000, 10));
+  const p1 = C.planLibrary(many, { maxBytes: 3000, maxItems: 80 });
+  t('超预算时会淘汰', p1.evictIds.length > 0, p1.evictIds.length);
+  t('淘汰后至少留 1 条', p1.keepIds.length >= 1, p1.keepIds.length);
+  t('淘汰的是最老的', p1.evictIds.indexOf('w0') >= 0, p1.evictIds);
+  t('最新的会被保留', p1.keepIds.indexOf('w9') >= 0, p1.keepIds);
+  t('淘汰项与保留项不重叠',
+    p1.evictIds.every((id) => p1.keepIds.indexOf(id) < 0));
+  t('超预算时给出提示文案', /清理/.test(p1.note), p1.note);
+
+  // 条数上限
+  const p2 = C.planLibrary(many, { maxBytes: 1e9, maxItems: 3 });
+  t('条数上限生效', p2.keepIds.length === 3, p2.keepIds.length);
+  t('条数超限时淘汰最老的 7 条',
+    p2.evictIds.slice().sort().join(',') === 'w0,w1,w2,w3,w4,w5,w6', p2.evictIds.slice().sort());
+  t('条数超限时保留最新的 3 条',
+    p2.keepIds.slice().sort().join(',') === 'w7,w8,w9', p2.keepIds.slice().sort());
+
+  // 降级优先于淘汰：体积刚好超一点时，应该丢会话而不是丢整条记录
+  const p3 = C.planLibrary([
+    mk('old', 1000, 5000, 10),
+    mk('new', 2000, 0, 10)
+  ], { maxBytes: 4000, maxItems: 80 });
+  t('优先降级而不是淘汰', p3.downgradeIds.indexOf('old') >= 0 && p3.evictIds.length === 0,
+    { d: p3.downgradeIds, e: p3.evictIds });
+  t('降级后仍保留可见', p3.keepIds.indexOf('old') >= 0, p3.keepIds);
+  t('降级给出提示文案', /仅保留预览/.test(p3.note), p3.note);
+
+  // 置顶（当前作品）永不被淘汰/降级 —— 否则正在编辑的照片会从记录里消失
+  const p4 = C.planLibrary(many, { maxBytes: 500, maxItems: 1, pinnedId: 'w0' });
+  t('置顶项永不被淘汰', p4.evictIds.indexOf('w0') < 0, p4.evictIds);
+  t('置顶项永不被降级', p4.downgradeIds.indexOf('w0') < 0, p4.downgradeIds);
+  t('置顶项始终在保留列表里', p4.keepIds.indexOf('w0') >= 0, p4.keepIds);
+
+  t('planLibrary 对空数组安全', C.planLibrary([], {}).keepIds.length === 0);
+  t('planLibrary 对 null 安全', C.planLibrary(null, {}).keepIds.length === 0);
+  t('planLibrary 不改原数组', (() => {
+    const arr = [{ id: 'a', at: 1, session: { base: 'x'.repeat(9000) } }];
+    const before = arr[0].session;
+    C.planLibrary(arr, { maxBytes: 100 });
+    return arr[0].session === before;
+  })());
+  t('planLibrary 不返回重复 id', (() => {
+    const p = C.planLibrary(many, { maxBytes: 3000 });
+    const all = p.keepIds.concat(p.evictIds);
+    return new Set(all).size === all.length;
+  })());
+
+  // 8) 统计
+  const st = C.workLibraryStats([mk('a', 1, 100, 10), mk('b', 2, 0, 10), { at: 3 }]);
+  t('统计只算有 id 的条目', st.count === 2, st.count);
+  t('统计可继续编辑的条数', st.withSession === 1, st.withSession);
+  t('统计体积为正', st.bytes > 0, st.bytes);
+  t('统计对空安全', C.workLibraryStats(null).count === 0);
+  t('editable 与 withSession 一致', st.editable === st.withSession);
+
+  // 9) 预算常量本身要合理：不能超过 localStorage 常见上限（5MB）
+  t('作品库预算不超过 3MB', C.LIBRARY_BUDGET_BYTES <= 3 * 1024 * 1024, C.LIBRARY_BUDGET_BYTES);
+  t('作品库预算留了余量给会话', C.LIBRARY_BUDGET_BYTES <= 2.5 * 1024 * 1024);
+  t('条数上限合理', C.LIBRARY_MAX_ITEMS >= 20 && C.LIBRARY_MAX_ITEMS <= 200, C.LIBRARY_MAX_ITEMS);
+  t('缩略图边长够小', C.THUMB_MAX_SIDE <= 512, C.THUMB_MAX_SIDE);
+  t('缩略图边长不至于糊', C.THUMB_MAX_SIDE >= 128, C.THUMB_MAX_SIDE);
+
+  // 10) 用户的核心诉求：昨天修的照片今天还能看到
+  //     用真实的「今天 10:00」和「昨天 22:00」验证，不能依赖当前时钟
+  const today = new Date(2024, 8, 23, 10, 0).getTime();
+  const yest = new Date(2024, 8, 22, 22, 0).getTime();
+  const lib = [{ id: 'y', at: yest, name: '昨天的照片', edits: 3, thumb: 'x', session: { v: 1 } }];
+  const g = C.groupWorksByDay(lib, today);
+  t('昨天修的照片今天仍在记录里', g.length === 1 && g[0].items.length === 1);
+  t('显示为「昨天」', g[0].label === '昨天', g[0].label);
+  t('能看出修了几处', g[0].items[0].edits === 3);
+  t('仍可继续编辑（会话还在）', !!g[0].items[0].session);
+})();
+// ===== 作品库单元测试结束 =====
+
+/* ---------- 作品库（跨天修图记录） ---------- */
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

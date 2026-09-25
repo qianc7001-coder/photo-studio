@@ -46,6 +46,12 @@
     histPreview: null,    // { cursor, total } 正在预览的位置
     histStash: null,      // { edits, strokes, docVersion } 预览前的现场
 
+    // 作品库：当前这张照片对应哪条作品记录（换图时重新生成）
+    workId: null,
+    workStartedAt: 0,
+    library: [],          // 作品记录列表（内存态，落盘在 LS_KEY_LIBRARY）
+    libraryNote: '',      // 空间不足时的提示（说明清理了什么）
+
     // 待确认的生成结果
     pending: null,
 
@@ -66,6 +72,10 @@
     // genToken 用来防止重复点击生成造成多个请求并发写同一块画布。
     docVersion: 0,
     genToken: 0,
+
+    // 打包缓存版本号：任何会让 buildSessionPayload 结果失效的改动都要 +1，
+    // 否则缓存会把过期的会话数据发给「会话保存」和「作品库」两处。
+    docRev: 0,
 
     // 本次会话累计花费（用于让用户对总支出有数）
     spend: { calls: 0, usd: 0, unknownCalls: 0 }
@@ -105,6 +115,10 @@
   const LS_KEY_PHOTO = 'photoStudio.photo.v1';
   const LS_KEY_VER = 'photoStudio.lastVersion';
   const LS_KEY_SESSION = 'photoStudio.session.v1';
+  // 作品库：历史上修过的每一张照片（跨天保留）。
+  // 与 SESSION 的区别：SESSION 只存「当前这张图未完成的编辑」，换图即被覆盖；
+  // LIBRARY 是作品清单，关掉应用、换图、隔几天都还在。
+  const LS_KEY_LIBRARY = 'photoStudio.library.v1';
   // 版本号由 version.js（构建时从 version.json 生成）提供，避免多处手改不一致
   const APP_VERSION = (window.PS_VERSION && window.PS_VERSION.versionName) || '1.1.0';
   const CHANGELOG = (window.PS_VERSION && window.PS_VERSION.changelog) || [];
@@ -464,6 +478,12 @@
     S.strokes = [];
     S.pending = null;
     S.docVersion++;      // 旧文档的生成结果一律作废
+    S.docRev++;          // 换图 → 打包缓存失效
+    // 换图 = 换一件作品：生成新的作品 id。
+    // 旧的那条**留在作品库里**（这正是「昨天修的今天还看得到」的关键），
+    // 只是不再接收后续编辑。
+    S.workId = null;
+    S.workStartedAt = 0;
     try { localStorage.removeItem(LS_KEY_SESSION); } catch (e) { /* ignore */ }
 
     $('file-name').textContent = name;
@@ -1850,6 +1870,302 @@
     $('history').hidden = true;
   }
 
+  /* ============================ 作品库（跨天记录） ============================ */
+
+  /**
+   * 作品库：把「修过的每一张照片」记下来，跨天保留。
+   *
+   * 和上面「历史时间线」的区别：
+   *   时间线 = 当前这张图的操作步骤（换图就没了）
+   *   作品库 = 历史上修过的所有照片（昨天修的，今天还看得到）
+   *
+   * 存储是分层的，因为 localStorage 只有 ~5MB：
+   *   - 缩略图：每条都存，保证「看得见」
+   *   - 完整会话：预算够时才存，保证「能继续编辑」
+   *   - 超预算：先丢老条目的会话（保缩略图），再不够才整条淘汰
+   */
+
+  /** 生成一个作品 id（时间戳 + 随机后缀，避免同一毫秒内重复） */
+  function newWorkId() {
+    return 'w' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  }
+
+  function loadLibrary() {
+    try {
+      const raw = localStorage.getItem(LS_KEY_LIBRARY);
+      if (!raw) return [];
+      const j = JSON.parse(raw);
+      const list = (j && Array.isArray(j.items)) ? j.items : [];
+      // 归一化并丢掉没有 id 的脏条目
+      return list.map(C.normalizeWork).filter((e) => e.id);
+    } catch (e) {
+      console.warn('[修图台] 作品库读取失败，将从空开始', e);
+      return [];
+    }
+  }
+
+  /** 落盘。返回是否成功（超配额会失败，交给调用方决定怎么退让） */
+  function saveLibrary() {
+    try {
+      const plan = C.planLibrary(S.library, {
+        maxBytes: C.LIBRARY_BUDGET_BYTES,
+        maxItems: C.LIBRARY_MAX_ITEMS,
+        pinnedId: S.workId
+      });
+      // 执行降级：丢掉完整会话，只留缩略图
+      if (plan.downgradeIds.length) {
+        for (const e of S.library) {
+          if (plan.downgradeIds.includes(e.id)) e.session = null;
+        }
+      }
+      // 执行淘汰
+      if (plan.evictIds.length) {
+        S.library = S.library.filter((e) => !plan.evictIds.includes(e.id));
+      }
+      if (plan.note) S.libraryNote = plan.note;
+      localStorage.setItem(LS_KEY_LIBRARY, JSON.stringify({ v: 1, items: S.library }));
+      return true;
+    } catch (e) {
+      // 配额真的满了：丢掉所有「只有缩略图」的老记录再试一次
+      try {
+        const slim = S.library.filter((x) => x.id === S.workId).concat(
+          S.library.filter((x) => x.id !== S.workId).slice(0, 5)
+        );
+        S.library = slim;
+        localStorage.setItem(LS_KEY_LIBRARY, JSON.stringify({ v: 1, items: S.library }));
+        return true;
+      } catch (e2) {
+        console.warn('[修图台] 作品库保存失败（空间不足）', e2);
+        return false;
+      }
+    }
+  }
+
+  /** 把画布缩成小图（作品库的预览图，控制在几十 KB） */
+  function makeThumb(canvas, maxSide) {
+    if (!canvas || !canvas.width || !canvas.height) return '';
+    const ms = Math.max(48, Math.round(Number(maxSide) || C.THUMB_MAX_SIDE));
+    const scale = Math.min(1, ms / Math.max(canvas.width, canvas.height));
+    const w = Math.max(1, Math.round(canvas.width * scale));
+    const h = Math.max(1, Math.round(canvas.height * scale));
+    try {
+      const t = makeCanvas(w, h);
+      const tc = t.getContext('2d', { willReadFrequently: true });
+      tc.imageSmoothingEnabled = true;
+      tc.imageSmoothingQuality = 'high';
+      tc.drawImage(canvas, 0, 0, canvas.width, canvas.height, 0, 0, w, h);
+      return t.toDataURL('image/jpeg', 0.72);
+    } catch (e) {
+      return '';
+    }
+  }
+
+  /**
+   * 把当前这张照片写进作品库（有编辑才记）。
+   *
+   * 用 workId 做「原地更新」：同一张照片反复编辑只占一条记录，
+   * 不会每改一次就多出一条。
+   */
+  function touchWork() {
+    if (!S.docCanvas || !S.viewCanvas) return;
+    if (!S.edits.length) return;              // 没改过就不记，避免堆一堆原图
+    if (!S.workId) { S.workId = newWorkId(); S.workStartedAt = Date.now(); }
+
+    const rec = {
+      id: S.workId,
+      at: Date.now(),
+      createdAt: S.workStartedAt || Date.now(),
+      name: ($('file-name').textContent || 'photo.jpg').replace(/（已恢复）$/, ''),
+      imgW: S.imgW, imgH: S.imgH,
+      docW: S.docW, docH: S.docH,
+      edits: S.edits.length,
+      thumb: makeThumb(S.viewCanvas, C.THUMB_MAX_SIDE),
+      before: '',
+      session: null
+    };
+
+    // 完整会话：预算够就存，让用户能「继续编辑」
+    const payload = buildSessionPayload();
+    if (payload) {
+      const probe = Object.assign({}, rec, { session: payload });
+      const used = S.library.reduce((s, e) => s + C.estimateWorkBytes(e.id === S.workId ? probe : e), 0);
+      // 单条不超过总预算的 60%，否则一条就能把库挤爆
+      if (used <= C.LIBRARY_BUDGET_BYTES * 0.6 || S.library.length <= 1) {
+        rec.session = payload;
+      }
+    }
+
+    const i = S.library.findIndex((e) => e.id === S.workId);
+    if (i >= 0) S.library[i] = rec; else S.library.unshift(rec);
+    saveLibrary();
+    updateLibraryBadge();
+  }
+
+  /** 防抖保存：编辑过程中频繁写 localStorage 会卡 */
+  let workSaveTimer = null;
+  function scheduleWorkSave() {
+    clearTimeout(workSaveTimer);
+    workSaveTimer = setTimeout(() => { try { touchWork(); } catch (e) { /* ignore */ } }, 1600);
+  }
+
+  function updateLibraryBadge() {
+    const b = $('lib-count');
+    if (!b) return;
+    const n = S.library.length;
+    b.textContent = String(n);
+    b.hidden = n === 0;
+  }
+
+  function openLibrary() {
+    $('library').hidden = false;
+    renderLibrary();
+  }
+  function closeLibrary() { $('library').hidden = true; }
+
+  function renderLibrary() {
+    const list = $('lib-list');
+    const empty = $('lib-empty');
+    const usage = $('lib-usage');
+    if (!list) return;
+
+    const groups = C.groupWorksByDay(S.library, Date.now());
+    const stats = C.workLibraryStats(S.library);
+
+    if (empty) empty.hidden = S.library.length > 0;
+    if (usage) {
+      usage.textContent = stats.count
+        ? (stats.count + ' 张 · 占用 ' + C.formatBytes(stats.bytes) +
+          (stats.withSession ? ' · ' + stats.withSession + ' 张可继续编辑' : ''))
+        : '';
+    }
+    list.innerHTML = '';
+
+    for (const g of groups) {
+      const head = document.createElement('div');
+      head.className = 'lib-day';
+      head.textContent = g.label;
+      list.appendChild(head);
+
+      const grid = document.createElement('div');
+      grid.className = 'lib-grid';
+
+      for (const w of g.items) {
+        const card = document.createElement('div');
+        card.className = 'lib-card';
+        card.dataset.workId = w.id;
+
+        const img = document.createElement('img');
+        img.className = 'lib-thumb';
+        img.loading = 'lazy';
+        img.alt = w.name;
+        if (w.thumb) img.src = w.thumb;
+        else {
+          // 没有缩略图（极少数脏数据）时给个占位，避免出现破图
+          img.style.background = 'var(--panel-2)';
+        }
+        card.appendChild(img);
+
+        const meta = document.createElement('div');
+        meta.className = 'lib-meta';
+        const nm = document.createElement('div');
+        nm.className = 'lib-name';
+        nm.textContent = w.name;
+        const sub = document.createElement('div');
+        sub.className = 'lib-sub';
+        sub.textContent = C.formatWorkClock(w.at) + ' · ' + w.edits + ' 处修改' +
+          (w.session ? '' : ' · 仅预览');
+        meta.appendChild(nm);
+        meta.appendChild(sub);
+        card.appendChild(meta);
+
+        card.onclick = () => openWorkPreview(w.id);
+        grid.appendChild(card);
+      }
+      list.appendChild(grid);
+    }
+  }
+
+  /** 作品预览：大图 + 继续编辑 / 删除 */
+  function openWorkPreview(id) {
+    const w = S.library.find((e) => e.id === id);
+    if (!w) return;
+    const el = $('work-preview');
+    if (!el) return;
+
+    const canEdit = !!w.session;
+    el.innerHTML =
+      '<div class="wp-mask" data-wp-close></div>' +
+      '<div class="wp-body">' +
+        '<div class="wp-head">' +
+          '<div>' +
+            '<div class="wp-title">' + escapeHtml(w.name) + '</div>' +
+            '<div class="wp-sub">' + escapeHtml(C.describeWorkAge(w.at, Date.now())) + ' ' +
+              escapeHtml(C.formatWorkClock(w.at)) + ' · ' + w.edits + ' 处修改' +
+              (w.docW ? ' · ' + w.docW + '×' + w.docH : '') + '</div>' +
+          '</div>' +
+          '<button class="tb-btn icon" data-wp-close>' +
+            '<svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>' +
+          '</button>' +
+        '</div>' +
+        (w.thumb ? '<img class="wp-img" src="' + w.thumb + '" alt="' + escapeHtml(w.name) + '">' : '') +
+        '<div class="wp-actions">' +
+          (canEdit
+            ? '<button class="primary grow" id="wp-continue">继续编辑这张</button>'
+            : '<div class="wp-note">这张的编辑数据已被空间清理，只能查看预览</div>') +
+          '<button class="danger" id="wp-delete">删除记录</button>' +
+        '</div>' +
+      '</div>';
+    el.hidden = false;
+
+    el.querySelectorAll('[data-wp-close]').forEach((b) => { b.onclick = () => { el.hidden = true; }; });
+    const del = $('wp-delete');
+    if (del) del.onclick = () => {
+      S.library = S.library.filter((e) => e.id !== id);
+      saveLibrary();
+      el.hidden = true;
+      renderLibrary();
+      updateLibraryBadge();
+      toast('已删除这条记录');
+    };
+    const cont = $('wp-continue');
+    if (cont) cont.onclick = async () => {
+      el.hidden = true;
+      await continueWork(id);
+    };
+  }
+
+  /** 从作品库恢复一张照片继续编辑 */
+  async function continueWork(id) {
+    const w = S.library.find((e) => e.id === id);
+    if (!w || !w.session) { toast('这条记录没有可恢复的编辑数据'); return; }
+
+    // 当前有未保存的编辑时先确认，避免用户误以为「刚才的还在」
+    if (S.edits.length && S.workId !== id) {
+      const ok = window.confirm(
+        '当前照片还有 ' + S.edits.length + ' 处未导出的修改。\n' +
+        '继续编辑历史记录会替换掉当前画面（当前这张已存入修图记录，随时可以回来）。\n\n继续？'
+      );
+      if (!ok) return;
+      // 先把当前这张存进作品库，保证不丢
+      touchWork();
+    }
+
+    await restoreSession(w.session);
+    // 接管为「当前作品」：后续编辑继续写这条记录
+    S.workId = w.id;
+    S.workStartedAt = w.createdAt || w.at;
+    undoStack = C.createUndoStack(100);
+    updateUI();
+    updateLibraryBadge();
+    toast('已回到「' + w.name + '」，可以继续修改', 3200);
+  }
+
+  function escapeHtml(s) {
+    return String(s === null || s === undefined ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
   function renderHistory() {
     const list = $('hist-list');
     const empty = $('hist-empty');
@@ -2284,6 +2600,7 @@
     invalidateMask();
     enforceHistoryBudget();       // 控制内存，防止手机上被系统杀掉
     scheduleSessionSave();
+    scheduleWorkSave();           // 记进作品库（跨天可查）
     renderLayers();               // 刷新修改记录面板
     $('compare').hidden = true;
     updateUI();
@@ -2342,6 +2659,7 @@
     }
     invalidateMask();
     S.docVersion++;
+    S.docRev++;                  // 撤销/重做改了编辑 → 打包缓存失效
     rebuildViewCanvas();
     renderLayers();
     draw();
@@ -2367,7 +2685,11 @@
     if (!undoStack) return;
     const c = C.makeUndoCommand(cmd.type, cmd);
     if (c) undoStack.push(c);
+    S.docRev++;                  // 编辑变了 → 打包缓存失效
     updateUI();
+    // 所有改动画面的操作都会经过这里（生成/画笔/调参/开关/删除），
+    // 所以在这里挂一次作品库保存，就覆盖了全部编辑路径。
+    scheduleWorkSave();
   }
 
   /* ============================ 导出 ============================ */
@@ -2437,6 +2759,19 @@
       } catch (e) {
         console.warn('[修图台] 写入元数据失败（不影响导出）', e);
       }
+    }
+
+    // 导出是「这张做完了」的信号：立刻存一次作品库（不等防抖），
+    // 并把原图也存下来，方便以后对比修改前后。
+    if (S.edits.length) {
+      try {
+        touchWork();
+        const rec = S.library.find((e) => e.id === S.workId);
+        if (rec && !rec.before && S.docCanvas) {
+          rec.before = makeThumb(S.docCanvas, C.THUMB_MAX_SIDE);
+          saveLibrary();
+        }
+      } catch (e) { /* 作品库失败不影响导出 */ }
     }
 
     const name = C.timestampName('retouched', fmt === 'image/png' ? 'png' : 'jpg');
@@ -2881,6 +3216,8 @@
     document.querySelectorAll('#history [data-close]').forEach((el) => { el.onclick = closeHistory; });
     $('hist-preview-off').onclick = () => cancelHistoryPreview();
     $('hist-jump').onclick = commitHistoryJump;
+    $('btn-library').onclick = openLibrary;
+    document.querySelectorAll('#library [data-close]').forEach((el) => { el.onclick = closeLibrary; });
     $('btn-fit').onclick = fitToScreen;
     $('btn-reset-sel').onclick = () => {
       if (!S.docCanvas) return;
@@ -3222,6 +3559,21 @@
   let sessionSaveTimer = null;
 
   /**
+   * 打包缓存：只缓存「贵的那部分」，便宜的字段每次都现读。
+   *
+   * buildSessionPayload 的开销几乎全在两处编码：整张画布的 JPEG，
+   * 以及每个 patch 的 JPEG（3000×2000 上量到几百毫秒）。
+   * 而「会话保存」和「作品库保存」都要用它 —— 一次编辑各建一遍，手机上会明显卡顿。
+   *
+   * 这里只缓存 base 和已编码的 patches，用 S.docRev 判断失效；
+   * rect / strokes / 文件名体积可忽略，每次现读，所以不存在过期风险。
+   */
+  let payloadCache = null;
+
+  /** 丢掉打包缓存（文档或编辑变了就调一次） */
+  function invalidatePayloadCache() { payloadCache = null; }
+
+  /**
    * 防抖保存：编辑后延迟保存，避免频繁写 localStorage 卡顿。
    * 存的是「编辑记录 + 原图」，这样进程被杀后能继续之前的工作。
    */
@@ -3231,24 +3583,34 @@
     sessionSaveTimer = setTimeout(saveSession, 1200);
   }
 
-  async function saveSession() {
-    if (!S.img || !S.viewCanvas) return;
+  /**
+   * 把当前编辑状态打包成可恢复的会话数据。
+   *
+   * 抽出来给两处共用：
+   *   - saveSession()：存「当前未完成的编辑」，进程被杀后可恢复
+   *   - touchWork()：存进作品库，让历史记录可以「继续编辑」
+   * 两边用同一个结构，恢复时就能复用同一套 restoreSession。
+   */
+  function buildSessionPayload() {
+    if (!S.docCanvas || !S.viewCanvas) return null;
     try {
-      // 原图存成压缩后的 dataURL（用工作分辨率的基准图，避免超大）
-      const baseCanvas = S.docCanvas;
-      if (!baseCanvas) return;
-      const baseUrl = baseCanvas.toDataURL('image/jpeg', 0.85);
-
-      // 编辑记录：patch 编码成 JPEG，掩膜做量化压缩
-      const plan = C.planSessionPersist(S.edits, {
-        maxBytes: 3 * 1024 * 1024,
-        encode: (patch) => patch.toDataURL('image/jpeg', 0.82)
-      });
-
-      const payload = {
+      let baseUrl, plan;
+      if (payloadCache && payloadCache.rev === S.docRev) {
+        baseUrl = payloadCache.base;
+        plan = payloadCache.plan;
+      } else {
+        baseUrl = S.docCanvas.toDataURL('image/jpeg', 0.85);
+        plan = C.planSessionPersist(S.edits, {
+          maxBytes: 3 * 1024 * 1024,
+          encode: (patch) => patch.toDataURL('image/jpeg', 0.82)
+        });
+        payloadCache = { rev: S.docRev, base: baseUrl, plan };
+      }
+      // 以下字段每次都现读：体积小，且可能在两次打包之间变化
+      return {
         v: 1,
         at: Date.now(),
-        fileName: $('file-name').textContent || 'photo.jpg',
+        fileName: ($('file-name').textContent || 'photo.jpg').replace(/（已恢复）$/, ''),
         base: baseUrl,
         imgW: S.imgW, imgH: S.imgH,
         docW: S.docW, docH: S.docH,
@@ -3260,6 +3622,16 @@
           maskLen: it.mask ? it.mask.length : 0
         }))
       };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function saveSession() {
+    if (!S.img || !S.viewCanvas) return;
+    try {
+      const payload = buildSessionPayload();
+      if (!payload) return;
       localStorage.setItem(LS_KEY_SESSION, JSON.stringify(payload));
     } catch (e) {
       // 空间不足：清掉会话，避免影响正常使用
@@ -3288,6 +3660,18 @@
         im.onerror = rej;
         im.src = j.base;
       });
+      // 换掉整份文档前必须作废在途的生成请求。
+      // 「继续编辑」是从作品库进入的，此时可能正好有一次生成在跑；
+      // 不作废的话，旧请求返回后会把结果贴到这张刚恢复的照片上（贴错图）。
+      if (S.aborter) {
+        try { S.aborter.abort(); } catch (e) { /* ignore */ }
+        S.aborter = null;
+      }
+      S.genToken++;
+      S.pending = null;
+      const cmpEl2 = $('compare');
+      if (cmpEl2) cmpEl2.hidden = true;
+
       // 基准图直接用它（已经是工作分辨率），避免再次解码原图
       S.img = img;
       S.imgW = j.imgW || img.width;
@@ -3321,6 +3705,8 @@
         });
       }
       S.redo = [];
+      S.docVersion++;              // 文档整体换掉了，旧的在途结果一律作废
+      S.docRev++;                  // 打包缓存失效
       S.rect = j.rect || null;
       S.strokes = j.strokes || [];
 
@@ -3406,6 +3792,9 @@
     // 迁移过配置就必须立刻落盘。
     // 不落盘的话，每次启动都会重新迁移一遍 —— 用户手动改回来的设置会被反复覆盖。
     if (lastCfgMigration.length) saveCfg();
+    // 载入跨天的修图记录（必须早于 bind，角标要能立刻显示条数）
+    S.library = loadLibrary();
+    updateLibraryBadge();
     undoStack = C.createUndoStack(100);
     refreshBgColor();
     bind();
@@ -3445,6 +3834,17 @@
     closeHistory,
     buildTimeline: currentTimeline,
     historySize: () => (undoStack ? undoStack.size() : { past: 0, future: 0 }),
-    undoStack: () => undoStack
+    undoStack: () => undoStack,
+    // 作品库（跨天修图记录，供测试与外部调用）
+    loadLibrary,
+    saveLibrary,
+    touchWork,
+    renderLibrary,
+    openLibrary,
+    closeLibrary,
+    openWorkPreview,
+    continueWork,
+    library: () => S.library,
+    workId: () => S.workId
   };
 })();

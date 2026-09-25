@@ -35,8 +35,12 @@
     <button class="tb-btn icon" id="btn-save" title="导出" disabled>
       <svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
     </button>
+    <button class="tb-btn icon" id="btn-library" title="修图记录">
+      <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 9v11"/></svg>
+      <b id="lib-count" hidden>0</b>
+    </button>
     <button class="tb-btn icon" id="btn-settings" title="设置">
-      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-.3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
     </button>
   </header>
 
@@ -227,6 +231,33 @@
     </div>
   </div>
 </div>
+
+<!-- ======================= 修图记录（跨天作品库） ======================= -->
+<div id="library" class="sheet" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-body">
+    <div class="sheet-head">
+      <h3>修图记录</h3>
+      <button class="tb-btn icon" data-close>
+        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="sheet-scroll">
+      <div class="tip" style="margin:0 0 12px">
+        这里保存你<b>修过的每一张照片</b>，关掉应用、换到第二天都还在。
+        点任意一张可以看大图；只要编辑数据还在，就能<b>继续编辑</b>。
+      </div>
+      <div id="lib-usage" class="lib-usage"></div>
+      <div id="lib-list"></div>
+      <div id="lib-empty" class="tip" style="text-align:center;padding:20px 0" hidden>
+        还没有修图记录。修好一张照片后，这里会自动留档，明天也能找回来。
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 作品大图预览 -->
+<div id="work-preview" hidden></div>
 
 <!-- ======================= 设置面板 ======================= -->
 <div id="settings" class="sheet" hidden>

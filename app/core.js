@@ -2082,6 +2082,227 @@
     return { cfg: c, changed };
   }
 
+  /* ====================== 7.01d 作品库（跨天的修图记录） ====================== */
+
+  /**
+   * 作品库：记录「修过的每一张照片」，跨天保留。
+   *
+   * 与 7.015/7.01b 的区别：
+   *   - 撤销栈 / 时间线：**当前这张图**的操作步骤，换图即失效
+   *   - 作品库：**历史上修过的所有照片**，关掉应用、换图、隔几天都还在
+   *
+   * 存储策略（分层，省钱又留得住）：
+   *   - 缩略图：每条都存（几十 KB），保证「看得见」
+   *   - 完整会话：只在预算够时存，保证「能继续编辑」
+   *   - 超预算：先把老条目的完整会话降级掉（保缩略图），再不够才整条淘汰
+   */
+
+  /** localStorage 按 UTF-16 计费：1 个字符占 2 字节。不算这个会严重低估占用 */
+  function storageBytes(str) {
+    if (str === null || str === undefined) return 0;
+    return String(str).length * 2;
+  }
+
+  /** 作品库预算：localStorage 通常共 5MB，要给配置与会话留余量 */
+  const LIBRARY_BUDGET_BYTES = 2.5 * 1024 * 1024;
+  const LIBRARY_MAX_ITEMS = 80;
+  const THUMB_MAX_SIDE = 360;
+
+  /** 估算一条作品记录占多少存储 */
+  function estimateWorkBytes(rec) {
+    const r = rec || {};
+    let n = 400;                                    // 元数据（文件名/时间/尺寸/计数）
+    n += storageBytes(r.thumb);
+    n += storageBytes(r.before);
+    if (r.session) n += storageBytes(JSON.stringify(r.session));
+    return n;
+  }
+
+  /** 归一化一条作品记录：补齐字段、夹掉非法值，避免脏数据把界面搞崩 */
+  function normalizeWork(rec) {
+    const r = rec || {};
+    return {
+      id: typeof r.id === 'string' && r.id ? r.id : '',
+      at: num(r.at, 0),
+      createdAt: num(r.createdAt, num(r.at, 0)),
+      name: typeof r.name === 'string' && r.name ? r.name : '照片',
+      imgW: Math.max(0, Math.round(num(r.imgW, 0))),
+      imgH: Math.max(0, Math.round(num(r.imgH, 0))),
+      docW: Math.max(0, Math.round(num(r.docW, 0))),
+      docH: Math.max(0, Math.round(num(r.docH, 0))),
+      edits: Math.max(0, Math.round(num(r.edits, 0))),
+      thumb: typeof r.thumb === 'string' ? r.thumb : '',
+      before: typeof r.before === 'string' ? r.before : '',
+      session: (r.session && typeof r.session === 'object') ? r.session : null
+    };
+  }
+
+  /** 按时间从新到旧排序（不改原数组） */
+  function sortWorksNewestFirst(entries) {
+    return (entries || []).slice().sort((a, b) => num(b.at, 0) - num(a.at, 0));
+  }
+
+  /**
+   * 规划作品库的取舍：决定哪些留、哪些降级、哪些淘汰。
+   *
+   * 纯函数（不修改入参），返回 id 列表交给调用方执行 —— 这样好测。
+   *
+   * 淘汰顺序刻意「先降级再淘汰」：完整会话很占地方（几百 KB），
+   * 但缩略图只要几十 KB。把老条目的会话丢掉，能多留好几倍的历史可见性。
+   *
+   * @param {Array} entries 作品记录数组
+   * @param {object} opts { maxBytes, maxItems, pinnedId }
+   * @returns {{keepIds:Array, downgradeIds:Array, evictIds:Array, bytes:number, note:string}}
+   */
+  function planLibrary(entries, opts) {
+    const o = opts || {};
+    const maxBytes = num(o.maxBytes, LIBRARY_BUDGET_BYTES);
+    const maxItems = Math.max(1, Math.round(num(o.maxItems, LIBRARY_MAX_ITEMS)));
+    const pinnedId = o.pinnedId || null;
+
+    const sorted = sortWorksNewestFirst(entries);
+    const keepIds = [], downgradeIds = [], evictIds = [];
+    const downgraded = new Set();
+
+    // 第一轮：按条数裁（置顶的当前作品永不淘汰）
+    const kept = [];
+    for (let i = 0; i < sorted.length; i++) {
+      const e = sorted[i];
+      const isPinned = pinnedId && e.id === pinnedId;
+      if (i < maxItems || isPinned) kept.push(e);
+      else evictIds.push(e.id);
+    }
+
+    /**
+     * 一条记录「降级之后」的实际占用：降级会丢掉完整会话，只剩元数据 + 缩略图。
+     * 必须按这个口径算，否则会重复扣减会话体积 —— 那会让账面占用远小于真实占用，
+     * 于是计划以为放得下、实际却写爆 localStorage 配额。
+     */
+    const remainBytes = (e) => {
+      const r = normalizeWork(e);
+      let n = 400 + storageBytes(r.thumb) + storageBytes(r.before);
+      if (r.session && !downgraded.has(r.id)) n += storageBytes(JSON.stringify(r.session));
+      return n;
+    };
+
+    // 第二轮：按体积裁。先降级最老的（丢完整会话），仍超再淘汰
+    let bytes = kept.reduce((s, e) => s + estimateWorkBytes(e), 0);
+    if (bytes > maxBytes) {
+      // 从最老的开始降级
+      for (let i = kept.length - 1; i >= 0 && bytes > maxBytes; i--) {
+        const e = kept[i];
+        const isPinned = pinnedId && e.id === pinnedId;
+        if (isPinned || !e.session) continue;
+        bytes -= storageBytes(JSON.stringify(e.session));
+        downgraded.add(e.id);
+        downgradeIds.push(e.id);
+      }
+      // 还超就淘汰最老的（保留至少 1 条，否则界面会空得莫名其妙）
+      for (let i = kept.length - 1; i >= 0 && bytes > maxBytes && kept.length > 1; i--) {
+        const e = kept[i];
+        const isPinned = pinnedId && e.id === pinnedId;
+        if (isPinned) continue;
+        bytes -= remainBytes(e);        // 已降级的条目不能再扣一次会话体积
+        evictIds.push(e.id);
+        kept.splice(i, 1);
+      }
+    }
+
+    const finalIds = kept.map((e) => e.id);
+    for (const id of finalIds) if (!evictIds.includes(id)) keepIds.push(id);
+
+    let note = '';
+    if (evictIds.length) {
+      note = '空间已满，最早的 ' + evictIds.length + ' 条记录已被清理';
+      if (downgradeIds.length) note += '，另有 ' + downgradeIds.length + ' 条转为仅保留预览';
+    } else if (downgradeIds.length) {
+      note = downgradeIds.length + ' 条较早的记录已转为仅保留预览';
+    }
+
+    return { keepIds, downgradeIds, evictIds, bytes, note };
+  }
+
+  /** 某个时间戳所在「那一天」的零点（本地时区） */
+  function dayStartTs(ts) {
+    const d = new Date(num(ts, 0));
+    if (isNaN(d.getTime())) return 0;
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  }
+
+  /**
+   * 相对时间描述：今天 / 昨天 / N 天前 / 具体日期。
+   * 用「自然日」而不是「距今小时数」—— 昨晚 23 点修的和今早 1 点修的
+   * 只差两小时，但用户心里是「昨天」和「今天」。
+   */
+  function describeWorkAge(ts, now) {
+    const n = num(now, Date.now());
+    const t = num(ts, 0);
+    if (!(t > 0)) return '';          // 时间戳损坏：交给调用方决定怎么显示
+    const a = dayStartTs(t), b = dayStartTs(n);
+    if (!a) return '';
+    const days = Math.round((b - a) / 86400000);
+    if (days <= 0) return '今天';
+    if (days === 1) return '昨天';
+    if (days < 7) return days + ' 天前';
+    const d = new Date(a);
+    const y = d.getFullYear(), cy = new Date(b).getFullYear();
+    const md = (d.getMonth() + 1) + '月' + d.getDate() + '日';
+    return (y === cy ? '' : y + '年') + md;
+  }
+
+  /** 时刻 HH:MM。时间戳无效时返回空串（与 describeWorkAge 保持一致） */
+  function formatWorkClock(ts) {
+    const n = num(ts, 0);
+    if (!(n > 0)) return '';
+    const d = new Date(n);
+    if (isNaN(d.getTime())) return '';
+    const p = (x) => String(x).padStart(2, '0');
+    return p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  /**
+   * 按自然日分组，便于界面显示「今天 / 昨天 / 9月23日」这样的分隔。
+   * @returns {Array<{key:string, label:string, items:Array}>}
+   */
+  function groupWorksByDay(entries, now) {
+    const n = num(now, Date.now());
+    const sorted = sortWorksNewestFirst(entries);
+    const out = [];
+    let curKey = null, cur = null;
+    for (const e of sorted) {
+      const w = normalizeWork(e);
+      if (!w.id) continue;
+      // 时间戳损坏（0 / 非法）的记录不能算出自然日，单独归一组并给出兜底标题，
+      // 否则会出现一个没有标题的分隔条
+      const bad = !(num(w.at, 0) > 0);
+      const k = bad ? 'unknown' : String(dayStartTs(w.at));
+      if (k !== curKey) {
+        curKey = k;
+        cur = { key: k, label: bad ? '时间未知' : describeWorkAge(w.at, n), items: [] };
+        out.push(cur);
+      }
+      cur.items.push(w);
+    }
+    return out;
+  }
+
+  /** 作品库统计（用于界面显示用量） */
+  function workLibraryStats(entries) {
+    const list = (entries || []).map(normalizeWork).filter((e) => e.id);
+    let bytes = 0, withSession = 0;
+    for (const e of list) {
+      bytes += estimateWorkBytes(e);
+      if (e.session) withSession++;
+    }
+    return {
+      count: list.length,
+      bytes,
+      withSession,
+      editable: withSession
+    };
+  }
+
   /* ====================== 7.02 编辑图层（非破坏性） ====================== */
 
   /**
@@ -2882,6 +3103,11 @@
     createUndoStack, makeUndoCommand, commandDirection,
     buildTimeline, describeCommand, planHistoryJump,
     CFG_REV, migrateCfg,
+    // 作品库（跨天记录）
+    storageBytes, estimateWorkBytes, normalizeWork, sortWorksNewestFirst,
+    planLibrary, dayStartTs, describeWorkAge, formatWorkClock,
+    groupWorksByDay, workLibraryStats,
+    LIBRARY_BUDGET_BYTES, LIBRARY_MAX_ITEMS, THUMB_MAX_SIDE,
     EXPORT_PRESETS, getExportPreset, planExportSize, stripGpsFromExif, planExportMetadata,
     MODEL_PRICES, DEFAULT_USD_CNY, modelPrice, estimateCost, accumulateSpend, formatUsd, formatCny,
     parseJpegSegments, extractExif, extractICC, readExifOrientation,

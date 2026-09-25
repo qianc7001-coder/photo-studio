@@ -1069,5 +1069,109 @@ console.log('\n【历史】时间线要能看、能预览、能跳回，且不�
     ver.changelog.slice(0, 2));
 })();
 
+console.log('\n【作品库】跨天修图记录：预算、落盘、恢复');
+
+(() => {
+  // 用相对路径解析：本机、CI 检出目录、任意 clone 位置都能跑
+  const fs = require('fs');
+  const appSrc = fs.readFileSync(require('path').join(__dirname, '..', 'app', 'app.js'), 'utf8');
+  const html = fs.readFileSync(require('path').join(__dirname, '..', 'app', 'index.html'), 'utf8');
+  const css = fs.readFileSync(require('path').join(__dirname, '..', 'app', 'style.css'), 'utf8');
+
+  // 1) 预算账目必须等于真实占用
+  //    回归的 bug：降级（丢会话）之后，淘汰环节又按「含会话」的完整体积扣一次，
+  //    导致账面占用远小于真实占用 —— 计划以为放得下，实际会写爆 localStorage。
+  const mk = (id, at, thumbChars, sessChars) => ({
+    id, at,
+    thumb: 't'.repeat(thumbChars),
+    session: sessChars ? { base: 's'.repeat(sessChars) } : null
+  });
+  const entries = [mk('A', 1000, 100000, 50000), mk('B', 2000, 100000, 50000), mk('C', 3000, 100000, 50000)];
+  const realUsage = (p) => p.keepIds.reduce((s, id) => {
+    const e = entries.find((x) => x.id === id);
+    const down = p.downgradeIds.indexOf(id) >= 0;
+    return s + 400 + C.storageBytes(e.thumb) + (down ? 0 : C.storageBytes(JSON.stringify(e.session)));
+  }, 0);
+
+  for (const M of [150000, 250000, 500000, 1200000]) {
+    const p = C.planLibrary(entries, { maxBytes: M, maxItems: 80 });
+    const real = realUsage(p);
+    t('预算 M=' + M + '：账面占用等于真实占用', p.bytes === real, { report: p.bytes, real });
+    t('预算 M=' + M + '：不超预算（留 1 条是下限）',
+      real <= M || p.keepIds.length === 1, { real, M, keep: p.keepIds.length });
+  }
+
+  // 降级过的条目不能再被扣一次会话体积
+  const p0 = C.planLibrary(entries, { maxBytes: 1, maxItems: 80 });
+  t('极小预算下仍保留至少 1 条', p0.keepIds.length === 1, p0.keepIds.length);
+  t('极小预算下账面不出现负数', p0.bytes >= 0, p0.bytes);
+  t('极小预算下账面等于真实', p0.bytes === realUsage(p0), { r: p0.bytes, real: realUsage(p0) });
+
+  // 2) 提示文案要同时说清降级和淘汰（否则用户不知道「可继续编辑」为什么变少）
+  const pBoth = C.planLibrary(entries, { maxBytes: 250000, maxItems: 80 });
+  if (pBoth.downgradeIds.length && pBoth.evictIds.length) {
+    t('同时降级+淘汰时两种都提示',
+      /清理/.test(pBoth.note) && /仅保留预览/.test(pBoth.note), pBoth.note);
+  } else {
+    t('同时降级+淘汰时两种都提示（本次未同时发生，跳过）', true);
+  }
+
+  // 3) 时间戳损坏的记录不能产生空标题的分隔条
+  //    回归的 bug：at 为 0 / 非法时 describeWorkAge 返回空串，分组标题就是空的
+  const gBad = C.groupWorksByDay([{ id: 'x', at: 0 }, { id: 'y', at: 'oops' }], Date.now());
+  t('损坏时间的记录有兜底标题', gBad.every((g) => !!g.label), gBad.map((g) => g.label));
+  // 时刻也不能显示成 00:00（会被误读成真的凌晨编辑）
+  t('损坏时间不显示为 00:00', C.formatWorkClock(0) === '' && C.formatWorkClock('x') === '',
+    [C.formatWorkClock(0), C.formatWorkClock('x')]);
+
+  // 4) 用户的核心诉求：昨天修的，今天打开还能看到
+  const today = new Date(2024, 8, 23, 10, 0).getTime();
+  const yest = new Date(2024, 8, 22, 22, 0).getTime();
+  const g = C.groupWorksByDay([{ id: 'y', at: yest, edits: 3, thumb: 'x', session: { v: 1 } }], today);
+  t('昨天的照片今天仍在记录里', g.length === 1 && g[0].items.length === 1);
+  t('分组标签显示「昨天」', g[0].label === '昨天', g[0].label);
+
+  // 5) app 接线：不能只加默认值 / 只加函数不调用
+  t('启动时载入作品库（并赋给 S.library）', /S\.library = loadLibrary\(\)/.test(appSrc));
+  t('启动时刷新角标', /S\.library = loadLibrary\(\);[\s\S]{0,200}updateLibraryBadge\(\)/.test(appSrc));
+  t('所有编辑都会写作品库（挂在 recordUndo 上）',
+    /function recordUndo[\s\S]{0,600}scheduleWorkSave\(\)/.test(appSrc));
+  t('导出时立刻落库（不等防抖）', /async function exportImage[\s\S]*?touchWork\(\)/.test(appSrc));
+  t('换图会重置作品 id（新照片另起一条）', /S\.workId = null/.test(appSrc));
+  t('存储写满有兜底（不让应用崩）', /QuotaExceededError|空间不足/.test(appSrc));
+
+  // 6) 打包缓存必须与文档版本绑定，否则会话/作品库会存到过期数据
+  t('打包结果有缓存（避免一次编辑编码两遍）', /payloadCache/.test(appSrc));
+  t('缓存按 docRev 失效', /payloadCache\.rev === S\.docRev/.test(appSrc));
+  t('编辑后 docRev 递增', /function recordUndo[\s\S]{0,300}S\.docRev\+\+/.test(appSrc));
+  t('撤销/重做后 docRev 递增', /function applyCommand[\s\S]*?S\.docRev\+\+/.test(appSrc));
+  t('换图后 docRev 递增', /换图 → 打包缓存失效|S\.docRev\+\+/.test(appSrc));
+
+  // 7) 恢复作品时必须作废在途生成，否则结果会贴到刚恢复的照片上
+  //    回归的 bug：restoreSession 换掉整份文档却没作废 in-flight 请求
+  const restoreFn = appSrc.slice(appSrc.indexOf('async function restoreSession'),
+    appSrc.indexOf('async function restoreSession') + 2600);
+  t('恢复作品会作废在途生成', /S\.genToken\+\+/.test(restoreFn), 'restoreSession 里缺 genToken++');
+  t('恢复作品会关掉对比层', /hidden = true/.test(restoreFn));
+  t('恢复作品会清掉待确认结果', /S\.pending = null/.test(restoreFn));
+  t('恢复作品会递增 docVersion', /S\.docVersion\+\+/.test(restoreFn));
+
+  // 8) 界面接线：入口、面板、大图预览三件套都要在
+  t('顶栏有修图记录入口', /id="btn-library"/.test(html));
+  t('入口有计数角标', /id="lib-count"/.test(html));
+  t('有记录面板', /id="library"/.test(html));
+  t('有列表容器', /id="lib-list"/.test(html));
+  t('有空状态提示', /id="lib-empty"/.test(html));
+  t('有用量显示', /id="lib-usage"/.test(html));
+  t('有大图预览层', /id="work-preview"/.test(html));
+  t('面板文案说明了「跨天可查」', /关掉应用|第二天|明天/.test(html));
+  t('有网格与卡片样式', /\.lib-grid/.test(css) && /\.lib-card/.test(css));
+  t('大图预览有样式', /\.wp-body/.test(css) && /\.wp-img/.test(css));
+  t('角标样式存在', /#btn-library b/.test(css));
+  t('面板默认隐藏', /id="library" class="sheet" hidden/.test(html));
+})();
+
+
+/* ---------- 作品库（跨天修图记录） ---------- */
 console.log(`\n合计 ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

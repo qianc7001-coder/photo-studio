@@ -669,3 +669,97 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 }
 .hist-go:active { background: var(--panel); }
 .hist-item.now .hist-go { color: var(--text-faint); }
+
+/* ======================= 修图记录（跨天作品库） ======================= */
+#library .sheet-body { max-width: 640px; }
+
+/* 顶栏入口的计数角标 */
+#btn-library { position: relative; }
+#btn-library b {
+  position: absolute; top: 1px; right: 2px;
+  min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent); color: #fff;
+  font-size: 10px; font-weight: 700; line-height: 16px;
+  text-align: center;
+}
+
+.lib-usage {
+  font-size: 11px; color: var(--text-faint);
+  margin: 0 0 12px;
+  font-variant-numeric: tabular-nums;
+}
+.lib-usage:empty { display: none; }
+
+.lib-day {
+  font-size: 11px; font-weight: 600; letter-spacing: .6px;
+  color: var(--accent);
+  margin: 16px 0 9px;
+}
+.lib-day:first-child { margin-top: 0; }
+
+.lib-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 10px;
+}
+
+.lib-card {
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  transition: border-color .15s, background .15s;
+}
+.lib-card:active { background: #2b323f; border-color: var(--accent-dim); }
+
+.lib-thumb {
+  display: block; width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  background: var(--panel);
+}
+.lib-meta { padding: 8px 9px 9px; }
+.lib-name {
+  font-size: 12px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lib-sub {
+  font-size: 10.5px; color: var(--text-faint);
+  margin-top: 3px;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 作品大图预览 */
+#work-preview { position: fixed; inset: 0; z-index: 120; display: flex; align-items: center; justify-content: center; }
+.wp-mask { position: absolute; inset: 0; background: rgba(4, 6, 9, .82); backdrop-filter: blur(3px); }
+.wp-body {
+  position: relative;
+  width: min(94vw, 620px);
+  max-height: 92vh;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--sh);
+}
+.wp-head {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.wp-head > div:first-child { flex: 1 1 auto; min-width: 0; }
+.wp-title {
+  font-size: 14px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wp-sub { font-size: 11px; color: var(--text-faint); margin-top: 3px; font-variant-numeric: tabular-nums; }
+.wp-img {
+  display: block; width: 100%;
+  max-height: 58vh; object-fit: contain;
+  background: var(--bg-canvas);
+}
+.wp-actions { display: flex; gap: 9px; padding: 13px 16px calc(15px + var(--sab)); }
+.wp-actions .danger { width: auto; flex: 0 0 auto; }
+.wp-note { flex: 1 1 auto; font-size: 11.5px; color: var(--text-faint); line-height: 1.5; }

@@ -155,6 +155,20 @@ if (exists('android/keystore.jks')) {
   if (exists('.gitignore') && read('.gitignore').includes('keystore.jks')) ok('签名密钥已被 .gitignore 忽略');
   else err('android/keystore.jks 存在但未被 .gitignore 忽略（签名密钥绝不能进仓库）');
 }
+// 归档快照也要查：.gitignore 只管仓库，复制归档时容易把密钥一起带过去
+// （真实发生过：v2.4.0 / v2.4.1 的归档里混进了 keystore.jks）
+{
+  const archRoot = path.join(__dirname, '..', '..', 'photo-studio-archive');
+  let leaked = [];
+  try {
+    for (const d of fs.readdirSync(archRoot)) {
+      const p = path.join(archRoot, d, 'android', 'keystore.jks');
+      if (fs.existsSync(p)) leaked.push(d);
+    }
+  } catch (e) { /* 没有归档目录就跳过 */ }
+  if (leaked.length) err('归档快照里混入了签名密钥：' + leaked.join(', '));
+  else ok('归档快照未含签名密钥');
+}
 if (!found) ok('未发现硬编码敏感信息');
 
 /* ---------- 8. 版本号一致性 ---------- */

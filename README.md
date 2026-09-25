@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-838%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-1017%20passed-brightgreen.svg)](#测试)
 
 给摄影师用的**局部修图**工具：在照片上框选任意区域，交给生图模型修改，结果自动贴回原位置。
 
 **核心特点**：结果无缝融合，非破坏性可调，保留拍摄信息。
 
-> 最新版本 **v2.3.0** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
+> 最新版本 **v2.5.0** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
 
 ---
 
@@ -46,6 +46,14 @@
 - **预览任意一步**：点时间线上任意位置，画面真的回到那一刻，先看效果再决定
 - **一键跳回**：确认后回到选中的那一步，后面的步骤被撤销（确认前随时能跳回来）
 - 不存图片快照，只复用撤销记录 —— 100 步历史几乎不占额外内存
+
+### 修图记录（跨天作品库）
+- 修过的每一张照片**自动留档**，关掉应用、第二天打开仍然在
+- 按 **今天 / 昨天 / N 天前 / 具体日期** 分组，一眼看出哪些是昨天修的
+- 每条带缩略图、文件名、修改处数、当时时刻
+- 点开看大图，只要编辑数据还在就能 **继续编辑这张** —— 直接回到当时状态接着改
+- 同一张照片反复修改**只占一条**（原地更新）
+- 空间不足时先丢较早记录的编辑数据（保留预览图），再清理最早的记录，并明确提示
 
 ### 画质
 - 边缘羽化（消除拼接硬边）
@@ -156,7 +164,7 @@ node tools/migrate-test.js     # 配置迁移（模拟老用户升级路径）
 node tools/e2e-test.js         # 端到端（jsdom + 真实 canvas，逐像素校验）
 ```
 
-当前规模：**838 项**（143 单元 + 418 回归 + 14 配置迁移 + 263 端到端）。
+当前规模：**1017 项**（225 单元 + 461 回归 + 14 配置迁移 + 317 端到端）。
 
 端到端测试会：
 - 启动一个假生图模型服务器

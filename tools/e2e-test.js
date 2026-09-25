@@ -25,7 +25,11 @@ function loadOptional(name) {
 const { JSDOM, VirtualConsole } = loadOptional('jsdom');
 const napi = loadOptional('@napi-rs/canvas');
 
-const APP = path.join(__dirname, '..', 'app');
+// 默认测源码目录；用 APP_DIR 指向别处可以测「打包产物里的真实资源」
+// （发布前必做：确认 APK 里带的确实是这份代码，而不是只有源码里对）
+const APP = process.env.APP_DIR
+  ? path.resolve(process.env.APP_DIR)
+  : path.join(__dirname, '..', 'app');
 let pass = 0, fail = 0;
 const failures = [];
 const t = (name, cond, extra) => {
@@ -1734,6 +1738,217 @@ async function run() {
   const tlData = window.__PS_API.buildTimeline();
   t('时间线项不含图片数据', tlData.items.every((it) =>
     !it.patch && !it.canvas && !it.image && !it.dataUrl), Object.keys(tlData.items[0] || {}));
+
+  /* ---------- 修图记录（跨天作品库） ---------- */
+  console.log('\n【14.7】修图记录（跨天作品库）');
+
+  const libBtn = doc.getElementById('btn-library');
+  const libBadge = doc.getElementById('lib-count');
+  const libSheet = doc.getElementById('library');
+  t('修图记录入口存在', !!libBtn);
+  t('记录面板默认关闭', libSheet.hidden === true);
+
+  // 关键前提：修图记录必须真的落盘，否则「明天还能看到」无从谈起
+  const libKey = 'photoStudio.library.v1';
+
+  // jsdom 的 Image 不解码 data: URL，而 restoreSession（「继续编辑」要用）要等它的 onload。
+  // 真实 WebView 里没这个问题，这里换成基于 @napi-rs/canvas 的真实解码实现。
+  const RealImage = window.Image;
+  window.Image = class {
+    constructor() {
+      this.onload = null; this.onerror = null;
+      this.width = 0; this.height = 0; this._src = '';
+    }
+    set src(v) {
+      this._src = v;
+      const m = /^data:[^;]+;base64,(.*)$/.exec(String(v));
+      if (!m) { setTimeout(() => this.onerror && this.onerror(new Error('bad src')), 0); return; }
+      napi.loadImage(Buffer.from(m[1], 'base64')).then((im) => {
+        this.__real = im;                 // 让 canvas 桥接层能识别成本地可绘制的图
+        this.width = im.width; this.height = im.height;
+        if (this.onload) this.onload();
+      }).catch((e) => { if (this.onerror) this.onerror(e); });
+    }
+    get src() { return this._src; }
+  };
+
+  // 编辑会触发 1.6s 防抖保存；先等旧定时器落定再清空，否则它会在我断言中间插入记录
+  await sleep(1800);
+  window.localStorage.removeItem(libKey);
+  // 必须走 boot 的赋值路径（S.library = loadLibrary()），只调 loadLibrary 不会清掉内存里的旧记录
+  S.library = window.__PS_API.loadLibrary();
+  window.__PS_API.renderLibrary();
+  t('清空后记录为空', window.__PS_API.library().length === 0, window.__PS_API.library().length);
+
+  // 造一次编辑，然后强制落盘（真实使用里是防抖 1.6s 后自动保存）
+  await mkEdit({ x: 30, y: 30, w: 90, h: 70 }, [200, 60, 200], '改成紫色');
+  window.__PS_API.touchWork();
+
+  const lib1 = window.__PS_API.library();
+  t('修过之后产生了记录', lib1.length === 1, lib1.length);
+  t('记录里有缩略图', !!lib1[0].thumb && lib1[0].thumb.indexOf('data:image') === 0);
+  t('记录里记了修改处数', lib1[0].edits >= 1, lib1[0].edits);
+  t('记录里存了可继续编辑的会话', !!lib1[0].session);
+  t('记录已写入 localStorage', !!window.localStorage.getItem(libKey));
+
+  // 用户的核心诉求：明天（换一个时间点）还能看到这张
+  const persisted = JSON.parse(window.localStorage.getItem(libKey));
+  t('落盘格式含版本号', persisted.v === 1, persisted.v);
+  t('落盘里有 1 条记录', persisted.items.length === 1, persisted.items.length);
+  t('落盘的记录带文件名', !!persisted.items[0].name, persisted.items[0].name);
+  t('落盘的记录带时间戳', persisted.items[0].at > 0, persisted.items[0].at);
+
+  // 模拟「关掉应用、第二天再打开」：用真实存储内容重新载入
+  // 必须走和 boot 完全相同的路径（S.library = loadLibrary()），否则测不到真实启动逻辑
+  S.library = window.__PS_API.loadLibrary();
+  const reloaded = S.library;
+  t('重新载入后记录还在', reloaded.length === 1, reloaded.length);
+  t('重新载入后仍是同一张', reloaded[0].id === lib1[0].id);
+  t('重新载入后缩略图还在', !!reloaded[0].thumb);
+  t('重新载入后仍可继续编辑', !!reloaded[0].session);
+
+  // 界面：分组标题要能表达「昨天」
+  const libC = window.PSCore;
+  const yesterday = Date.now() - 86400000;
+  const groups = libC.groupWorksByDay([{ id: 'x', at: yesterday, edits: 1 }], Date.now());
+  t('昨天的记录归到「昨天」组', groups[0].label === '昨天', groups[0].label);
+
+  // 打开面板，检查真实渲染
+  libBtn.dispatchEvent(new window.Event('click'));
+  await sleep(60);
+  t('点入口能打开记录面板', libSheet.hidden === false);
+  const cards = doc.querySelectorAll('#lib-list .lib-card');
+  t('面板渲染出记录卡片', cards.length === 1, cards.length);
+  t('卡片上有缩略图', !!doc.querySelector('#lib-list .lib-thumb'));
+  t('卡片上有文件名', /shot|photo/i.test(doc.querySelector('#lib-list .lib-name').textContent || ''),
+    doc.querySelector('#lib-list .lib-name').textContent);
+  t('卡片上标了修改处数', /处修改/.test(doc.querySelector('#lib-list .lib-sub').textContent || ''),
+    doc.querySelector('#lib-list .lib-sub').textContent);
+  t('用量统计有内容', (doc.getElementById('lib-usage').textContent || '').length > 0,
+    doc.getElementById('lib-usage').textContent);
+  t('顶栏角标显示条数', Number(libBadge.textContent) === 1, libBadge.textContent);
+
+  // 缩略图必须是「修过之后」的样子 —— 不是原图，否则记录没有辨识度
+  // 把缩略图解码后逐像素比对：它应该等于当前 viewCanvas 的缩小版
+  t('缩略图是 data URL', lib1[0].thumb.indexOf('data:image') === 0, lib1[0].thumb.slice(0, 30));
+  const thumbImg = await napi.loadImage(Buffer.from(lib1[0].thumb.split(',')[1], 'base64'));
+  t('缩略图能解码', thumbImg.width > 0 && thumbImg.height > 0, [thumbImg.width, thumbImg.height]);
+  t('缩略图长边不超过上限',
+    Math.max(thumbImg.width, thumbImg.height) <= window.PSCore.THUMB_MAX_SIDE,
+    [thumbImg.width, thumbImg.height, window.PSCore.THUMB_MAX_SIDE]);
+  t('缩略图保持了原始长宽比',
+    Math.abs((thumbImg.width / thumbImg.height) - (S.docW / S.docH)) < 0.05,
+    [thumbImg.width, thumbImg.height, S.docW, S.docH]);
+  // 缩略图里必须出现刚才修的那块紫色（证明存的是修后画面，不是原图）
+  const tcv = napi.createCanvas(thumbImg.width, thumbImg.height);
+  const tct = tcv.getContext('2d');
+  tct.drawImage(thumbImg, 0, 0);
+  const tdata = tct.getImageData(0, 0, thumbImg.width, thumbImg.height).data;
+  let purple = 0;
+  const tTotal = thumbImg.width * thumbImg.height;
+  for (let i = 0; i < tdata.length; i += 4) {
+    if (tdata[i] > 150 && tdata[i + 1] < 120 && tdata[i + 2] > 150) purple++;
+  }
+  t('缩略图包含修图后的颜色（不是原图）', purple / tTotal > 0.01, { purple, tTotal });
+
+  // 同一张照片继续改，应该原地更新，而不是多出一条
+  await mkEdit({ x: 60, y: 50, w: 70, h: 60 }, [60, 200, 220], '改成青色');
+  window.__PS_API.touchWork();
+  t('继续编辑同一张不会多出记录', window.__PS_API.library().length === 1,
+    window.__PS_API.library().length);
+  t('记录的修改处数会累加', window.__PS_API.library()[0].edits >= 2,
+    window.__PS_API.library()[0].edits);
+
+  // 大图预览
+  const card0 = doc.querySelector('#lib-list .lib-card');
+  card0.dispatchEvent(new window.Event('click'));
+  await sleep(60);
+  const wp = doc.getElementById('work-preview');
+  t('点卡片打开大图预览', wp.hidden === false);
+  t('预览里有大图', !!doc.querySelector('#work-preview .wp-img'));
+  t('预览里有「继续编辑」按钮', !!doc.getElementById('wp-continue'));
+  t('预览里有删除按钮', !!doc.getElementById('wp-delete'));
+  t('预览显示了相对时间', /今天|昨天|天前|月/.test(doc.querySelector('.wp-sub').textContent || ''),
+    doc.querySelector('.wp-sub').textContent);
+
+  // 删除记录。先等防抖定时器落定，否则它会在删除后又把记录写回来
+  await sleep(1800);
+  doc.getElementById('wp-delete').dispatchEvent(new window.Event('click'));
+  await sleep(60);
+  t('删除后记录为空', window.__PS_API.library().length === 0, window.__PS_API.library().length);
+  t('删除后预览已关闭', wp.hidden === true);
+  t('删除后角标归零', Number(libBadge.textContent) === 0, libBadge.textContent);
+  t('删除已同步到存储',
+    JSON.parse(window.localStorage.getItem(libKey) || '{"items":[]}').items.length === 0);
+
+  // 「继续编辑」：必须真的能恢复画面
+  await mkEdit({ x: 40, y: 40, w: 80, h: 60 }, [240, 160, 40], '改成橙色');
+  window.__PS_API.touchWork();
+  const savedWork = window.__PS_API.library()[0];
+  t('为「继续编辑」造出了记录', !!savedWork && !!savedWork.session);
+
+  // 换成另一张照片（会清空当前编辑），再从记录里回到上一张
+  const libInput = doc.getElementById('file-input');
+  Object.defineProperty(libInput, 'files', {
+    value: [new window.File([new Uint8Array(srcPng)], 'other.png', { type: 'image/png' })],
+    configurable: true
+  });
+  libInput.dispatchEvent(new window.Event('change'));
+  await sleep(300);
+  t('换图后编辑被清空', S.edits.length === 0, S.edits.length);
+  t('换图后作品 id 已重置（新照片另起一条记录）', window.__PS_API.workId() === null,
+    window.__PS_API.workId());
+
+  // 恢复过程中若弹确认框，自动确认（jsdom 的 confirm 返回 undefined 会中断流程）
+  const realConfirm = window.confirm;
+  window.confirm = () => true;
+  window.__PS_API.continueWork(savedWork.id);
+  await sleep(700);
+  window.confirm = realConfirm;
+
+  t('「继续编辑」把画面恢复了', S.edits.length >= 1, S.edits.length);
+  t('「继续编辑」后接管为该条记录', window.__PS_API.workId() === savedWork.id,
+    [window.__PS_API.workId(), savedWork.id]);
+  t('「继续编辑」后仍是同一张照片尺寸', S.docW === savedWork.docW && S.docH === savedWork.docH,
+    [S.docW, S.docH, savedWork.docW, savedWork.docH]);
+  t('「继续编辑」后画布有内容', (() => {
+    const d = S.viewCanvas.getContext('2d').getImageData(0, 0, 1, 1).data;
+    return d[3] === 255;
+  })());
+  t('「继续编辑」后撤销栈是干净的（重新开始记）',
+    window.__PS_API.historySize().past === 0 && window.__PS_API.historySize().future === 0,
+    window.__PS_API.historySize());
+
+  window.Image = RealImage;   // 还原，避免影响后面的段落
+
+  // 关闭面板
+  doc.querySelector('#library [data-close]').dispatchEvent(new window.Event('click'));
+  await sleep(40);
+  t('记录面板可关闭', libSheet.hidden === true);
+
+  // 内存安全：记录里不能塞整图，否则几条就把 localStorage 撑爆
+  const libBytes = window.PSCore.estimateWorkBytes(window.__PS_API.library()[0]);
+  t('单条记录体积受控（<400KB）', libBytes < 400 * 1024, libBytes);
+  t('缩略图边长受限', window.PSCore.THUMB_MAX_SIDE <= 512, window.PSCore.THUMB_MAX_SIDE);
+
+  // 存储配额兜底：写不进去也不能让应用崩
+  // 注意 jsdom 里给实例赋 setItem 无效，必须改 Storage.prototype
+  const protoDesc = Object.getOwnPropertyDescriptor(window.Storage.prototype, 'setItem');
+  let quotaHit = false;
+  Object.defineProperty(window.Storage.prototype, 'setItem', {
+    configurable: true, writable: true,
+    value: function (k, v) {
+      if (k === libKey) { quotaHit = true; throw new Error('QuotaExceededError'); }
+      return protoDesc.value.call(this, k, v);
+    }
+  });
+  let quotaThrew = false;
+  try { window.__PS_API.saveLibrary(); } catch (e) { quotaThrew = true; }
+  Object.defineProperty(window.Storage.prototype, 'setItem', protoDesc);
+  t('存储写满时不抛异常', !quotaThrew);
+  t('存储写满时确实触发了配额分支', quotaHit);
+  // 配额失败后必须还能继续用：读回记录不能崩
+  t('配额失败后记录仍可读', Array.isArray(window.__PS_API.loadLibrary()));
 
   /* ---------- 无 JS 错误 ---------- */
   console.log('\n【15】运行健康度');
