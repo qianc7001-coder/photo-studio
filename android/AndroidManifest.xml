@@ -6,11 +6,25 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- 后台保活（前台服务）。
+         生图要 30~60 秒，切走就可能被杀，请求白花钱，所以生成期间用前台服务钉住进程。
+         这几条权限按 API 级别递增，低版本上不认识会被忽略，不影响安装。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Android 14 (API 34) 起，dataSync 类型必须额外声明这条，否则 startForeground 抛 SecurityException -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Android 13 (API 33) 起通知需要运行时授权；没授权服务照样跑，只是看不到通知 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 申请「忽略电池优化」。各家 OEM 的后台限制不一样，这是唯一通用的申请入口 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
     <application
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@style/AppTheme"
         android:hardwareAccelerated="true"
         android:largeHeap="true"
@@ -30,5 +44,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 保活服务。foregroundServiceType 是 API 29+ 才认识，
+             低版本上该属性被忽略；exported=false 确保只有本应用能启动它 -->
+        <service
+            android:name=".KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 </manifest>

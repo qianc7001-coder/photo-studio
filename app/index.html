@@ -361,9 +361,31 @@
           <input type="checkbox" id="set-autosave" checked>
           <span>自动保存编辑进度（应用被系统回收后可恢复）</span>
         </label>
+
         <div class="tip">部分接口对输入图有最小尺寸要求（如总像素不少于 0.66MP）。
           开启后，框选区域太小时会先放大到合规尺寸再发送，贴回时按原分辨率还原。
           若你的接口没有此限制、或发现放大后画质下降，可以关掉。</div>
+      </section>
+
+      <section>
+        <h4>后台保活</h4>
+        <div class="tip" style="margin:0 0 10px">
+          生图请求通常要 30~60 秒。这期间如果你切到别的应用或锁屏，
+          系统可能会回收应用 —— 进程一死请求就断了，<b>但模型那边已经出图、钱已经花了</b>。
+          开启保活后，生成期间会常驻一条通知把进程钉住，切走也能拿到结果。
+        </div>
+        <label class="switch" style="margin-bottom:10px">
+          <input type="checkbox" id="set-keepalive" checked>
+          <span>生成时自动保活（推荐）</span>
+        </label>
+        <label class="switch" id="ka-always-row" style="margin-bottom:10px">
+          <input type="checkbox" id="set-keepalive-always">
+          <span>一直保活（连续修图时不用每次等）</span>
+        </label>
+        <div class="ka-state ka-muted" id="ka-state">检测中…</div>
+        <button class="ghost" id="ka-battery" hidden style="width:100%;margin-top:10px">允许后台运行（系统电池优化）</button>
+        <div class="tip">各家手机系统的后台限制不一样。如果切走后仍会中断，
+          点上面的按钮把本应用加入「不限制后台」名单。</div>
       </section>
 
       <section>

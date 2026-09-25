@@ -100,7 +100,7 @@ button:disabled { opacity: .38; cursor: default; }
 
 /* 空状态 */
 #empty {
-  position: absolute; inset: 0;
+  position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0;
   display: flex; align-items: center; justify-content: center;
   padding: 20px;
   background:
@@ -116,6 +116,7 @@ button:disabled { opacity: .38; cursor: default; }
 /* 提示条 */
 #toast {
   position: absolute; left: 50%; bottom: 18px; transform: translate(-50%, 14px);
+  max-width: 92%;
   max-width: min(92%, 460px);
   padding: 10px 15px;
   background: rgba(24, 29, 38, .96);
@@ -130,7 +131,7 @@ button:disabled { opacity: .38; cursor: default; }
 
 /* 生成中 */
 #busy {
-  position: absolute; inset: 0; z-index: 50;
+  position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 50;
   display: flex; align-items: center; justify-content: center;
   background: rgba(8, 10, 14, .72);
   backdrop-filter: blur(3px);
@@ -249,7 +250,7 @@ ul.whatsnew li { margin-bottom: 5px; }
 /* ============================ 对比预览 ============================ */
 
 #compare {
-  position: absolute; inset: 0; z-index: 60;
+  position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 60;
   background: #0b0d11;
   touch-action: none;
 }
@@ -420,8 +421,8 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 
 /* ============================ 设置面板 ============================ */
 
-.sheet { position: fixed; inset: 0; z-index: 100; display: flex; align-items: flex-end; justify-content: center; }
-.sheet-mask { position: absolute; inset: 0; background: rgba(4, 6, 9, .6); backdrop-filter: blur(2px); }
+.sheet { position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 100; display: flex; align-items: flex-end; justify-content: center; }
+.sheet-mask { position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; background: rgba(4, 6, 9, .6); backdrop-filter: blur(2px); }
 .sheet-body {
   position: relative;
   width: 100%; max-width: 560px;
@@ -715,9 +716,13 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 
 .lib-thumb {
   display: block; width: 100%;
-  aspect-ratio: 1 / 1;
+  height: 148px;               /* 兜底：老 WebView 不认 aspect-ratio，用固定高度 */
   object-fit: cover;
   background: var(--panel);
+}
+@supports (aspect-ratio: 1 / 1) {
+  /* 支持的浏览器：按宽度做成正方形，比固定高度更整齐 */
+  .lib-thumb { height: auto; aspect-ratio: 1 / 1; }
 }
 .lib-meta { padding: 8px 9px 9px; }
 .lib-name {
@@ -732,10 +737,11 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 }
 
 /* 作品大图预览 */
-#work-preview { position: fixed; inset: 0; z-index: 120; display: flex; align-items: center; justify-content: center; }
-.wp-mask { position: absolute; inset: 0; background: rgba(4, 6, 9, .82); backdrop-filter: blur(3px); }
+#work-preview { position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 120; display: flex; align-items: center; justify-content: center; }
+.wp-mask { position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; background: rgba(4, 6, 9, .82); backdrop-filter: blur(3px); }
 .wp-body {
   position: relative;
+  width: 94vw;
   width: min(94vw, 620px);
   max-height: 92vh;
   overflow-y: auto;
@@ -763,3 +769,82 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 .wp-actions { display: flex; gap: 9px; padding: 13px 16px calc(15px + var(--sab)); }
 .wp-actions .danger { width: auto; flex: 0 0 auto; }
 .wp-note { flex: 1 1 auto; font-size: 11.5px; color: var(--text-faint); line-height: 1.5; }
+
+/* =============================================================================
+ * 老内核兼容（由 JS 运行时探测后给 <html> 加 class）
+ *
+ * 国产 ROM 常把系统 WebView 冻结在旧版本。下面这些特性缺失时不是「变丑」，
+ * 而是布局直接错位 —— 比如 flex gap 不生效，图标会全部挤在一起。
+ *
+ * 用 class 而不是 @supports：`@supports (gap:1px)` 在 Chrome 66~83 上会
+ * 误报为支持（grid gap 早就有），必须由 JS 实测后决定。
+ * ========================================================================== */
+
+/* ---- 无 flex gap：用 margin 模拟 ---- */
+.ps-no-flex-gap #topbar > * + * { margin-left: 6px; }
+.ps-no-flex-gap .tb-btn > * + * { margin-top: 2px; }
+.ps-no-flex-gap #hud .hud-group + .hud-group { margin-left: 8px; }
+.ps-no-flex-gap .hud-group > * + * { margin-left: 4px; }
+.ps-no-flex-gap #sel-info > * + * { margin-left: 5px; }
+.ps-no-flex-gap #tools > * + * { margin-left: 2px; }
+.ps-no-flex-gap .tool > * + * { margin-top: 2px; }
+.ps-no-flex-gap #brush-bar > * + *,
+.ps-no-flex-gap #sel-bar > * + * { margin-left: 8px; }
+.ps-no-flex-gap .chips > * + * { margin-left: 6px; }
+.ps-no-flex-gap .row > * + * { margin-left: 8px; }
+.ps-no-flex-gap .primary + .primary,
+.ps-no-flex-gap .ghost + .ghost,
+.ps-no-flex-gap .danger + .danger { margin-left: 7px; }
+.ps-no-flex-gap .primary + .ghost,
+.ps-no-flex-gap .ghost + .primary { margin-left: 7px; }
+.ps-no-flex-gap .model-btn > * + * { margin-left: 7px; }
+.ps-no-flex-gap .field-row > * + * { margin-left: 10px; }
+.ps-no-flex-gap .switch > * + * { margin-left: 10px; }
+.ps-no-flex-gap .err-head > * + * { margin-left: 8px; }
+.ps-no-flex-gap .err-actions > * + * { margin-left: 8px; }
+.ps-no-flex-gap .cmp-actions > * + * { margin-left: 10px; }
+.ps-no-flex-gap .detect-head > * + * { margin-left: 8px; }
+.ps-no-flex-gap .detect-item > * + * { margin-left: 8px; }
+.ps-no-flex-gap .layer-head > * + * { margin-left: 8px; }
+.ps-no-flex-gap .hist-foot > * + * { margin-left: 10px; }
+.ps-no-flex-gap .hist-item > * + * { margin-left: 10px; }
+.ps-no-flex-gap .hist-top > * + * { margin-left: 7px; }
+.ps-no-flex-gap .wp-head > * + * { margin-left: 10px; }
+.ps-no-flex-gap .wp-actions > * + * { margin-left: 9px; }
+.ps-no-flex-gap #upgrade-bar > * + * { margin-left: 8px; }
+
+/* 注意：这里**不能**给 .lib-grid 加兜底 —— grid 的 gap 从 Chrome 57 就支持了，
+   比 flex gap（Chrome 84）早得多。给它加 margin 反而会多出一层间距。
+   真遇到不支持 grid 的内核，它会自然退化成纵向排列，不会错位。 */
+
+/* ---- 无 inset：已在声明里补了 top/right/bottom/left，这里无需额外处理 ---- */
+
+/* ---- 无 aspect-ratio：用 padding 撑出正方形 ---- */
+.ps-no-aspect-ratio .lib-thumb {
+  height: 0;
+  padding-bottom: 100%;
+  position: relative;
+}
+
+/* ---- 无 min()/max()：已在声明里补了固定值，这里无需额外处理 ---- */
+
+/* ======================= 后台保活状态 ======================= */
+.ka-state {
+  padding: 9px 12px;
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid var(--line-soft);
+  background: var(--panel-2);
+}
+.ka-state.ka-ok {
+  border-color: rgba(53, 208, 127, .4);
+  background: rgba(53, 208, 127, .1);
+  color: #7ee2ab;
+}
+.ka-state.ka-muted { color: var(--text-faint); }
+.ka-state.ka-warn {
+  border-color: rgba(255, 176, 32, .4);
+  background: rgba(255, 176, 32, .1);
+  color: #ffd591;
+}

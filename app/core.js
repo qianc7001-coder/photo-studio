@@ -2303,6 +2303,151 @@
     };
   }
 
+  /* ====================== 7.01e 后台保活 ====================== */
+
+  /**
+   * 保活策略：什么时候该开启「后台保活」。
+   *
+   * 背景：生图请求通常要 30~60 秒，多块串行时更久。这期间用户很容易切走
+   * （去看微信、锁屏、拍下一张）。Android 在后台会很快回收进程 ——
+   * 一旦被杀，这次请求就白花钱了（上游已经生成，图却收不到）。
+   *
+   * 所以策略是：
+   *   - **生成中必须保活**（这是花钱的时刻，绝不能断）
+   *   - 用户手动打开的「一直保活」开关优先（长时间连续修图时有用）
+   *   - 其它时候不保活：常驻通知是有代价的，不该无条件挂着
+   *
+   * 纯函数，便于把各种组合都测到。
+   *
+   * @param {object} o { busy, userAlwaysOn, supported, enabled }
+   * @returns {{on:boolean, reason:string, note:string}}
+   */
+  function planKeepAlive(o) {
+    const opt = o || {};
+    const supported = opt.supported !== false;   // 非 Android 环境（浏览器/PWA）不支持
+    const enabled = opt.enabled !== false;       // 总开关（设置里可关）
+
+    if (!supported) return { on: false, reason: 'unsupported', note: '当前环境不支持后台保活' };
+    if (!enabled) return { on: false, reason: 'disabled', note: '后台保活已在设置中关闭' };
+    if (opt.busy) return { on: true, reason: 'generating', note: '生成中，正在保活' };
+    if (opt.userAlwaysOn) return { on: true, reason: 'always', note: '已开启常驻保活' };
+    return { on: false, reason: 'idle', note: '' };
+  }
+
+  /**
+   * 保活状态该显示成什么。
+   *
+   * 刻意区分「正在保活」和「保活已就绪」：用户最关心的是
+   * 「我现在切走会不会断」，所以要能一眼看出当前是不是受保护。
+   */
+  function describeKeepAlive(state, o) {
+    const opt = o || {};
+    const supported = opt.supported !== false;
+    const enabled = opt.enabled !== false;
+    const alwaysOn = !!opt.userAlwaysOn;
+    if (!supported) return { text: '当前环境不支持', tone: 'muted', canAlways: false };
+    if (!enabled) return { text: '已关闭', tone: 'muted', canAlways: true };
+    if (state && state.on) {
+      const why = state.reason === 'always' ? '常驻保活中' : '正在保活';
+      return { text: why + '，切到后台也不会中断', tone: 'ok', canAlways: true };
+    }
+    if (alwaysOn) return { text: '保活开启中', tone: 'ok', canAlways: true };
+    return {
+      text: '空闲时不保活；生成时会自动保活',
+      tone: 'muted',
+      canAlways: true
+    };
+  }
+
+  /**
+   * 判断「这次生成值不值得提醒用户别切走」。
+   *
+   * 单块请求通常 30~60 秒，多块会成倍增长。保活能挡住系统回收，
+   * 但挡不住用户主动杀应用（从最近任务划掉）—— 那种情况必须提前说明。
+   */
+  function planGenForegroundNotice(o) {
+    const opt = o || {};
+    const tiles = Math.max(1, Math.round(num(opt.tiles, 1)));
+    const supported = opt.supported !== false;
+    const enabled = opt.enabled !== false;
+    const keepOn = !!(opt.keepAlive && opt.keepAlive.on);
+    // 分块越多、越久，越值得提醒
+    const risky = tiles > 1;
+    return {
+      show: supported && enabled && keepOn && risky,
+      text: risky
+        ? '本次要分 ' + tiles + ' 块依次生成，耗时较长。已开启后台保活，切走或锁屏都不会中断 —— 但请别从最近任务里划掉应用。'
+        : ''
+    };
+  }
+
+  /* ====================== 7.01f 浏览器能力兼容 ====================== */
+
+  /**
+   * 解析 WebView / 浏览器的能力等级，决定要不要打兼容补丁。
+   *
+   * 为什么要做这个：
+   *   国产 ROM 常把系统 WebView 冻结在旧版本（尤其是没有 Play 商店的机型），
+   *   而不同特性落地的版本差得很远：
+   *     async/await   Chrome 55   ← 低于这个，整个脚本语法错误、白屏
+   *     flex gap      Chrome 84   ← 低于这个，元素全挤在一起（不是变丑，是错位）
+   *     inset         Chrome 87
+   *     aspect-ratio  Chrome 88
+   *   所以启动时要探测一次，给老内核打补丁。
+   *
+   * 注意：**不能用 `@supports (gap: 1px)` 判断 flex gap** ——
+   * Chrome 66~83 里 grid gap 早就支持，这条会返回 true 却仍然不支持 flex gap，
+   * 必须实际渲染两个盒子量间距。
+   *
+   * 纯函数，便于把各版本组合都测到。
+   *
+   * @param {object} o { chrome, hasFlexGap, hasInset, hasAspectRatio, hasMinFn, hasAsync }
+   * @returns {{level:string, patches:Array<string>, warn:string, blocking:boolean}}
+   */
+  function planCompat(o) {
+    const opt = o || {};
+    const c = num(opt.chrome, 0);
+    const has = (k, fallback) => (opt[k] === undefined ? fallback : !!opt[k]);
+    const patches = [];
+
+    // 硬门槛：语法层面的特性缺失意味着整个脚本跑不起来，只能明确告知用户
+    const hasAsync = has('hasAsync', c >= 55 || c === 0);
+    if (!hasAsync) {
+      return {
+        level: 'unsupported',
+        patches: [],
+        blocking: true,
+        warn: '当前系统的浏览器内核太旧（不支持 async/await），页面无法运行。'
+          + '请到应用商店更新「Android System WebView」，或升级系统。'
+      };
+    }
+
+    if (!has('hasFlexGap', c >= 84)) patches.push('no-flex-gap');
+    if (!has('hasInset', c >= 87)) patches.push('no-inset');
+    if (!has('hasAspectRatio', c >= 88)) patches.push('no-aspect-ratio');
+    if (!has('hasMinFn', c >= 79)) patches.push('no-css-minmax');
+
+    let level = 'modern';
+    if (patches.length) level = c >= 70 ? 'patched' : 'legacy';
+
+    let warn = '';
+    if (patches.length) {
+      warn = '当前系统的浏览器内核版本较旧，已自动启用兼容显示。'
+        + '若界面有错位，建议到应用商店更新「Android System WebView」。';
+    }
+
+    return { level, patches, warn, blocking: false };
+  }
+
+  /**
+   * 把补丁名转成根节点上的 class 名。
+   * 分开成函数是为了让 HTML/CSS 与 JS 三处的命名约定有单一来源。
+   */
+  function compatClassNames(patches) {
+    const list = patches || [];
+    return list.map((p) => 'ps-' + String(p));
+  }
+
   /* ====================== 7.02 编辑图层（非破坏性） ====================== */
 
   /**
@@ -3108,6 +3253,10 @@
     planLibrary, dayStartTs, describeWorkAge, formatWorkClock,
     groupWorksByDay, workLibraryStats,
     LIBRARY_BUDGET_BYTES, LIBRARY_MAX_ITEMS, THUMB_MAX_SIDE,
+    // 后台保活
+    planKeepAlive, describeKeepAlive, planGenForegroundNotice,
+    // 浏览器能力兼容
+    planCompat, compatClassNames,
     EXPORT_PRESETS, getExportPreset, planExportSize, stripGpsFromExif, planExportMetadata,
     MODEL_PRICES, DEFAULT_USD_CNY, modelPrice, estimateCost, accumulateSpend, formatUsd, formatCny,
     parseJpegSegments, extractExif, extractICC, readExifOrientation,

@@ -446,5 +446,141 @@ t('estimateCalls', C.estimateCalls({x:0,y:0,w:3000,h:3000},{maxSide:1400,overlap
 // ===== 作品库单元测试结束 =====
 
 /* ---------- 作品库（跨天修图记录） ---------- */
+// ===== 后台保活与环境兼容（测试块） =====
+(() => {
+  // 1) 保活策略：生成中必须保活（这是花钱的时刻），空闲不保活
+  const idle = C.planKeepAlive({ busy: false, userAlwaysOn: false });
+  t('空闲时不保活', idle.on === false && idle.reason === 'idle');
+  const gen = C.planKeepAlive({ busy: true, userAlwaysOn: false });
+  t('生成中必须保活', gen.on === true && gen.reason === 'generating');
+  const always = C.planKeepAlive({ busy: false, userAlwaysOn: true });
+  t('常驻开关开启时保活', always.on === true && always.reason === 'always');
+  const both = C.planKeepAlive({ busy: true, userAlwaysOn: true });
+  t('生成中 + 常驻仍保活', both.on === true);
+  t('生成中优先报「生成中」', both.reason === 'generating', both.reason);
+
+  // 总开关与不支持的环境要能压住
+  t('总开关关闭时不保活（即使正在生成）',
+    C.planKeepAlive({ busy: true, enabled: false }).on === false);
+  t('环境不支持时不保活',
+    C.planKeepAlive({ busy: true, supported: false }).on === false);
+  t('不支持时给出原因', C.planKeepAlive({ supported: false }).reason === 'unsupported');
+  t('planKeepAlive 对 null 安全', C.planKeepAlive(null).on === false);
+  t('planKeepAlive 无参安全', C.planKeepAlive().on === false);
+
+  // 2) 状态描述：用户最关心「现在切走会不会断」，必须能一眼看出
+  const dOn = C.describeKeepAlive({ on: true, reason: 'generating' });
+  t('保活中状态为 ok', dOn.tone === 'ok');
+  t('保活中说明「切到后台也不会中断」', /切到后台也不会中断/.test(dOn.text), dOn.text);
+  const dAlways = C.describeKeepAlive({ on: true, reason: 'always' });
+  t('常驻保活显示为「常驻」', /常驻/.test(dAlways.text), dAlways.text);
+  const dOff = C.describeKeepAlive({ on: false });
+  t('空闲状态为 muted', dOff.tone === 'muted');
+  t('空闲时说明「生成时会自动保活」', /生成时会自动保活/.test(dOff.text), dOff.text);
+  const dUnsup = C.describeKeepAlive(null, { supported: false });
+  t('不支持时不允许开常驻', dUnsup.canAlways === false);
+  t('不支持时说明原因', /不支持/.test(dUnsup.text), dUnsup.text);
+  const dDisabled = C.describeKeepAlive(null, { enabled: false });
+  t('总开关关闭时显示「已关闭」', dDisabled.text === '已关闭', dDisabled.text);
+  t('关闭时仍允许重新打开常驻', dDisabled.canAlways === true);
+
+  // 3) 分块提醒：跑很久时要说清「能切走，但别划掉」
+  const n1 = C.planGenForegroundNotice({ tiles: 1, keepAlive: { on: true } });
+  t('单块不打扰（不弹提醒）', n1.show === false);
+  const n3 = C.planGenForegroundNotice({ tiles: 3, keepAlive: { on: true } });
+  t('多块时提醒', n3.show === true);
+  t('提醒里说明已开保活', /已开启后台保活/.test(n3.text), n3.text);
+  t('提醒里说明「别从最近任务划掉」', /划掉/.test(n3.text), n3.text);
+  t('提醒里带上块数', /3 块/.test(n3.text), n3.text);
+  t('保活没开时不提醒（说了也没用）',
+    C.planGenForegroundNotice({ tiles: 3, keepAlive: { on: false } }).show === false);
+  t('保活总开关关闭时不提醒',
+    C.planGenForegroundNotice({ tiles: 3, keepAlive: { on: true }, enabled: false }).show === false);
+  t('非安卓环境不提醒',
+    C.planGenForegroundNotice({ tiles: 3, keepAlive: { on: true }, supported: false }).show === false);
+  t('块数非法时不崩', typeof C.planGenForegroundNotice({ tiles: 'x' }).show === 'boolean');
+
+  // 4) 环境兼容：各版本该打什么补丁
+  //    这些数字不是随便定的，对应真实的 Chrome 版本：
+  //      flex gap 84 / inset 87 / aspect-ratio 88 / min() 79 / async 55
+  const modern = C.planCompat({ chrome: 120 });
+  t('新内核不打补丁', modern.patches.length === 0, modern.patches);
+  t('新内核标记为 modern', modern.level === 'modern');
+  t('新内核不告警', modern.warn === '');
+
+  const c83 = C.planCompat({ chrome: 83, hasFlexGap: false, hasInset: false, hasAspectRatio: false });
+  t('Chrome 83 要补 flex gap', c83.patches.includes('no-flex-gap'), c83.patches);
+  t('Chrome 83 要补 inset', c83.patches.includes('no-inset'), c83.patches);
+  t('Chrome 83 要补 aspect-ratio', c83.patches.includes('no-aspect-ratio'), c83.patches);
+  t('Chrome 83 不补 min()（79 就支持了）', !c83.patches.includes('no-css-minmax'), c83.patches);
+  t('打了补丁就不算 blocking', c83.blocking === false);
+  t('打了补丁会告警建议更新 WebView', /WebView/.test(c83.warn), c83.warn);
+
+  const c70 = C.planCompat({ chrome: 70, hasFlexGap: false, hasInset: false, hasAspectRatio: false, hasMinFn: false });
+  t('Chrome 70 要补 min()', c70.patches.includes('no-css-minmax'), c70.patches);
+  // 70 是「打了补丁但还能用」的分界：再往下就归为 legacy（体验明显更差）
+  t('Chrome 70 标为 patched', c70.level === 'patched', c70.level);
+  t('Chrome 69 标为 legacy', C.planCompat({ chrome: 69, hasFlexGap: false }).level === 'legacy');
+  // 边界：84 起 flex gap 原生支持，不该再打这个补丁
+  t('Chrome 84 不再补 flex gap',
+    !C.planCompat({ chrome: 84, hasFlexGap: true, hasInset: false, hasAspectRatio: false }).patches.includes('no-flex-gap'));
+  t('Chrome 87 不再补 inset',
+    !C.planCompat({ chrome: 87, hasFlexGap: true, hasInset: true, hasAspectRatio: false }).patches.includes('no-inset'));
+  t('Chrome 88 起完全不用补', C.planCompat({ chrome: 88, hasFlexGap: true, hasInset: true, hasAspectRatio: true, hasMinFn: true }).patches.length === 0);
+
+  const c54 = C.planCompat({ chrome: 54, hasAsync: false });
+  t('不支持 async 时标记 blocking', c54.blocking === true);
+  t('blocking 时给出可操作的指引', /更新/.test(c54.warn), c54.warn);
+  t('blocking 时不打补丁（打了也没用）', c54.patches.length === 0);
+
+  // 能力探测优先于版本号：国产内核可能不报 Chrome 版本
+  const unknown = C.planCompat({ chrome: 0, hasFlexGap: true, hasInset: true, hasAspectRatio: true, hasMinFn: true });
+  t('拿不到版本号时按能力判断（全支持→不打补丁）', unknown.patches.length === 0, unknown.patches);
+  const unknownBad = C.planCompat({ chrome: 0, hasFlexGap: false });
+  t('拿不到版本号但实测缺 flex gap → 打补丁', unknownBad.patches.includes('no-flex-gap'), unknownBad.patches);
+  t('planCompat 对 null 安全', typeof C.planCompat(null).patches.length === 'number');
+
+  // 5) 补丁名 → class 名
+  t('补丁名转 class 加 ps- 前缀',
+    C.compatClassNames(['no-flex-gap']).join(',') === 'ps-no-flex-gap');
+  t('多个补丁都转换', C.compatClassNames(['a', 'b']).length === 2);
+  t('空输入安全', C.compatClassNames([]).length === 0);
+  t('null 输入安全', C.compatClassNames(null).length === 0);
+
+  // 6) 接线检查：这些必须在真实文件里，不能只有函数定义
+  const fs2 = require('fs');
+  const appSrc2 = fs2.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html2 = fs2.readFileSync(__dirname + '/../app/index.html', 'utf8');
+  const css2 = fs2.readFileSync(__dirname + '/../app/style.css', 'utf8');
+
+  t('生成开始时同步保活（setBusy 里挂钩）',
+    /function setBusy[\s\S]{0,500}syncKeepAlive\(\)/.test(appSrc2));
+  // 启动时必须无条件同步一次：桥可能比 boot 晚就绪，靠启动时的缓存值会永久误判
+  t('启动时无条件同步保活状态', /\/\/ 后台保活[\s\S]{0,400}syncKeepAlive\(\);/.test(appSrc2));
+  t('启动时按常驻配置申请通知权限',
+    /syncKeepAlive\(\);[\s\S]{0,200}keepAliveAlways === true\) askNotificationPermission\(\)/.test(appSrc2));
+  t('保活支持检测不缓存（实时探测）',
+    /S\.keepAliveSupported = keepAliveSupported\(\);/.test(appSrc2));
+  t('启动时探测环境能力', /applyCompat\(\)/.test(appSrc2));
+  t('切回前台会重新同步保活', /visibilitychange[\s\S]{0,200}syncKeepAlive\(\)/.test(appSrc2));
+  t('浏览器里没有桥时不报错（bridge 判空）', /function bridge\(\)[\s\S]{0,200}PSBridge[\s\S]{0,200}null/.test(appSrc2));
+  t('生成完成且用户切走时发通知', /document\.hidden[\s\S]{0,120}notifyGenDone/.test(appSrc2));
+  t('生成失败且用户切走时也发通知', /生成失败，点开查看原因/.test(appSrc2));
+  t('分块时提醒「别划掉」', /planGenForegroundNotice\(/.test(appSrc2));
+  t('设置里有保活总开关', /id="set-keepalive"/.test(html2));
+  t('设置里有常驻开关', /id="set-keepalive-always"/.test(html2));
+  t('设置里有状态显示', /id="ka-state"/.test(html2));
+  t('设置里有电池优化引导', /id="ka-battery"/.test(html2));
+  t('保活配置会被持久化', /'keepAlive', 'keepAliveAlways'/.test(appSrc2));
+  t('保活默认开启', /keepAlive: true,/.test(appSrc2));
+  t('常驻默认关闭（不该默认挂通知）', /keepAliveAlways: false,/.test(appSrc2));
+  t('关总开关时一并关掉常驻', /keepAlive === false && S\.cfg\.keepAliveAlways/.test(appSrc2));
+  t('状态样式存在', /\.ka-state/.test(css2) && /\.ka-ok/.test(css2));
+  t('兼容补丁样式存在', /\.ps-no-flex-gap/.test(css2));
+})();
+// ===== 后台保活结束 =====
+
+
+/* ---------- 后台保活与环境兼容 ---------- */
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

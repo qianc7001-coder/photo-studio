@@ -63,9 +63,83 @@ function icon(size) {
     return [bg[0], bg[1], bg[2], 255];
   });
 }
+/** 超采样渲染：把 fn 在 ss×ss 个子像素上求平均，消除锯齿 */
+function renderPNG(size, fn, ss) {
+  const n = Math.max(1, ss | 0);
+  return writePNG(size, size, (x, y) => {
+    let r = 0, g = 0, b = 0, a = 0;
+    for (let sy = 0; sy < n; sy++) {
+      for (let sx = 0; sx < n; sx++) {
+        const p = fn((x + (sx + 0.5) / n) / size, (y + (sy + 0.5) / n) / size);
+        const al = p[3] / 255;
+        r += p[0] * al; g += p[1] * al; b += p[2] * al; a += al;
+      }
+    }
+    const total = n * n;
+    if (a <= 0) return [0, 0, 0, 0];
+    // 按 alpha 加权还原颜色，避免边缘发黑
+    return [Math.round(r / a), Math.round(g / a), Math.round(b / a), Math.round(255 * a / total)];
+  });
+}
+
+/** 圆角矩形的内部判定（含圆角） */
+function inRoundRect(u, v, x0, y0, x1, y1, r) {
+  const cx = Math.min(Math.max(u, x0 + r), x1 - r);
+  const cy = Math.min(Math.max(v, y0 + r), y1 - r);
+  if (Math.hypot(u - cx, v - cy) > r) return false;
+  return u >= x0 && u <= x1 && v >= y0 && v <= y1;
+}
+
+/**
+ * 通知栏小图标。
+ *
+ * 规则（Android 强制）：必须是**纯白 + 透明底**的剪影，系统会自己染色。
+ * 带彩色的图会被系统直接涂成一坨白块，看不出形状。
+ * 尺寸按 24dp 出，各密度分别生成。
+ */
+function statIcon(size) {
+  return renderPNG(size, (u, v) => {
+    // 相框：外圆角矩形 - 内圆角矩形 = 边框
+    const x0 = 0.09, y0 = 0.15, x1 = 0.91, y1 = 0.85, r = 0.13;
+    const bw = 0.085;
+    const outer = inRoundRect(u, v, x0, y0, x1, y1, r);
+    const inner = inRoundRect(u, v, x0 + bw, y0 + bw, x1 - bw, y1 - bw, Math.max(0.02, r - bw));
+    if (outer && !inner) return [255, 255, 255, 255];
+    // 框内的「山 + 太阳」：一眼认出是照片
+    if (inner) {
+      // 太阳
+      if (Math.hypot(u - 0.36, v - 0.38) < 0.062) return [255, 255, 255, 255];
+      // 山：两条斜边构成的三角
+      const by = y1 - bw;             // 底线
+      const peakY = 0.50, leftX = 0.22, rightX = 0.78, peakX = 0.56;
+      if (v <= by && v >= peakY) {
+        // 在峰高范围内，判断是否落在三角形里
+        const t = (v - peakY) / (by - peakY);      // 0=峰顶 1=底
+        const lo = peakX + (leftX - peakX) * t;
+        const hi = peakX + (rightX - peakX) * t;
+        if (u >= lo && u <= hi) return [255, 255, 255, 255];
+      }
+    }
+    return [0, 0, 0, 0];
+  }, 4);
+}
+
 const out = process.argv[2] || path.join(__dirname, '..', 'app');
 fs.mkdirSync(out, { recursive: true });
 for (const s of [192, 512]) {
   fs.writeFileSync(path.join(out, `icon-${s}.png`), icon(s));
 }
 console.log('图标已生成：icon-192.png / icon-512.png → ' + out);
+
+// 第二个参数是 Android res 目录：额外生成通知栏图标（各密度）
+const resDir = process.argv[3];
+if (resDir) {
+  // 通知图标按 24dp，各密度对应像素数
+  const DENSITIES = { mdpi: 24, hdpi: 36, xhdpi: 48, xxhdpi: 72, xxxhdpi: 96 };
+  for (const [d, px] of Object.entries(DENSITIES)) {
+    const dir = path.join(resDir, 'drawable-' + d);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'ic_stat_photostudio.png'), statIcon(px));
+  }
+  console.log('通知图标已生成（5 种密度）→ ' + resDir + '/drawable-*');
+}

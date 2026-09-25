@@ -1173,5 +1173,111 @@ console.log('\n【作品库】跨天修图记录：预算、落盘、恢复');
 
 
 /* ---------- 作品库（跨天修图记录） ---------- */
+console.log('\n【保活】Android 壳：跨版本兼容与注册完整性');
+
+(() => {
+  const fs = require('fs');
+  const path = require('path');
+  const readA = (f) => fs.readFileSync(path.join(__dirname, '..', 'android', f), 'utf8');
+
+  const manifest = readA('AndroidManifest.xml');
+  const svc = readA('src/com/photostudio/app/KeepAliveService.java');
+  const act = readA('src/com/photostudio/app/MainActivity.java');
+  const appSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'app.js'), 'utf8');
+
+  // 1) Manifest 注册完整性：少任何一项，保活要么不生效、要么直接崩
+  t('声明了前台服务权限', /android\.permission\.FOREGROUND_SERVICE"/.test(manifest));
+  t('声明了 dataSync 类型权限（Android 14 必需，否则 SecurityException）',
+    /FOREGROUND_SERVICE_DATA_SYNC/.test(manifest));
+  t('声明了唤醒锁权限', /android\.permission\.WAKE_LOCK/.test(manifest));
+  t('声明了通知权限（Android 13+）', /POST_NOTIFICATIONS/.test(manifest));
+  t('声明了电池优化申请权限', /REQUEST_IGNORE_BATTERY_OPTIMIZATIONS/.test(manifest));
+  t('服务已注册', /<service[\s\S]{0,200}KeepAliveService/.test(manifest));
+  t('服务声明了 foregroundServiceType', /foregroundServiceType="dataSync"/.test(manifest));
+  t('服务不对外暴露（exported=false）', /android:exported="false"/.test(manifest));
+  t('声明了 roundIcon（部分启动器需要，否则图标显示异常）', /android:roundIcon/.test(manifest));
+
+  // 2) 版本分流：这些是最容易漏、漏了就在老设备上崩的地方
+  t('通知 Builder 按版本分流（带渠道的构造函数是 API 26+）',
+    /Build\.VERSION\.SDK_INT >= Build\.VERSION_CODES\.O[\s\S]{0,200}new Notification\.Builder\(ctx, channelId\)/.test(svc)
+    && /new Notification\.Builder\(ctx\)/.test(svc));
+  t('通知渠道只在 API 26+ 创建',
+    /SDK_INT < Build\.VERSION_CODES\.O\) return;/.test(svc));
+  t('startForeground 按版本分流（三参重载是 API 29+）',
+    /SDK_INT >= 29[\s\S]{0,200}startForeground\(NOTIF_ID, n, ServiceInfo\.FOREGROUND_SERVICE_TYPE_DATA_SYNC\)/.test(svc));
+  t('低版本走两参 startForeground', /startForeground\(NOTIF_ID, n\);/.test(svc));
+  t('startForegroundService 按版本分流（API 26+）',
+    /SDK_INT >= Build\.VERSION_CODES\.O[\s\S]{0,120}startForegroundService/.test(svc));
+  t('PendingIntent 处理 FLAG_IMMUTABLE（API 31+ 强制要求）',
+    /FLAG_IMMUTABLE/.test(svc));
+
+  // 3) 通知图标：缺失会导致发通知时崩溃
+  t('通知用了专用小图标', /setSmallIcon\(R\.drawable\.ic_stat_photostudio\)/.test(svc));
+  const iconDirs = ['mdpi', 'hdpi', 'xhdpi', 'xxhdpi', 'xxxhdpi'];
+  let iconCount = 0;
+  for (const d of iconDirs) {
+    const p = path.join(__dirname, '..', 'android', 'res', 'drawable-' + d, 'ic_stat_photostudio.png');
+    if (fs.existsSync(p)) iconCount++;
+  }
+  t('通知图标覆盖全部 5 种屏幕密度', iconCount === 5, iconCount);
+
+  // 4) 用户划掉应用时必须收摊，否则留下点不动的常驻通知
+  t('任务被移除时停止保活', /onTaskRemoved[\s\S]{0,300}stopSelf\(\)/.test(svc));
+  t('不用 START_STICKY（避免被回收后留下僵尸通知）',
+    /START_NOT_STICKY/.test(svc));
+  t('销毁时释放唤醒锁', /onDestroy[\s\S]{0,200}releaseWakeLock\(\)/.test(svc));
+  t('唤醒锁带超时兜底（防止异常路径永久持锁）',
+    /WAKELOCK_TIMEOUT_MS/.test(svc) && /acquire\(WAKELOCK_TIMEOUT_MS\)/.test(svc));
+
+  // 5) 老设备外链：只重载新版签名会让 Android 5/6 上点不动链接
+  t('外链拦截同时重载新旧两个签名',
+    /shouldOverrideUrlLoading\(WebView view, WebResourceRequest request\)/.test(act)
+    && /shouldOverrideUrlLoading\(WebView view, String url\)/.test(act));
+
+  // 6) JS 桥
+  t('注册了 JS 桥', /addJavascriptInterface\(new Bridge\(\), "PSBridge"\)/.test(act));
+  t('桥方法标了 @JavascriptInterface（Android 4.2+ 必需，否则调用不到）',
+    (act.match(/@JavascriptInterface/g) || []).length >= 6,
+    (act.match(/@JavascriptInterface/g) || []).length);
+  t('桥里的 setKeepAlive 切回主线程（WebView 的桥线程不是 UI 线程）',
+    /setKeepAlive[\s\S]{0,300}runOnUiThread/.test(act));
+  t('桥方法内部都做了异常保护（桥里抛异常会污染页面）',
+    /keepAliveRunning\(\)[\s\S]{0,200}try/.test(act) || /catch \(Exception e\)/.test(act));
+
+  // 7) 电池优化：各家 OEM 后台策略不同，必须有降级链
+  t('有电池优化白名单检测', /isIgnoringBatteryOptimizations/.test(act));
+  t('申请入口有层层降级（标准弹窗 → 设置列表 → 应用详情）',
+    /ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS/.test(act)
+    && /ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS/.test(act)
+    && /ACTION_APPLICATION_DETAILS_SETTINGS/.test(act));
+  t('API 23 以下不申请（6.0 之前没有这个概念）',
+    /SDK_INT < Build\.VERSION_CODES\.M[\s\S]{0,120}无需设置|SDK_INT < Build\.VERSION_CODES\.M[\s\S]{0,80}return true/.test(act));
+
+  // 8) 通知权限申请
+  t('Android 13+ 才申请通知权限', /SDK_INT < 33\) return;/.test(act));
+  t('通知权限被拒不影响主流程', /没有通知也能正常修图/.test(act));
+
+  // 9) JS 侧接线
+  t('生成时自动保活（setBusy 里挂钩）',
+    /function setBusy[\s\S]{0,600}syncKeepAlive\(\)/.test(appSrc));
+  t('桥不存在时不报错（纯浏览器可用）',
+    /window\.PSBridge\) \? window\.PSBridge : null/.test(appSrc));
+  t('保活支持检测是实时的（不缓存启动值）',
+    /S\.keepAliveSupported = keepAliveSupported\(\);/.test(appSrc));
+  t('切回前台重新同步保活', /visibilitychange/.test(appSrc));
+  t('启动时恢复常驻保活', /syncKeepAlive\(\);[\s\S]{0,200}keepAliveAlways === true/.test(appSrc));
+  t('切走后完成/失败都发通知',
+    /document\.hidden[\s\S]{0,120}notifyGenDone/.test(appSrc)
+    && /生成失败，点开查看原因/.test(appSrc));
+
+  // 10) 兼容探测不能只用 @supports（Chrome 66~83 会误报 flex gap 支持）
+  t('flex gap 用真实渲染实测（不用 @supports）',
+    /function detectFlexGap[\s\S]{0,900}getBoundingClientRect/.test(appSrc));
+  t('兼容补丁在渲染前应用', /function boot\(\)[\s\S]{0,120}applyCompat\(\)/.test(appSrc));
+  t('兼容探测失败不阻断启动', /catch \(e\) \{\s*return null;[\s\S]{0,40}探测本身失败/.test(appSrc));
+})();
+
+
+/* ---------- 后台保活（Android 原生侧） ---------- */
 console.log(`\n合计 ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

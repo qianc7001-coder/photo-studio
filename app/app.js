@@ -52,6 +52,12 @@
     library: [],          // 作品记录列表（内存态，落盘在 LS_KEY_LIBRARY）
     libraryNote: '',      // 空间不足时的提示（说明清理了什么）
 
+    // 环境能力（启动时探测）：{ level, patches[], warn, blocking }
+    compat: null,
+    // 后台保活是否可用（Android 壳里才有 PSBridge）
+    keepAliveSupported: false,
+    keepAliveState: null, // { on, reason, note }
+
     // 待确认的生成结果
     pending: null,
 
@@ -63,6 +69,7 @@
     // 设置
     cfg: null,
     busy: false,
+    busyTotal: 1,         // 本次生成共几块（保活通知要显示进度感）
     aborter: null,
 
     // 原图元数据（EXIF / ICC）：canvas 重绘会丢掉它们，导入时先存下来，导出时写回
@@ -99,6 +106,8 @@
     upscaleSmall: true,
     historyBudgetMB: 192,      // 编辑历史内存上限（超过则降采样/丢弃最老的）
     autoSaveSession: true,     // 自动保存编辑会话，进程被杀后可恢复
+    keepAlive: true,           // 后台保活：生成时钉住进程，避免切走被杀导致请求白花钱
+    keepAliveAlways: false,    // 一直保活（长时间连续修图时有用，代价是常驻通知）
     lang: 'auto',
     seed: '',
     exportPreset: 'full',      // 导出预设（决定尺寸/质量/元数据策略）
@@ -129,7 +138,8 @@
     'contextPct', 'feather', 'colorMatch', 'maxRes', 'tile',
     'lang', 'seed', 'format', 'quality', 'mosaic', 'upscaleSmall', 'exportPreset',
     'priceOverride', 'usdCny',
-    'historyBudgetMB', 'autoSaveSession'
+    'historyBudgetMB', 'autoSaveSession',
+    'keepAlive', 'keepAliveAlways'
   ];
 
   /**
@@ -280,6 +290,130 @@
     if (title) $('busy-title').textContent = title;
     $('busy-sub').textContent = sub || '';
     $('btn-generate').disabled = on || !S.img || !S.rect;
+    // 生成状态变化直接驱动保活：这是「正在花钱」的时刻，最需要钉住进程
+    syncKeepAlive();
+  }
+
+  /* ============================ 后台保活 ============================ */
+
+  /**
+   * 原生桥（Android 壳里才有）。
+   *
+   * 浏览器 / PWA 里没有这个对象，所有调用都要先判断存在性 ——
+   * 否则纯网页打开时会直接报错白屏。
+   */
+  function bridge() {
+    try {
+      return (typeof window !== 'undefined' && window.PSBridge) ? window.PSBridge : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** 当前环境是否支持保活 */
+  function keepAliveSupported() {
+    const b = bridge();
+    if (!b) return false;
+    try {
+      return b.supported() === true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
+   * 按当前状态同步保活开关。
+   *
+   * 调用点：生成开始/结束、设置里切换常驻、启动时。
+   * 内部把「生成中」和「用户常驻」两个来源合并后交给原生，
+   * 由 core.planKeepAlive 决定最终该不该开（纯逻辑，有单测覆盖）。
+   */
+  function syncKeepAlive() {
+    const b = bridge();
+    // 每次都实时探测，不用启动时的缓存值：
+    // 页面可能在桥就绪前就 boot 了（WebView 里 addJavascriptInterface 的
+    // 时序不受我们控制），缓存一次会永久误判为「不支持」。
+    S.keepAliveSupported = keepAliveSupported();
+    if (!b) {
+      S.keepAliveState = C.planKeepAlive({ supported: false });
+      updateKeepAliveUI();
+      return S.keepAliveState;
+    }
+    const plan = C.planKeepAlive({
+      busy: !!S.busy,
+      userAlwaysOn: S.cfg.keepAliveAlways === true,
+      supported: true,
+      enabled: S.cfg.keepAlive !== false
+    });
+    S.keepAliveState = plan;
+    try {
+      b.setKeepAlive(!!S.busy, S.cfg.keepAliveAlways === true, keepAliveText(plan));
+    } catch (e) {
+      // 桥调用失败不该影响修图
+    }
+    updateKeepAliveUI();
+    return plan;
+  }
+
+  /** 保活通知上显示的文案 */
+  function keepAliveText(plan) {
+    if (!plan || !plan.on) return '';
+    if (plan.reason === 'always') return '常驻保活中，修图不会被系统中断';
+    if (S.busy && S.busyTotal > 1) return '正在生成（共 ' + S.busyTotal + ' 块），切走或锁屏不会中断';
+    return '正在生成，切走或锁屏不会中断';
+  }
+
+  /** 生成完成：请原生发一条「好了」的通知，用户切走后也能知道 */
+  function notifyGenDone(text) {
+    const b = bridge();
+    if (!b) return;
+    try { b.notifyDone(text || '生成完成，点开查看效果'); } catch (e) { /* ignore */ }
+  }
+
+  /** 把保活状态刷到设置界面 */
+  function updateKeepAliveUI() {
+    const el = $('ka-state');
+    if (!el) return;
+    // 同样实时探测：桥晚一点就绪时，界面要能自己纠正过来
+    S.keepAliveSupported = keepAliveSupported();
+    const d = C.describeKeepAlive(S.keepAliveState, {
+      supported: S.keepAliveSupported,
+      enabled: S.cfg.keepAlive !== false,
+      userAlwaysOn: S.cfg.keepAliveAlways === true
+    });
+    el.textContent = d.text;
+    el.className = 'ka-state ka-' + d.tone;
+    const row = $('ka-always-row');
+    if (row) row.hidden = !d.canAlways;
+    const batt = $('ka-battery');
+    if (batt) {
+      // 电池优化白名单：各家 OEM 的后台限制都靠这一步放宽
+      let optimized = false;
+      const b = bridge();
+      if (b && S.keepAliveSupported) {
+        try { optimized = b.batteryOptimized() === true; } catch (e) { /* ignore */ }
+      }
+      batt.hidden = !optimized;
+    }
+  }
+
+  /** 引导用户把应用加入电池优化白名单 */
+  function askIgnoreBattery() {
+    const b = bridge();
+    if (!b) return;
+    try {
+      b.requestIgnoreBattery();
+      toast('若系统弹出提示，请选择「允许」', 3200);
+    } catch (e) {
+      toast('无法打开系统设置，请手动到「电池」里允许后台运行', 3600);
+    }
+  }
+
+  /** 申请通知权限（Android 13+ 需要，否则保活通知看不到） */
+  function askNotificationPermission() {
+    const b = bridge();
+    if (!b) return;
+    try { b.requestNotificationPermission(); } catch (e) { /* ignore */ }
   }
 
   /* ============================ 画布尺寸 ============================ */
@@ -1335,7 +1469,18 @@
     S.aborter = new AbortController();
     const token = ++S.genToken;
     const docVer = S.docVersion;
+    S.busyTotal = tiles.length;      // 保活通知据此显示「共 N 块」
     setBusy(true, '正在生成…', tiles.length > 1 ? `共 ${tiles.length} 块，第 1 块` : '正在请求生图模型');
+    // 分块会跑很久，明确告诉用户「可以切走，但别划掉」—— 划掉应用保活也救不了
+    if (tiles.length > 1) {
+      const notice = C.planGenForegroundNotice({
+        tiles: tiles.length,
+        supported: S.keepAliveSupported,
+        enabled: S.cfg.keepAlive !== false,
+        keepAlive: S.keepAliveState
+      });
+      if (notice.show) toast(notice.text, 6000);
+    }
     $('btn-generate').disabled = true;
     clearErrorPanel();
 
@@ -1600,6 +1745,12 @@
 
       showCompare();
       setBusy(false);
+      // 用户可能已经切走了（去看别的应用/锁屏），发条通知告诉他「好了」
+      if (document.hidden) {
+        notifyGenDone(tiles.length > 1
+          ? `生成完成（共 ${tiles.length} 块），点开对比效果`
+          : '生成完成，点开对比效果');
+      }
       if (lastUpscale && lastUpscale.scale > 1.05) {
         toast('生成完成（选区较小，已放大 ' + lastUpscale.scale.toFixed(1) + ' 倍发送，贴回时按原分辨率还原）', 3600);
       } else {
@@ -1611,6 +1762,8 @@
         if (!err.stale) toast('已取消生成');
       } else {
         showGenError(err, { kind, model: S.cfg.model, baseUrl: S.cfg.baseUrl });
+        // 切走后失败更要通知：否则用户回来只看到界面恢复原样，不知道发生了什么
+        if (document.hidden) notifyGenDone('生成失败，点开查看原因');
       }
       console.error('[修图台] 生成失败', err);
     } finally {
@@ -2923,6 +3076,29 @@
     $('set-upscale').checked = S.cfg.upscaleSmall !== false;
     $('set-mem').value = S.cfg.historyBudgetMB || 192;
     $('set-autosave').checked = S.cfg.autoSaveSession !== false;
+    // 后台保活
+    S.keepAliveSupported = keepAliveSupported();
+    const kaEl = $('set-keepalive');
+    if (kaEl) {
+      kaEl.checked = S.cfg.keepAlive !== false;
+      kaEl.disabled = !S.keepAliveSupported;
+    }
+    const kaAlways = $('set-keepalive-always');
+    if (kaAlways) {
+      kaAlways.checked = S.cfg.keepAliveAlways === true;
+      kaAlways.disabled = !S.keepAliveSupported;
+    }
+    // 浏览器里没有原生桥，直接说明「不适用」，避免用户以为坏了
+    if (!S.keepAliveSupported) {
+      const st = $('ka-state');
+      if (st) { st.textContent = '当前环境不支持（仅在安卓 App 内有效）'; st.className = 'ka-state ka-muted'; }
+      const row = $('ka-always-row');
+      if (row) row.hidden = true;
+      const kb = $('ka-battery');
+      if (kb) kb.hidden = true;
+    } else {
+      updateKeepAliveUI();
+    }
     $('set-price').value = S.cfg.priceOverride === '' ? '' : S.cfg.priceOverride;
     $('set-usdcny').value = S.cfg.usdCny || 7.1;
     syncRangeLabels();
@@ -3365,6 +3541,25 @@
     bindField('set-upscale', 'upscaleSmall', (el) => el.checked, () => { if (S.img && S.rect) updateUI(); });
     bindField('set-mem', 'historyBudgetMB', (el) => Number(el.value), () => { enforceHistoryBudget(); });
     bindField('set-autosave', 'autoSaveSession', (el) => el.checked);
+
+    // 后台保活
+    bindField('set-keepalive', 'keepAlive', (el) => el.checked, () => {
+      // 关掉总开关时顺便把常驻也关掉，避免留下一条点不动的常驻通知。
+      // bindField 已经存过配置了，这里改完再存一次即可。
+      if (S.cfg.keepAlive === false && S.cfg.keepAliveAlways) {
+        S.cfg.keepAliveAlways = false;
+        const el2 = $('set-keepalive-always');
+        if (el2) el2.checked = false;
+        saveCfg();
+      }
+      syncKeepAlive();
+    });
+    bindField('set-keepalive-always', 'keepAliveAlways', (el) => el.checked, () => {
+      // 开常驻时顺带申请通知权限，否则 Android 13+ 上通知不显示，用户会以为没生效
+      if (S.cfg.keepAliveAlways) askNotificationPermission();
+      syncKeepAlive();
+    });
+    $('ka-battery').onclick = askIgnoreBattery;
     bindField('set-price', 'priceOverride', (el) => el.value.trim());
     bindField('set-usdcny', 'usdCny', (el) => Number(el.value) || 7.1, updatePriceTip);
     $('btn-reset-spend').onclick = () => {
@@ -3785,9 +3980,91 @@
   window.addEventListener('error', (e) => showFatal('运行', e.error || e.message));
   window.addEventListener('unhandledrejection', (e) => showFatal('异步', e.reason));
 
+  /* ============================ 浏览器兼容 ============================ */
+
+  /**
+   * 实测 flex gap 是否生效。
+   *
+   * 为什么不用 @supports：
+   *   `@supports (gap: 1px)` 在 Chrome 66~83 上返回 true —— 因为 grid 的 gap
+   *   早就支持了，但 **flex 的 gap 要 Chrome 84 才有**。用 @supports 判断会漏掉
+   *   一大批机型，界面直接挤成一团。所以这里真的建两个盒子量一下。
+   */
+  function detectFlexGap() {
+    try {
+      const box = document.createElement('div');
+      box.style.cssText =
+        'position:absolute;left:-9999px;top:0;display:flex;flex-direction:row;' +
+        'column-gap:13px;gap:13px;width:40px;height:2px';
+      const a = document.createElement('div');
+      const b = document.createElement('div');
+      a.style.cssText = 'width:5px;height:2px;flex:0 0 auto';
+      b.style.cssText = 'width:5px;height:2px;flex:0 0 auto';
+      box.appendChild(a);
+      box.appendChild(b);
+      document.body.appendChild(box);
+      const d = Math.round(b.getBoundingClientRect().left - a.getBoundingClientRect().left);
+      document.body.removeChild(box);
+      // 有 gap 时两个 5px 盒子间距应为 13px
+      return d >= 12;
+    } catch (e) {
+      return true;   // 测不了就按支持处理，宁可不打补丁
+    }
+  }
+
+  /** 从 UA 里取 Chrome/WebView 主版本号（取不到返回 0） */
+  function detectChromeVersion() {
+    try {
+      const ua = navigator.userAgent || '';
+      const m = /Chrome\/(\d+)/.exec(ua);
+      if (m) return Number(m[1]);
+      // 部分国产内核不报 Chrome，但报 AppleWebKit；拿不到就交给能力探测
+      return 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  /** 安全地做 CSS.supports 探测（老内核可能没有这个 API） */
+  function cssSupports(prop, value) {
+    try {
+      if (typeof CSS === 'undefined' || !CSS.supports) return true;   // 没有就按支持处理
+      return CSS.supports(prop, value);
+    } catch (e) {
+      return true;
+    }
+  }
+
+  /** 探测一次环境能力，给老内核打补丁 */
+  function applyCompat() {
+    let plan;
+    try {
+      plan = C.planCompat({
+        chrome: detectChromeVersion(),
+        hasFlexGap: detectFlexGap(),
+        hasInset: cssSupports('inset', '0'),
+        hasAspectRatio: cssSupports('aspect-ratio', '1 / 1'),
+        hasMinFn: cssSupports('width', 'min(1px, 2px)'),
+        // async/await 无法运行时探测（语法错误就没机会执行到这里），
+        // 由版本号推断；这里按支持处理，真不支持时页面根本到不了这一步
+        hasAsync: true
+      });
+    } catch (e) {
+      return null;   // 探测本身失败不该影响启动
+    }
+    if (plan.patches.length) {
+      const root = document.documentElement;
+      for (const cls of C.compatClassNames(plan.patches)) root.classList.add(cls);
+      console.log('[修图台] 已启用兼容模式：' + plan.patches.join(', '));
+    }
+    S.compat = plan;
+    return plan;
+  }
+
   /* ============================ 启动 ============================ */
 
   function boot() {
+    applyCompat();               // 必须最先做：老内核要在渲染前打上补丁
     S.cfg = loadCfg();
     // 迁移过配置就必须立刻落盘。
     // 不落盘的话，每次启动都会重新迁移一遍 —— 用户手动改回来的设置会被反复覆盖。
@@ -3806,6 +4083,23 @@
     checkUpgrade();
     // 检查是否有上次未完成的编辑（Android 后台回收很常见）
     if (S.cfg.autoSaveSession !== false) offerSessionRestore();
+
+    // 后台保活：把当前状态同步给原生。
+    // 无条件调用 —— 桥可能比 boot 晚就绪，syncKeepAlive 内部会实时探测并自行处理。
+    // 常驻保活必须在这里补一次，否则用户上次开了常驻、这次重启就失效了。
+    syncKeepAlive();
+    if (S.keepAliveSupported && S.cfg.keepAliveAlways === true) askNotificationPermission();
+
+    // 老内核兼容提示：不弹窗打扰，只在控制台留痕 + 升级条里说明
+    if (S.compat && S.compat.warn) console.warn('[修图台] ' + S.compat.warn);
+
+    // 切回前台时重新同步一次：应用在后台期间保活状态可能与实际不符
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) {
+        syncKeepAlive();
+        updateKeepAliveUI();
+      }
+    });
 
     // 若通过本地服务打开，探测代理是否可用
     if (location.protocol !== 'file:') {
@@ -3845,6 +4139,14 @@
     openWorkPreview,
     continueWork,
     library: () => S.library,
-    workId: () => S.workId
+    workId: () => S.workId,
+    // 后台保活 + 环境兼容（供测试与外部调用）
+    syncKeepAlive,
+    keepAliveState: () => S.keepAliveState,
+    keepAliveSupported,
+    updateKeepAliveUI,
+    notifyGenDone,
+    applyCompat,
+    compat: () => S.compat
   };
 })();

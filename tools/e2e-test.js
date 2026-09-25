@@ -1950,6 +1950,224 @@ async function run() {
   // 配额失败后必须还能继续用：读回记录不能崩
   t('配额失败后记录仍可读', Array.isArray(window.__PS_API.loadLibrary()));
 
+  /* ---------- 后台保活（JS ↔ 原生桥） ---------- */
+  console.log('\n【14.8】后台保活');
+
+  // jsdom 里没有原生桥，先装一个假的，用来验证 JS 侧的调用时机与参数
+  const kaCalls = [];
+  window.PSBridge = {
+    supported: () => true,
+    setKeepAlive: (genOn, always, text) => {
+      // 记下「调用那一刻」的状态：假模型是本机服务，几十毫秒就跑完了，
+      // 等 sleep 之后再查状态会看到已经释放保活（那是正确行为，不是 bug）
+      let stateNow = null;
+      try { stateNow = window.__PS_API.keepAliveState(); } catch (e) { /* ignore */ }
+      kaCalls.push({ genOn, always, text, stateNow });
+    },
+    keepAliveRunning: () => true,
+    notifyDone: (t) => { kaCalls.push({ notify: t }); },
+    requestNotificationPermission: () => { kaCalls.push({ notifPerm: true }); },
+    batteryOptimized: () => true,
+    requestIgnoreBattery: () => { kaCalls.push({ battery: true }); },
+    deviceInfo: () => '{"sdk":31,"release":"12","brand":"vivo","model":"V2131A"}'
+  };
+  window.__PS_API.syncKeepAlive();
+  await sleep(40);
+
+  t('装了原生桥后识别为支持保活', window.__PS_API.keepAliveSupported() === true);
+  t('空闲时不请求保活', (() => {
+    const last = kaCalls.filter((c) => 'genOn' in c).pop();
+    return last && last.genOn === false && last.always === false;
+  })(), kaCalls.filter((c) => 'genOn' in c).pop());
+
+  // 生成期间必须自动开启保活 —— 这是整个功能的核心
+  kaCalls.length = 0;
+  const kaSeenBefore = fake.seen.length;
+  fake.setColor([90, 200, 120]);
+  S.rect = { x: 40, y: 40, w: 120, h: 90 };
+  doc.getElementById('prompt').value = '保活测试';
+  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+  // 请求还没回来时（busy 为真）就应该已经开了保活
+  await sleep(80);
+  const duringGen = kaCalls.filter((c) => 'genOn' in c);
+  t('生成中自动开启保活', duringGen.some((c) => c.genOn === true), duringGen);
+  t('生成中保活状态为 on', (() => {
+    const c = duringGen.filter((x) => x.genOn === true).pop();
+    return !!(c && c.stateNow && c.stateNow.on === true && c.stateNow.reason === 'generating');
+  })(), duringGen.filter((x) => x.genOn === true).pop());
+  t('保活通知文案说明了「切走不会中断」', (() => {
+    const withText = duringGen.filter((c) => c.text).pop();
+    return withText && /不会中断/.test(withText.text);
+  })(), duringGen.filter((c) => c.text).pop());
+
+  await waitGen(S);
+  if (S.pending) {
+    doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
+    await sleep(120);
+  }
+  await sleep(120);
+  t('生成完成了一次', fake.seen.length === kaSeenBefore + 1, fake.seen.length - kaSeenBefore);
+
+  // 生成结束后应释放保活（否则常驻通知会一直挂着）
+  const afterGen = kaCalls.filter((c) => 'genOn' in c).pop();
+  t('生成结束后释放保活', afterGen && afterGen.genOn === false, afterGen);
+  t('生成结束后状态回到 idle', (() => {
+    const st = window.__PS_API.keepAliveState();
+    return st && st.on === false;
+  })(), window.__PS_API.keepAliveState());
+
+  // 常驻保活：用户开了之后，空闲也要保活
+  kaCalls.length = 0;
+  S.cfg.keepAliveAlways = true;
+  window.__PS_API.syncKeepAlive();
+  await sleep(40);
+  const alwaysCall = kaCalls.filter((c) => 'genOn' in c).pop();
+  t('常驻开启时空闲也保活', alwaysCall && alwaysCall.always === true, alwaysCall);
+  t('常驻状态标记为 always', (() => {
+    const st = window.__PS_API.keepAliveState();
+    return st && st.on === true && st.reason === 'always';
+  })(), window.__PS_API.keepAliveState());
+  t('常驻通知文案说明是常驻', /常驻/.test(alwaysCall.text || ''), alwaysCall.text);
+
+  // 总开关关闭：连常驻也不该保活（用户明确关掉了）
+  kaCalls.length = 0;
+  S.cfg.keepAlive = false;
+  window.__PS_API.syncKeepAlive();
+  await sleep(40);
+  const offCall = kaCalls.filter((c) => 'genOn' in c).pop();
+  t('总开关关闭时不保活', offCall && offCall.genOn === false && offCall.always === true, offCall);
+  t('总开关关闭时状态为 off', (() => {
+    const st = window.__PS_API.keepAliveState();
+    return st && st.on === false;
+  })(), window.__PS_API.keepAliveState());
+
+  // 恢复
+  S.cfg.keepAlive = true;
+  S.cfg.keepAliveAlways = false;
+  window.__PS_API.syncKeepAlive();
+  await sleep(40);
+
+  // 设置界面要反映真实状态
+  window.__PS_API.updateKeepAliveUI();
+  await sleep(30);
+  const kaStateEl = doc.getElementById('ka-state');
+  t('设置里显示了保活状态', !!kaStateEl && (kaStateEl.textContent || '').length > 0,
+    kaStateEl && kaStateEl.textContent);
+  t('空闲时提示「生成时会自动保活」', /生成时会自动保活/.test(kaStateEl.textContent || ''),
+    kaStateEl.textContent);
+  t('保活状态样式类正确', kaStateEl.className.indexOf('ka-muted') >= 0, kaStateEl.className);
+
+  // 生成中状态要变成「正在保活」（用户要能看出现在受保护）
+  S.busy = true;
+  window.__PS_API.syncKeepAlive();
+  await sleep(30);
+  t('生成中状态显示为「正在保活」', /正在保活/.test(kaStateEl.textContent || ''),
+    kaStateEl.textContent);
+  t('生成中状态样式为 ok', kaStateEl.className.indexOf('ka-ok') >= 0, kaStateEl.className);
+  S.busy = false;
+  window.__PS_API.syncKeepAlive();
+  await sleep(30);
+
+  // 电池优化引导：各家 OEM 后台限制不同，这个入口必须能点
+  const kaBatt = doc.getElementById('ka-battery');
+  t('电池优化按钮存在', !!kaBatt);
+  kaBatt.dispatchEvent(new window.Event('click'));
+  await sleep(40);
+  t('点按钮会请求加入白名单', kaCalls.some((c) => c.battery === true), kaCalls);
+
+  // 通知权限：Android 13+ 需要，开常驻时应该顺带申请
+  kaCalls.length = 0;
+  const kaAlwaysBox = doc.getElementById('set-keepalive-always');
+  kaAlwaysBox.checked = true;
+  kaAlwaysBox.dispatchEvent(new window.Event('change'));
+  await sleep(60);
+  t('开常驻时会申请通知权限', kaCalls.some((c) => c.notifPerm === true), kaCalls);
+  t('开常驻后配置已保存', S.cfg.keepAliveAlways === true);
+  kaAlwaysBox.checked = false;
+  kaAlwaysBox.dispatchEvent(new window.Event('change'));
+  await sleep(60);
+  t('关常驻后配置已保存', S.cfg.keepAliveAlways === false);
+
+  // 关总开关时要顺带关掉常驻，否则会留下一条点不动的常驻通知
+  S.cfg.keepAliveAlways = true;
+  window.__PS_API.syncKeepAlive();
+  const kaSwitch = doc.getElementById('set-keepalive');
+  kaSwitch.checked = false;
+  kaSwitch.dispatchEvent(new window.Event('change'));
+  await sleep(60);
+  t('关总开关会一并关掉常驻', S.cfg.keepAliveAlways === false, S.cfg.keepAliveAlways);
+  t('关总开关后常驻勾选框也取消', doc.getElementById('set-keepalive-always').checked === false);
+  kaSwitch.checked = true;
+  kaSwitch.dispatchEvent(new window.Event('change'));
+  await sleep(60);
+
+  // 没有原生桥时（纯浏览器打开）不能报错 —— 这是最容易崩的场景
+  const savedBridge = window.PSBridge;
+  delete window.PSBridge;
+  let noBridgeErr = null;
+  try {
+    window.__PS_API.syncKeepAlive();
+    window.__PS_API.notifyGenDone('测试');
+    window.__PS_API.updateKeepAliveUI();
+  } catch (e) { noBridgeErr = e; }
+  t('没有原生桥时不报错（浏览器里也能用）', !noBridgeErr, noBridgeErr && noBridgeErr.message);
+  t('没有原生桥时识别为不支持', window.__PS_API.keepAliveSupported() === false);
+  t('不支持时状态说明写清了原因', (() => {
+    window.__PS_API.updateKeepAliveUI();
+    return /不支持/.test(doc.getElementById('ka-state').textContent || '');
+  })(), doc.getElementById('ka-state').textContent);
+  window.PSBridge = savedBridge;
+  window.__PS_API.syncKeepAlive();
+  await sleep(30);
+
+  // 用户切走时生成完成 → 要发通知（否则他只能反复切回来查）
+  kaCalls.length = 0;
+  Object.defineProperty(doc, 'hidden', { value: true, configurable: true });
+  window.__PS_API.notifyGenDone('生成完成，点开对比效果');
+  await sleep(40);
+  t('切走后发完成通知', kaCalls.some((c) => c.notify), kaCalls);
+  t('完成通知文案可读', /生成完成/.test((kaCalls.find((c) => c.notify) || {}).notify || ''));
+  Object.defineProperty(doc, 'hidden', { value: false, configurable: true });
+
+  /* ---------- 环境兼容（老内核） ---------- */
+  console.log('\n【14.9】环境兼容');
+
+  const compatNow = window.__PS_API.compat();
+  t('启动时做了能力探测', !!compatNow);
+  t('探测结果含等级与补丁列表',
+    typeof compatNow.level === 'string' && Array.isArray(compatNow.patches), compatNow);
+
+  // jsdom 支持 flex gap，所以现代环境下不该打补丁
+  const hasFlexGapInJsdom = (() => {
+    const box = doc.createElement('div');
+    box.style.cssText = 'position:absolute;left:-9999px;display:flex;gap:13px';
+    const a = doc.createElement('div'); const b = doc.createElement('div');
+    a.style.cssText = 'width:5px;height:2px;flex:0 0 auto';
+    b.style.cssText = 'width:5px;height:2px;flex:0 0 auto';
+    box.appendChild(a); box.appendChild(b);
+    doc.body.appendChild(box);
+    const d = Math.round(b.getBoundingClientRect().left - a.getBoundingClientRect().left);
+    doc.body.removeChild(box);
+    return d >= 12;
+  })();
+
+  if (!hasFlexGapInJsdom) {
+    t('jsdom 不支持 flex gap → 已打上补丁',
+      doc.documentElement.classList.contains('ps-no-flex-gap'),
+      Array.from(doc.documentElement.classList));
+  } else {
+    t('jsdom 支持 flex gap → 不该打补丁',
+      !doc.documentElement.classList.contains('ps-no-flex-gap'));
+  }
+
+  // 兼容样式表里必须有兜底规则（否则加了 class 也没用）
+  const cssText = fs.readFileSync(path.join(APP, 'style.css'), 'utf8');
+  t('有 flex gap 兜底样式', /\.ps-no-flex-gap\b/.test(cssText));
+  t('有 aspect-ratio 兜底样式', /\.ps-no-aspect-ratio\b/.test(cssText));
+  t('inset 有 top/right/bottom/left 兜底',
+    /position:\s*absolute;\s*top:\s*0;\s*right:\s*0;\s*bottom:\s*0;\s*left:\s*0/.test(cssText));
+  t('min() 有固定值兜底', /max-width:\s*92%;[\s\S]{0,60}max-width:\s*min\(/.test(cssText));
+
   /* ---------- 无 JS 错误 ---------- */
   console.log('\n【15】运行健康度');
   const errs = logs.filter((l) => /JSDOM_ERROR|Uncaught/.test(l));

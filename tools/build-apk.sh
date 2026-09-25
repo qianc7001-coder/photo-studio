@@ -43,7 +43,7 @@ echo "> 同步网页资源到 assets"
 node "$ROOT/tools/build-single.js" > /dev/null
 cp "$ROOT/app/index.html" "$ROOT/app/style.css" "$ROOT/app/core.js" "$ROOT/app/app.js" \
    "$ROOT/app/version.js" "$ROOT/app/manifest.json" "$ROOT/app/icon.svg" "$AND/assets/"
-node "$ROOT/tools/make-icons.js" "$AND/assets" > /dev/null 2>&1 || true
+node "$ROOT/tools/make-icons.js" "$AND/assets" "$AND/res" > /dev/null 2>&1 || true
 ls "$AND/assets" | sed 's/^/    /'
 
 echo "> aapt package（生成 R.java）"

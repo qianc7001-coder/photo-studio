@@ -1,6 +1,6 @@
 {
   "name": "photo-studio",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "description": "给摄影师用的局部修图工具：框选照片任意区域交给生图模型修改，结果自动贴回原位置",
   "private": true,
   "license": "MIT",

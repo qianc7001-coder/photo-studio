@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-1017%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-1167%20passed-brightgreen.svg)](#测试)
 
 给摄影师用的**局部修图**工具：在照片上框选任意区域，交给生图模型修改，结果自动贴回原位置。
 
 **核心特点**：结果无缝融合，非破坏性可调，保留拍摄信息。
 
-> 最新版本 **v2.5.0** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
+> 最新版本 **v2.6.0** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
 
 ---
 
@@ -54,6 +54,14 @@
 - 点开看大图，只要编辑数据还在就能 **继续编辑这张** —— 直接回到当时状态接着改
 - 同一张照片反复修改**只占一条**（原地更新）
 - 空间不足时先丢较早记录的编辑数据（保留预览图），再清理最早的记录，并明确提示
+
+### 后台保活
+- 生图要 30~60 秒，切走或锁屏时系统会回收进程 —— **请求断了但钱已经花了**
+- 生成期间自动开启前台服务把进程钉住，切走也能拿到结果（空闲即停，不留常驻通知）
+- 生成完成后发通知告诉你「好了」，不用反复切回来查看
+- 可选「一直保活」开关，连续修图时不用每次等系统调度
+- 设置里可一键跳转到系统的「电池优化白名单」—— 各家 OEM 后台策略不同，这是唯一通用入口
+- **兼容 Android 5.0 ~ 14**：所有系统接口按版本分流（通知渠道 / 前台服务类型 / 运行时权限），老设备走降级分支而不是崩溃
 
 ### 画质
 - 边缘羽化（消除拼接硬边）
@@ -164,7 +172,7 @@ node tools/migrate-test.js     # 配置迁移（模拟老用户升级路径）
 node tools/e2e-test.js         # 端到端（jsdom + 真实 canvas，逐像素校验）
 ```
 
-当前规模：**1017 项**（225 单元 + 461 回归 + 14 配置迁移 + 317 端到端）。
+当前规模：**1167 项**（298 单元 + 501 回归 + 14 配置迁移 + 354 端到端）。
 
 端到端测试会：
 - 启动一个假生图模型服务器
