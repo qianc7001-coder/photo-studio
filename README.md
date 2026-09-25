@@ -1,8 +1,14 @@
 # 修图台 · Photo Studio
 
+[![CI](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-699%20passed-brightgreen.svg)](#测试)
+
 给摄影师用的**局部修图**工具：在照片上框选任意区域，交给生图模型修改，结果自动贴回原位置。
 
 **核心特点**：结果无缝融合，非破坏性可调，保留拍摄信息。
+
+> 最新版本 **v2.3.0** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
 
 ---
 
