@@ -1,0 +1,111 @@
+# =============================================================================
+# 持续集成：每次提交自动跑检查与测试
+#
+# 说明：本项目的端到端测试需要 jsdom 与 @napi-rs/canvas 提供真实 DOM 与 canvas。
+# 这两个是可选依赖（不在 package.json 里，避免影响「零依赖」的构建流程），
+# 所以这里先尝试安装；装不上就跳过 e2e，不影响单元与回归测试。
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: 代码检查与测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 代码检查（lint）
+        run: node tools/lint.js
+
+      - name: 单元测试
+        run: node tools/core-test.js
+
+      - name: 回归测试
+        run: node tools/regression-test.js
+
+      - name: 安装端到端测试依赖
+        id: e2e-deps
+        continue-on-error: true
+        run: |
+          npm install --no-save jsdom @napi-rs/canvas
+          node -e "require('jsdom'); require('@napi-rs/canvas'); console.log('依赖就绪')"
+
+      - name: 端到端测试
+        if: steps.e2e-deps.outcome == 'success'
+        run: node tools/e2e-test.js
+
+      - name: 构建单文件网页版
+        run: node tools/build-single.js
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: photo-studio-web
+          path: dist/修图台.html
+          if-no-files-found: error
+          retention-days: 14
+
+  # APK 构建需要 Android SDK，体积大、耗时长，只在打标签时执行
+  apk:
+    name: 构建 APK
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 准备 JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 准备 Android 工具
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq aapt zipalign zip
+          # build-tools 与 platform（d8.jar / apksigner.jar / android.jar）
+          mkdir -p "$HOME/android-sdk/bt" "$HOME/android-sdk/pf"
+          curl -sL -o /tmp/bt.zip https://dl.google.com/android/repository/build-tools_r34-linux.zip
+          curl -sL -o /tmp/pf.zip https://dl.google.com/android/repository/platform-34-ext7_r03.zip
+          unzip -q /tmp/bt.zip -d "$HOME/android-sdk/bt"
+          unzip -q /tmp/pf.zip -d "$HOME/android-sdk/pf"
+          # 统一成脚本期望的目录名
+          mv "$HOME/android-sdk/bt/android-14" "$HOME/android-sdk/bt/android-14" 2>/dev/null || true
+          ln -sfn "$HOME/android-sdk" "$HOME/android-sdk-link"
+          echo "ANDROID_SDK=$HOME/android-sdk" >> "$GITHUB_ENV"
+
+      - name: 生成签名密钥（CI 用临时密钥）
+        run: |
+          keytool -genkeypair -v -keystore android/keystore.jks -alias photostudio \
+            -keyalg RSA -keysize 2048 -validity 3650 \
+            -storepass photostudio -keypass photostudio \
+            -dname "CN=CI, OU=Build, O=PhotoStudio, L=CN, S=CN, C=CN"
+
+      - name: 构建 APK
+        run: bash tools/build-apk.sh
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: photo-studio-apk
+          path: dist/修图台.apk
+          if-no-files-found: error
+          retention-days: 30
