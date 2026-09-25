@@ -1789,7 +1789,47 @@
       lastLabel() { return past.length ? (past[past.length - 1].label || '') : ''; },
       nextRedoLabel() { return future.length ? (future[future.length - 1].label || '') : ''; },
       clear() { past.length = 0; future.length = 0; },
-      size() { return { past: past.length, future: future.length }; }
+      size() { return { past: past.length, future: future.length }; },
+      /** 取出命令列表的副本（时间线要用完整顺序重放） */
+      list() { return { past: past.slice(), future: future.slice() }; },
+      /**
+       * 丢弃「未来」的命令。
+       *
+       * 用于历史时间线「跳回某一步」：跳回去之后，后面的步骤就作废了
+       * （和文本编辑器里改一个旧位置会让后续内容需要重做是一个道理）。
+       * 返回被丢弃的条数。
+       */
+      dropFuture() {
+        const n = future.length;
+        future.length = 0;
+        return n;
+      },
+      /**
+       * 编辑数组被裁剪（丢弃最老的 n 条）后，同步修正历史里的索引。
+       *
+       * 为什么必须做：命令里存的是**索引**，不是对象引用。丢弃最老的图层后，
+       * 所有索引都会前移；不修正的话撤销会作用到错误的图层上（删错图）。
+       * 引用了「已被丢弃图层」的命令则整条移除 —— 它已经没有可撤销的对象了。
+       */
+      adjustForDrop(dropCount) {
+        const d = Math.max(0, Math.round(num(dropCount, 0)));
+        if (!d) return;
+        const remap = (arr) => {
+          const out = [];
+          for (const c of arr) {
+            if (!c || !c.type) continue;
+            if (typeof c.index !== 'number') { out.push(c); continue; }
+            const ni = c.index - d;
+            if (ni < 0) continue;          // 引用的图层已丢弃，命令作废
+            c.index = ni;
+            out.push(c);
+          }
+          return out;
+        };
+        const np = remap(past), nf = remap(future);
+        past.length = 0; for (const c of np) past.push(c);
+        future.length = 0; for (const c of nf) future.push(c);
+      }
     };
     return api;
   }
@@ -1801,6 +1841,14 @@
    * 这样图层顺序不会乱（顺序会影响合成结果）。
    */
   function makeUndoCommand(type, payload) {
+    const cmd = buildUndoCommand(type, payload);
+    // 打时间戳：历史时间线要显示「什么时候做的」。
+    // 允许 payload.time 覆盖，方便测试断言固定值。
+    if (cmd && !cmd.time) cmd.time = num((payload && payload.time), Date.now());
+    return cmd;
+  }
+
+  function buildUndoCommand(type, payload) {
     const p = payload || {};
     switch (type) {
       case 'add-layer':
@@ -1873,6 +1921,122 @@
       default:
         return null;
     }
+  }
+
+  /* ====================== 7.01b 历史时间线 ====================== */
+
+  /**
+   * 把撤销栈 + 当前编辑状态整理成一条「时间线」。
+   *
+   * 设计要点：**不存图片快照**，而是复用撤销栈的差异命令。
+   * 时间线上的位置 = 已执行了多少条命令；跳转 = 连续撤销/重做。
+   * 这样 100 步历史的内存开销和现在一样（只有命令对象）。
+   *
+   * @param {object} stack  createUndoStack 的实例
+   * @param {object} state  { edits, strokes } 当前状态（用于算出每步的摘要）
+   * @returns {{items: Array, cursor: number}}
+   *   items[0] 恒为「原图」（初始状态），之后每一步是一条已执行的操作；
+   *   cursor 指向「当前所处的位置」（等于已执行命令数）。
+   */
+  function buildTimeline(stack, state) {
+    const s = (stack && stack.list) ? stack.list() : { past: [], future: [] };
+    const edits = (state && state.edits) || [];
+    const strokes = (state && state.strokes) || [];
+    const past = s.past || [];
+    const future = s.future || [];
+    const total = past.length + future.length;
+
+    // 第 0 项：原图
+    const items = [{
+      kind: 'origin',
+      label: '原图',
+      detail: '还没有任何修改',
+      layers: 0,
+      strokes: 0,
+      time: 0,
+      undone: false
+    }];
+
+    // 逐条累加，算出「执行到这一步时」的图层数与笔迹数。
+    // 注意 future 里的命令是「已撤销」的，按顺序接在后面即为「重做后」的状态。
+    let layers = 0, strokeN = 0;
+    for (let i = 0; i < total; i++) {
+      const cmd = i < past.length ? past[i] : future[i - past.length];
+      const isUndone = i >= past.length;
+      switch (cmd.type) {
+        case 'add-layer': layers++; break;
+        case 'remove-layer': layers = Math.max(0, layers - 1); break;
+        case 'stroke': strokeN++; break;
+        case 'clear-strokes': strokeN = 0; break;
+        default: break;
+      }
+      items.push({
+        kind: cmd.type,
+        label: cmd.label || '操作',
+        detail: describeCommand(cmd),
+        layers,
+        strokes: strokeN,
+        time: num(cmd.time, 0),
+        undone: isUndone
+      });
+    }
+
+    // 用当前真实状态校准最后一格（命令累计可能与实际有偏差，
+    // 比如内存整理丢弃过老图层）。这样「现在」这一格的数字一定准确。
+    if (items.length) {
+      const last = items[items.length - 1];
+      last.layers = edits.length;
+      last.strokes = strokes.length;
+    }
+
+    return { items, cursor: past.length };
+  }
+
+  /** 给一条命令生成人话摘要（时间线上的副标题） */
+  function describeCommand(cmd) {
+    const c = cmd || {};
+    const idx = (typeof c.index === 'number' && c.index >= 0) ? ('第 ' + (c.index + 1) + ' 处') : '';
+    switch (c.type) {
+      case 'add-layer':
+        return c.layer && c.layer.rect
+          ? (c.layer.rect.w + '×' + c.layer.rect.h + ' 的区域')
+          : '新增一处修改';
+      case 'remove-layer': return '删掉了 ' + (idx || '一处修改');
+      case 'param-layer': {
+        const names = { feather: '羽化', opacity: '不透明度', colorMatch: '色彩匹配' };
+        return (names[c.key] || c.key || '参数') + '：' +
+          formatParam(c.key, c.before) + ' → ' + formatParam(c.key, c.after);
+      }
+      case 'toggle-layer': return (c.after ? '启用' : '临时关闭') + (idx ? ' ' + idx : '');
+      case 'stroke': return '画笔涂抹（' + ((c.stroke && c.stroke.points && c.stroke.points.length) || 0) + ' 个点）';
+      case 'clear-strokes': return '清空了全部笔迹';
+      case 'set-rect':
+        return c.after
+          ? ('选区改为 ' + c.after.w + '×' + c.after.h)
+          : '取消选区';
+      default: return '';
+    }
+  }
+
+  /** 参数值转成好读的文字（0~1 的显示成百分比，羽化显示像素） */
+  function formatParam(key, v) {
+    const n = num(v, 0);
+    if (key === 'feather') return Math.round(n) + 'px';
+    return Math.round(n * 100) + '%';
+  }
+
+  /**
+   * 计算从当前位置跳到目标位置需要执行的操作序列。
+   *
+   * @param {number} cursor   当前位置（已执行命令数）
+   * @param {number} target   目标位置
+   * @param {number} total    命令总数
+   * @returns {{undo: number, redo: number}} 需要撤销/重做的步数
+   */
+  function planHistoryJump(cursor, target, total) {
+    const c = Math.max(0, Math.min(num(cursor, 0), num(total, 0)));
+    const t = Math.max(0, Math.min(num(target, 0), num(total, 0)));
+    return t < c ? { undo: c - t, redo: 0 } : { undo: 0, redo: t - c };
   }
 
   /* ====================== 7.02 编辑图层（非破坏性） ====================== */
@@ -2673,6 +2837,7 @@
     patchMemory, planHistoryMemory, planSessionPersist, packMask, unpackMask,
     normalizeLayer, layerAlphaAt, layerAlphaMap, layerCoverage, sortLayers,
     createUndoStack, makeUndoCommand, commandDirection,
+    buildTimeline, describeCommand, planHistoryJump,
     EXPORT_PRESETS, getExportPreset, planExportSize, stripGpsFromExif, planExportMetadata,
     MODEL_PRICES, DEFAULT_USD_CNY, modelPrice, estimateCost, accumulateSpend, formatUsd, formatCny,
     parseJpegSegments, extractExif, extractICC, readExifOrientation,

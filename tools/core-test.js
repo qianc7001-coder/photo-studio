@@ -114,5 +114,108 @@ t('formatBytes', C.formatBytes(1536)==='1.5 KB');
 t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','jpg')));
 t('estimateCalls', C.estimateCalls({x:0,y:0,w:3000,h:3000},{maxSide:1400,overlap:100})>1);
 
+
+// ===== 历史时间线（测试块） =====
+(() => {
+  const L = { rect: { x: 0, y: 0, w: 10, h: 10 }, patch: {}, feather: 0, opacity: 1 };
+
+  // 1) 空历史
+  const s0 = C.createUndoStack(100);
+  const t0 = C.buildTimeline(s0, { edits: [], strokes: [] });
+  t('时间线至少含「原图」一格', t0.items.length === 1 && t0.items[0].kind === 'origin', t0.items.length);
+  t('空历史游标在 0', t0.cursor === 0);
+
+  // 2) 逐步累加：每一步都能算出当时的图层数
+  const s1 = C.createUndoStack(100);
+  s1.push(C.makeUndoCommand('add-layer', { layer: L, index: 0, label: '生成修改', time: 1000 }));
+  s1.push(C.makeUndoCommand('stroke', { stroke: { points: [{ x: 1, y: 1 }] }, time: 2000 }));
+  s1.push(C.makeUndoCommand('add-layer', { layer: L, index: 1, label: '再改一处', time: 3000 }));
+  const t1 = C.buildTimeline(s1, { edits: [L, L], strokes: [{ points: [] }] });
+  t('时间线格数 = 命令数 + 1', t1.items.length === 4, t1.items.length);
+  t('第 0 格是原图', t1.items[0].kind === 'origin');
+  t('第 1 格记录 1 个图层', t1.items[1].layers === 1, t1.items[1].layers);
+  t('第 2 格记录 1 笔涂改', t1.items[2].strokes === 1, t1.items[2].strokes);
+  t('游标指向最新', t1.cursor === 3, t1.cursor);
+  t('最后一步的图层数用真实状态校准', t1.items[3].layers === 2, t1.items[3].layers);
+  t('标签来自命令', t1.items[1].label === '生成修改', t1.items[1].label);
+  t('时间戳带出来了', t1.items[1].time === 1000, t1.items[1].time);
+
+  // 3) 撤销后：后面的步骤标记为「未来」，但仍在时间线上（可跳回）
+  s1.undo();
+  const t2 = C.buildTimeline(s1, { edits: [L], strokes: [{ points: [] }] });
+  t('撤销后游标前移', t2.cursor === 2, t2.cursor);
+  t('已撤销的步骤仍留在时间线上', t2.items.length === 4, t2.items.length);
+  t('已撤销的步骤标记为 future', t2.items[3].undone === true);
+  t('未撤销的步骤不是 future', t2.items[1].undone === false);
+
+  // 4) 跳转计划：撤销/重做步数算对
+  t('往回跳只撤销', JSON.stringify(C.planHistoryJump(3, 1, 5)) === '{"undo":2,"redo":0}');
+  t('往前跳只重做', JSON.stringify(C.planHistoryJump(1, 3, 5)) === '{"undo":0,"redo":2}');
+  t('原地跳不动', JSON.stringify(C.planHistoryJump(2, 2, 5)) === '{"undo":0,"redo":0}');
+  t('目标越界夹取到 0', JSON.stringify(C.planHistoryJump(3, -5, 5)) === '{"undo":3,"redo":0}');
+  t('目标越界夹取到末尾', JSON.stringify(C.planHistoryJump(1, 99, 5)) === '{"undo":0,"redo":4}');
+  t('非法输入安全', JSON.stringify(C.planHistoryJump(null, null, null)) === '{"undo":0,"redo":0}');
+
+  // 5) 丢弃未来（跳回后确认）
+  const s2 = C.createUndoStack(100);
+  s2.push(C.makeUndoCommand('add-layer', { layer: L, index: 0 }));
+  s2.push(C.makeUndoCommand('add-layer', { layer: L, index: 1 }));
+  s2.undo();
+  t('丢弃前有未来', s2.canRedo() === true);
+  const dropped = s2.dropFuture();
+  t('dropFuture 返回丢弃条数', dropped === 1, dropped);
+  t('丢弃后不能再重做', s2.canRedo() === false);
+  t('已执行的保留', s2.size().past === 1, s2.size());
+
+  // 6) 关键 bug 修复：内存整理丢弃最老图层后，索引必须同步前移
+  //    （不修正的话，撤销会作用到错误的图层上）
+  const s3 = C.createUndoStack(100);
+  s3.push(C.makeUndoCommand('add-layer', { layer: L, index: 0 }));
+  s3.push(C.makeUndoCommand('add-layer', { layer: L, index: 1 }));
+  s3.push(C.makeUndoCommand('add-layer', { layer: L, index: 2 }));
+  s3.adjustForDrop(2);        // 丢弃最老的两个图层
+  const rest = s3.list().past;
+  t('丢弃后剩余命令数正确', rest.length === 1, rest.length);
+  t('引用了已丢弃图层的命令被移除', rest.every((c) => c.index >= 0));
+  t('剩余命令索引已前移', rest[0].index === 0, rest[0].index);
+  // 撤销一次后应作用在 index 0 上（而不是原来的 2）
+  const back = s3.undo();
+  t('撤销作用在正确的索引上', C.commandDirection(back, false).index === 0,
+    C.commandDirection(back, false).index);
+  t('adjustForDrop 对 0 是安全的', (() => {
+    const s = C.createUndoStack(10);
+    s.push(C.makeUndoCommand('add-layer', { layer: L, index: 0 }));
+    s.adjustForDrop(0);
+    return s.size().past === 1;
+  })());
+  t('adjustForDrop 不误伤无索引命令', (() => {
+    const s = C.createUndoStack(10);
+    s.push(C.makeUndoCommand('stroke', { stroke: { points: [] } }));
+    s.adjustForDrop(1);
+    return s.size().past === 1;
+  })());
+
+  // 7) 命令摘要要说人话
+  t('摘要：新增图层带尺寸', /10×10/.test(C.describeCommand(C.makeUndoCommand('add-layer', { layer: L, index: 0 }))));
+  t('摘要：删除带序号', /第 2 处/.test(C.describeCommand(C.makeUndoCommand('remove-layer', { index: 1 }))));
+  t('摘要：羽化用像素', /px/.test(C.describeCommand(C.makeUndoCommand('param-layer', { index: 0, key: 'feather', before: 0, after: 12 }))));
+  t('摘要：不透明度用百分比', /50%/.test(C.describeCommand(C.makeUndoCommand('param-layer', { index: 0, key: 'opacity', before: 1, after: 0.5 }))));
+  t('摘要：未知命令不崩', C.describeCommand({ type: 'nope' }) === '');
+  t('摘要：空输入不崩', C.describeCommand(null) === '');
+
+  // 8) 时间戳：命令自带时间，且可被 payload 覆盖（便于测试）
+  t('命令自带时间戳', C.makeUndoCommand('stroke', { stroke: {} }).time > 0);
+  t('时间戳可覆盖', C.makeUndoCommand('stroke', { stroke: {}, time: 42 }).time === 42);
+  t('非法命令仍返回 null', C.makeUndoCommand('unknown', {}) === null);
+
+  // 9) 内存安全：时间线不得复制图片数据
+  const fs2 = require('fs');
+  const src2 = fs2.readFileSync(__dirname + '/../app/core.js', 'utf8');
+  const tlFn = src2.slice(src2.indexOf('function buildTimeline'), src2.indexOf('function describeCommand'));
+  t('时间线不存图片快照', !/getImageData|toDataURL|ImageData/.test(tlFn));
+  t('时间线只读命令列表', /stack\.list|\.list\(\)/.test(tlFn));
+})();
+// ===== 历史时间线结束 =====
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

@@ -596,3 +596,76 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
   .sheet-body { max-height: 84vh; border-radius: 18px; margin-bottom: 5vh; border-bottom: 1px solid var(--line); }
   .sheet { align-items: center; }
 }
+
+/* ======================= 历史时间线 ======================= */
+#history .sheet-body { max-width: 600px; }
+
+.hist-foot {
+  display: flex; gap: 10px;
+  padding: 12px 18px calc(12px + var(--sab));
+  border-top: 1px solid var(--line-soft);
+  background: var(--panel);
+}
+.hist-foot .primary { flex: 1 1 auto; }
+.hist-foot .ghost { flex: 0 0 auto; }
+
+.hist-item {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 11px 12px;
+  margin-bottom: 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r);
+  background: var(--panel-2);
+  transition: opacity .15s, border-color .15s;
+}
+/* 已撤销的步骤：视觉上退到后面，但仍可点击跳回 */
+.hist-item.future { opacity: .5; }
+.hist-item.now { border-color: var(--accent); background: rgba(77, 163, 255, .1); }
+.hist-item.preview { border-color: var(--warn); background: rgba(255, 176, 32, .12); }
+
+.hist-dot {
+  flex: 0 0 auto;
+  width: 26px; height: 26px;
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(77, 163, 255, .14);
+  color: var(--accent);
+  margin-top: 1px;
+}
+.hist-dot svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.hist-item.now .hist-dot { background: var(--accent); color: #fff; }
+.hist-item.preview .hist-dot { background: var(--warn); color: #241a00; }
+
+.hist-body { flex: 1 1 auto; min-width: 0; }
+.hist-top { display: flex; align-items: center; gap: 7px; }
+.hist-label {
+  font-size: 13.5px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hist-tag {
+  flex: 0 0 auto;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .3px;
+  padding: 2px 7px; border-radius: 20px;
+  background: var(--accent); color: #fff;
+}
+.hist-item.preview .hist-tag { background: var(--warn); color: #241a00; }
+.hist-sub {
+  margin-top: 3px;
+  font-size: 11.5px; line-height: 1.5; color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.hist-go {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 7px 12px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px; font-weight: 600;
+  white-space: nowrap;
+  transition: background .15s, color .15s;
+}
+.hist-go:active { background: var(--panel); }
+.hist-item.now .hist-go { color: var(--text-faint); }

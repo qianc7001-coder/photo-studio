@@ -990,5 +990,84 @@ console.log('\n【新功能】版本号单一来源');
   t('version.js 含 changelog', vjs.includes('changelog'));
 })();
 
+
+console.log('\n【历史】时间线要能看、能预览、能跳回，且不吃内存');
+(() => {
+  const L = { rect: { x: 0, y: 0, w: 10, h: 10 }, patch: {}, feather: 0, opacity: 1 };
+
+  // 1) 时间线结构
+  const st = C.createUndoStack(100);
+  st.push(C.makeUndoCommand('add-layer', { layer: L, index: 0, label: '生成修改' }));
+  st.push(C.makeUndoCommand('param-layer', { index: 0, key: 'opacity', before: 1, after: 0.6, label: '减弱效果' }));
+  const tl = C.buildTimeline(st, { edits: [L], strokes: [] });
+  t('时间线含原图 + 每步一格', tl.items.length === 3, tl.items.length);
+  t('游标指向最新', tl.cursor === 2, tl.cursor);
+  t('原图格无图层', tl.items[0].layers === 0);
+  t('调参步摘要含百分比', /60%/.test(tl.items[2].detail), tl.items[2].detail);
+
+  // 2) 跳转计划（核心：撤销/重做步数不能算错）
+  t('往回跳 2 步', C.planHistoryJump(5, 3, 10).undo === 2 && C.planHistoryJump(5, 3, 10).redo === 0);
+  t('往前跳 4 步', C.planHistoryJump(3, 7, 10).redo === 4 && C.planHistoryJump(3, 7, 10).undo === 0);
+  t('跳转不会越界', C.planHistoryJump(2, 999, 5).redo === 3);
+  t('跳转对 null 安全', C.planHistoryJump(null, null, null).undo === 0);
+
+  // 3) 关键 bug：内存整理丢图层后索引必须同步修正
+  const st2 = C.createUndoStack(100);
+  st2.push(C.makeUndoCommand('add-layer', { layer: L, index: 0 }));
+  st2.push(C.makeUndoCommand('add-layer', { layer: L, index: 1 }));
+  st2.push(C.makeUndoCommand('param-layer', { index: 1, key: 'opacity', before: 1, after: 0.5 }));
+  st2.adjustForDrop(1);
+  const past = st2.list().past;
+  t('丢 1 个图层后索引前移', past[0].index === 0, past.map((c) => c.index));
+  // 命令 1 引用 index 0（已丢弃）→ 移除；命令 2、3 引用 index 1 → 前移为 0，保留
+  t('指向已丢弃图层的命令被清掉', past.length === 2, past.length);
+  t('保留的命令索引全部前移为 0', past.every((c) => c.index === 0), past.map((c) => c.index));
+  const dir = C.commandDirection(st2.undo(), false);
+  t('撤销作用于正确图层', dir.index === 0, dir.index);
+
+  // 4) 丢弃未来（跳回后确认）
+  const st3 = C.createUndoStack(100);
+  st3.push(C.makeUndoCommand('add-layer', { layer: L, index: 0 }));
+  st3.push(C.makeUndoCommand('add-layer', { layer: L, index: 1 }));
+  st3.undo();
+  t('dropFuture 清空未来', st3.dropFuture() === 1 && st3.canRedo() === false);
+  t('已执行的不受影响', st3.size().past === 1, st3.size());
+
+  // 5) 内存安全：时间线不得复制图片
+  const fs = require('fs');
+  const coreSrc = fs.readFileSync(__dirname + '/../app/core.js', 'utf8');
+  const tlFn = coreSrc.slice(coreSrc.indexOf('function buildTimeline'), coreSrc.indexOf('function describeCommand'));
+  t('时间线不存图片快照', !/getImageData|toDataURL|ImageData/.test(tlFn));
+
+  // 6) app 侧：必须有历史面板与预览/跳回接线
+  const appSrc = fs.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  t('有历史面板渲染函数', /function renderHistory\(/.test(appSrc));
+  t('有预览函数', /function previewHistoryAt\(/.test(appSrc));
+  t('有确认跳转函数', /function commitHistoryJump\(/.test(appSrc));
+  t('有取消预览函数', /function cancelHistoryPreview\(/.test(appSrc));
+  t('跳转复用统一的 applyCommand（不另写一套）',
+    /function previewHistoryAt[\s\S]{0,900}applyCommand\(cmd, /.test(appSrc));
+  t('内存整理后同步修正撤销栈索引', /adjustForDrop\(plan\.drop\)/.test(appSrc));
+  t('关闭面板时恢复现场（不留预览态）',
+    /function closeHistory\(\)[\s\S]{0,300}cancelHistoryPreview/.test(appSrc));
+
+  // 7) 面板 HTML 与样式齐全
+  const html = fs.readFileSync(__dirname + '/../app/index.html', 'utf8');
+  const css = fs.readFileSync(__dirname + '/../app/style.css', 'utf8');
+  t('有历史面板容器', /id="history"/.test(html));
+  t('有历史入口按钮', /id="btn-history"/.test(html));
+  t('有列表容器', /id="hist-list"/.test(html));
+  t('有跳转按钮', /id="hist-jump"/.test(html));
+  t('有退出预览按钮', /id="hist-preview-off"/.test(html));
+  t('历史面板有样式', /\.hist-item/.test(css));
+  t('已撤销步骤有视觉区分', /\.hist-item\.future/.test(css));
+  t('预览态有视觉区分', /\.hist-item\.preview/.test(css));
+
+  // 8) 版本说明里要提到这个功能（用户看得到）
+  const ver = JSON.parse(fs.readFileSync(__dirname + '/../version.json', 'utf8'));
+  t('版本说明含历史功能', ver.changelog.some((c) => /历史/.test(c)),
+    ver.changelog.slice(0, 2));
+})();
+
 console.log(`\n合计 ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

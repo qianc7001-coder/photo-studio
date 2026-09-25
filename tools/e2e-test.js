@@ -1623,6 +1623,118 @@ async function run() {
   t('保存了 API Key', savedCfg.apiKey === 'sk-test');
   t('保存了服务商', savedCfg.provider === 'siliconflow', savedCfg.provider);
 
+  /* ---------- 历史时间线 ---------- */
+  console.log('\n【14.5】历史时间线');
+
+  // 前面的段落换过图（换图会清空历史），这里先自己造两步编辑
+  const histBtn = doc.getElementById('btn-history');
+  t('历史按钮存在', !!histBtn);
+  const histBadge = doc.getElementById('hist-count');
+
+  // 造两步：一次生成 + 一次调参
+  const mkEdit = async (rect, color, prompt) => {
+    fake.setColor(color);
+    S.rect = rect;
+    doc.getElementById('prompt').value = prompt;
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S);
+    if (S.pending) {
+      doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
+      await sleep(120);
+    }
+  };
+  await mkEdit({ x: 20, y: 20, w: 80, h: 60 }, [220, 40, 40], '改成红色');
+  await mkEdit({ x: 100, y: 60, w: 80, h: 60 }, [40, 220, 80], '改成绿色');
+  t('已造出两步编辑', S.edits.length >= 2, S.edits.length);
+
+  const editsLatest = S.edits.length;
+  const stack0 = window.__PS_API.historySize();
+  t('撤销栈已记录', stack0.past >= 2, stack0);
+
+  // 打开面板
+  histBtn.dispatchEvent(new window.Event('click'));
+  await sleep(60);
+  t('历史面板已打开', doc.getElementById('history').hidden === false);
+
+  const histRows = () => doc.querySelectorAll('#hist-list .hist-item');
+  t('时间线有内容', histRows().length > 0, histRows().length);
+  t('时间线格数 = 命令数 + 1', histRows().length === (stack0.past + stack0.future) + 1,
+    [histRows().length, stack0]);
+
+  // 列表是倒序展示，最后一格是最早的「原图」
+  const originRow = histRows()[histRows().length - 1];
+  t('最早一格是原图', /原图/.test(originRow.textContent), originRow.textContent.slice(0, 30));
+  t('当前步骤只有一个', doc.querySelectorAll('#hist-list .hist-item.now').length === 1);
+  t('当前步骤标着「当前」', /当前/.test(doc.querySelector('#hist-list .hist-item.now').textContent));
+  t('步骤有可读摘要', histRows()[0].textContent.trim().length > 3);
+  t('每一步都有跳转按钮',
+    doc.querySelectorAll('#hist-list .hist-go').length === histRows().length);
+
+  /* ---------- 预览：像素必须真的回到那一步 ---------- */
+  const pxLatest = docPixel(50, 50);          // 落在第一个编辑区域内
+  const jumpBtns = doc.querySelectorAll('#hist-list .hist-go');
+
+  // 点「原图」那一格 → 预览到最初状态
+  jumpBtns[jumpBtns.length - 1].dispatchEvent(new window.Event('click'));
+  await sleep(120);
+  t('进入预览态', !!S.histPreview, S.histPreview);
+  t('预览原图时编辑全部撤销', S.edits.length === 0, S.edits.length);
+  const pxOrigin = docPixel(50, 50);
+  t('预览原图后像素确实变了', JSON.stringify(pxOrigin) !== JSON.stringify(pxLatest),
+    [pxLatest, pxOrigin]);
+  t('预览时底部出现操作条', doc.getElementById('hist-foot').hidden === false);
+  t('预览时标着「预览中」',
+    /预览中/.test((doc.querySelector('#hist-list .hist-item.preview') || {}).textContent || ''));
+
+  // 退出预览 → 完整回到最新状态（像素 + 图层数都要一致）
+  doc.getElementById('hist-preview-off').dispatchEvent(new window.Event('click'));
+  await sleep(120);
+  t('退出预览后离开预览态', S.histPreview === null);
+  t('退出预览后图层数还原', S.edits.length === editsLatest, [editsLatest, S.edits.length]);
+  t('退出预览后像素完全还原',
+    JSON.stringify(docPixel(50, 50)) === JSON.stringify(pxLatest),
+    [pxLatest, docPixel(50, 50)]);
+
+  /* ---------- 跳回某一步并确认 ---------- */
+  const rows2 = histRows();
+  const targetBtn = rows2[rows2.length - 2].querySelector('.hist-go');   // 倒数第二格 = 撤销 1 步
+  targetBtn.dispatchEvent(new window.Event('click'));
+  await sleep(120);
+  t('跳回后图层数减少', S.edits.length === editsLatest - 1, [editsLatest, S.edits.length]);
+  t('跳回后仍在预览态（等确认）', !!S.histPreview);
+
+  doc.getElementById('hist-jump').dispatchEvent(new window.Event('click'));
+  await sleep(120);
+  t('确认跳转后退出预览态', S.histPreview === null);
+  t('确认跳转后未来被丢弃', window.__PS_API.historySize().future === 0, window.__PS_API.historySize());
+  t('确认跳转后图层数保持', S.edits.length === editsLatest - 1, S.edits.length);
+  t('跳转后撤销仍可用', doc.getElementById('btn-undo').disabled === false);
+
+  // 跳转之后可以继续正常操作（历史没被弄坏）
+  const afterJump = S.edits.length;
+  doc.getElementById('btn-undo').dispatchEvent(new window.Event('click'));
+  await sleep(60);
+  t('跳转后仍能撤销', S.edits.length === afterJump - 1, [afterJump, S.edits.length]);
+  doc.getElementById('btn-redo').dispatchEvent(new window.Event('click'));
+  await sleep(60);
+  t('跳转后仍能重做', S.edits.length === afterJump, S.edits.length);
+
+  // 关闭面板
+  doc.querySelector('#history [data-close]').dispatchEvent(new window.Event('click'));
+  await sleep(60);
+  t('历史面板可关闭', doc.getElementById('history').hidden === true);
+  t('关闭面板后不残留预览态', S.histPreview === null);
+
+  // 徽章数字与历史步数一致
+  const stack1 = window.__PS_API.historySize();
+  t('历史徽章数字正确', Number(histBadge.textContent) === (stack1.past + stack1.future),
+    [histBadge.textContent, stack1]);
+
+  // 内存安全：时间线项不得含图片数据
+  const tlData = window.__PS_API.buildTimeline();
+  t('时间线项不含图片数据', tlData.items.every((it) =>
+    !it.patch && !it.canvas && !it.image && !it.dataUrl), Object.keys(tlData.items[0] || {}));
+
   /* ---------- 无 JS 错误 ---------- */
   console.log('\n【15】运行健康度');
   const errs = logs.filter((l) => /JSDOM_ERROR|Uncaught/.test(l));

@@ -42,6 +42,10 @@
     edits: [],            // 已应用的编辑记录
     redo: [],             // 重做栈（编辑记录）
 
+    // 历史时间线预览：预览某个历史状态时，暂存当前状态用于随时退回
+    histPreview: null,    // { cursor, total } 正在预览的位置
+    histStash: null,      // { edits, strokes, docVersion } 预览前的现场
+
     // 待确认的生成结果
     pending: null,
 
@@ -523,6 +527,9 @@
     // 丢弃最老的（从前往后删）
     if (plan.drop > 0) {
       S.edits.splice(0, plan.drop);
+      // 必须同步修正撤销栈里的索引：命令存的是**索引**而非对象引用，
+      // 图层前移后不修正，撤销就会作用到错误的图层上（删错图）。
+      if (undoStack) undoStack.adjustForDrop(plan.drop);
     }
     // 对指定条目做降采样（边长减半，内存降到 1/4）
     for (const idx of plan.downscale) {
@@ -1755,6 +1762,20 @@
 
       list.appendChild(item);
     }
+    refreshHistoryIfOpen();
+  }
+
+  // 历史面板若开着就跟着刷新。
+  // 用 guard 防止「renderHistory → renderLayers → renderHistory」绕成死循环；
+  // batching 期间跳过（预览时要连续走很多步，逐帧重绘纯属浪费）。
+  let histRendering = false;
+  let histBatching = false;
+  function refreshHistoryIfOpen() {
+    if (histRendering || histBatching) return;
+    const el = $('history');
+    if (!el || el.hidden) return;
+    histRendering = true;
+    try { renderHistory(); } finally { histRendering = false; }
   }
 
   function openLayers() {
@@ -1762,6 +1783,232 @@
     renderLayers();
   }
   function closeLayers() { $('layers').hidden = true; }
+
+  /* ============================ 历史时间线 ============================ */
+
+  /**
+   * 历史时间线。
+   *
+   * 关键设计：**不存图片快照**，直接复用撤销栈里的差异命令。
+   * 时间线上的位置 = 已执行了多少条命令；「跳回某一步」= 连续撤销/重做。
+   * 所以 100 步历史的内存开销和现在一样（只多了几个命令对象）。
+   *
+   * 预览：先记下现场，再真正执行撤销/重做，用户看到的就是那一步的真实画面
+   * （而不是缩略图近似）。确认就保留，取消就把现场恢复回去。
+   */
+
+  function currentTimeline() {
+    if (!undoStack) return { items: [], cursor: 0 };
+    return C.buildTimeline(undoStack, { edits: S.edits, strokes: S.strokes });
+  }
+
+  function openHistory() {
+    $('history').hidden = false;
+    renderHistory();
+  }
+
+  function closeHistory() {
+    // 关闭面板时若还在预览，恢复现场，避免用户以为改动生效了
+    if (S.histPreview) cancelHistoryPreview(true);
+    $('history').hidden = true;
+  }
+
+  function renderHistory() {
+    const list = $('hist-list');
+    const empty = $('hist-empty');
+    const badge = $('hist-count');
+    const foot = $('hist-foot');
+    if (!list) return;
+
+    const tl = currentTimeline();
+    const steps = tl.items.length - 1;         // 不含「原图」那一格
+
+    if (badge) { badge.textContent = String(steps); badge.hidden = steps === 0; }
+    if (empty) empty.hidden = steps > 0;
+    list.innerHTML = '';
+
+    const cursor = S.histPreview ? S.histPreview.cursor : tl.cursor;
+    const total = steps;
+
+    // 从最新到最旧展示（用户最关心最近的操作）
+    for (let i = tl.items.length - 1; i >= 0; i--) {
+      const it = tl.items[i];
+      const isNow = (i === cursor);
+      const isFuture = i > cursor;             // 已撤销（可以再跳回来）
+      const isPreviewing = S.histPreview && isNow;
+
+      const row = document.createElement('div');
+      row.className = 'hist-item' + (isNow ? ' now' : '') +
+        (isFuture ? ' future' : '') + (isPreviewing ? ' preview' : '');
+
+      const dot = document.createElement('div');
+      dot.className = 'hist-dot';
+      if (it.kind === 'origin') dot.innerHTML = '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="m3 15 5-5 4 4 3-3 6 6"/></svg>';
+
+      const body = document.createElement('div');
+      body.className = 'hist-body';
+
+      const top = document.createElement('div');
+      top.className = 'hist-top';
+      const label = document.createElement('div');
+      label.className = 'hist-label';
+      label.textContent = it.label;
+      top.appendChild(label);
+
+      if (isNow) {
+        const tag = document.createElement('span');
+        tag.className = 'hist-tag';
+        tag.textContent = isPreviewing ? '预览中' : '当前';
+        top.appendChild(tag);
+      }
+
+      const sub = document.createElement('div');
+      sub.className = 'hist-sub';
+      const bits = [];
+      if (it.detail) bits.push(it.detail);
+      if (it.kind !== 'origin') {
+        bits.push(it.layers + ' 处修改');
+        if (it.strokes) bits.push(it.strokes + ' 笔涂改');
+      }
+      if (it.time) bits.push(fmtClock(it.time));
+      sub.textContent = bits.join(' · ');
+
+      body.appendChild(top);
+      body.appendChild(sub);
+
+      const go = document.createElement('button');
+      go.className = 'hist-go';
+      go.textContent = isNow ? '查看' : (isFuture ? '跳到这里' : '跳到这里');
+      go.onclick = () => previewHistoryAt(i);
+
+      row.appendChild(dot);
+      row.appendChild(body);
+      row.appendChild(go);
+      list.appendChild(row);
+    }
+
+    // 底部操作条
+    if (foot) {
+      const previewing = !!S.histPreview;
+      foot.hidden = !previewing;
+      const off = $('hist-preview-off'), jump = $('hist-jump');
+      if (off) off.hidden = !previewing;
+      if (jump) {
+        const atNow = S.histPreview && S.histPreview.cursor === tl.cursor;
+        jump.hidden = !previewing || atNow;
+        if (previewing) jump.textContent = '回到这一步（撤销 ' + Math.max(0, tl.cursor - S.histPreview.cursor) + ' 步）';
+      }
+    }
+  }
+
+  /** 时间戳 → HH:MM（只显示时刻，日期无意义——都是同一次编辑） */
+  function fmtClock(ts) {
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return '';
+    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+
+  /**
+   * 预览历史上的某一步。
+   *
+   * 做法是**真正执行**撤销/重做（而不是画个近似缩略图）——
+   * 这样用户看到的就是跳过去之后的真实画面，不会有「预览和实际不一致」。
+   * 首次预览前把现场存进 histStash，退出预览时恢复。
+   */
+  function previewHistoryAt(targetIdx) {
+    if (!undoStack || !S.docCanvas) return;
+    const tl = currentTimeline();
+    const total = tl.items.length - 1;
+    const target = Math.max(0, Math.min(targetIdx, total));
+    const from = S.histPreview ? S.histPreview.cursor : tl.cursor;
+    const plan = C.planHistoryJump(from, target, total);
+    if (!plan.undo && !plan.redo && S.histPreview) {
+      // 已经在这一点上，再点一次就退出预览
+      cancelHistoryPreview();
+      return;
+    }
+
+    // 第一次进入预览：存现场
+    if (!S.histPreview) {
+      S.histStash = {
+        edits: S.edits.slice(),
+        strokes: S.strokes.slice(),
+        docVersion: S.docVersion
+      };
+    }
+
+    // 逐条执行（复用 applyCommand，保证与撤销按钮完全同一套逻辑）
+    // 用 histBatching 跳过中间过程的重绘：跳 20 步就只重绘 1 次
+    histBatching = true;
+    try {
+      for (let i = 0; i < plan.undo; i++) {
+        const cmd = undoStack.undo();
+        if (!cmd) break;
+        applyCommand(cmd, false);
+      }
+      for (let i = 0; i < plan.redo; i++) {
+        const cmd = undoStack.redo();
+        if (!cmd) break;
+        applyCommand(cmd, true);
+      }
+    } finally {
+      histBatching = false;
+    }
+
+    S.histPreview = { cursor: target, total };
+    renderHistory();
+    renderLayers();
+    draw();
+    toast(target === total ? '已回到最新状态' : '预览第 ' + target + ' 步的画面（点「回到这一步」确认）', 2600);
+  }
+
+  /** 退出预览，恢复现场（silent=true 时不弹提示，用于关闭面板） */
+  function cancelHistoryPreview(silent) {
+    const st = S.histStash;
+    if (!st) { S.histPreview = null; return; }
+    // 先算出「当前预览位置 → 现场位置」需要走几步，再走回去
+    const tl = currentTimeline();
+    const total = tl.items.length - 1;
+    const plan = C.planHistoryJump(S.histPreview ? S.histPreview.cursor : tl.cursor, total, total);
+    histBatching = true;
+    try {
+      for (let i = 0; i < plan.redo; i++) {
+        const cmd = undoStack.redo();
+        if (!cmd) break;
+        applyCommand(cmd, true);
+      }
+    } finally {
+      histBatching = false;
+    }
+    S.histPreview = null;
+    S.histStash = null;
+    renderHistory();
+    renderLayers();
+    draw();
+    updateUI();
+    if (!silent) toast('已退出预览，回到最新状态');
+  }
+
+  /** 确认跳到预览的那一步：丢弃「未来」的命令，让这一步成为新起点 */
+  function commitHistoryJump() {
+    if (!S.histPreview || !undoStack) return;
+    const at = S.histPreview.cursor;
+    const tl = currentTimeline();
+    const total = tl.items.length - 1;
+    if (at >= total) { cancelHistoryPreview(); return; }
+    undoStack.dropFuture();
+    S.histPreview = null;
+    S.histStash = null;
+    invalidateMask();
+    S.docVersion++;
+    rebuildViewCanvas();
+    renderHistory();
+    renderLayers();
+    draw();
+    updateUI();
+    scheduleSessionSave();
+    toast('已回到第 ' + at + ' 步，之后的 ' + (total - at) + ' 步已移除（可继续操作）', 3200);
+  }
 
   /* ============================ 错误面板 ============================ */
 
@@ -2198,6 +2445,15 @@
     $('btn-redo').disabled = !(undoStack && undoStack.canRedo());
     $('btn-save').disabled = !S.viewCanvas;
 
+    // 历史按钮上的步数（不含「原图」那一格）
+    const hb = $('hist-count');
+    if (hb) {
+      const sz = undoStack ? undoStack.size() : { past: 0, future: 0 };
+      const n = sz.past + sz.future;
+      hb.textContent = String(n);
+      hb.hidden = n === 0;
+    }
+
     // 缩放显示
     $('zoom-label').textContent = Math.round(S.view.scale * 100) + '%';
 
@@ -2584,6 +2840,10 @@
     });
     $('btn-layers').onclick = openLayers;
     document.querySelectorAll('#layers [data-close]').forEach((el) => { el.onclick = closeLayers; });
+    $('btn-history').onclick = openHistory;
+    document.querySelectorAll('#history [data-close]').forEach((el) => { el.onclick = closeHistory; });
+    $('hist-preview-off').onclick = () => cancelHistoryPreview();
+    $('hist-jump').onclick = commitHistoryJump;
     $('btn-fit').onclick = fitToScreen;
     $('btn-reset-sel').onclick = () => {
       if (!S.docCanvas) return;
@@ -3138,6 +3398,13 @@
     rebuildViewCanvas,
     currentEstimate,
     enforceHistoryBudget,
-    fitToScreen
+    fitToScreen,
+    // 历史时间线（供测试与外部调用）
+    renderHistory,
+    openHistory,
+    closeHistory,
+    buildTimeline: currentTimeline,
+    historySize: () => (undoStack ? undoStack.size() : { past: 0, future: 0 }),
+    undoStack: () => undoStack
   };
 })();

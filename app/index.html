@@ -128,6 +128,11 @@
         <span>修改记录</span>
         <b id="layer-count" hidden>0</b>
       </button>
+      <button class="tool" id="btn-history">
+        <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
+        <span>历史</span>
+        <b id="hist-count" hidden>0</b>
+      </button>
     </div>
 
     <!-- 画笔参数 -->
@@ -192,6 +197,33 @@
       <div id="layer-empty" class="tip" style="text-align:center;padding:20px 0">
         还没有任何修改。框选一块区域并生成后，这里会出现记录。
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= 历史面板 ======================= -->
+<div id="history" class="sheet" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-body">
+    <div class="sheet-head">
+      <h3>修图历史</h3>
+      <button class="tb-btn icon" data-close>
+        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="sheet-scroll">
+      <div class="tip" style="margin:0 0 12px">
+        这里是你对这张照片做过的<b>每一步操作</b>，按时间顺序排列。
+        <b>点任意一步可以预览当时的画面</b>，确认后可以跳回去（后面的步骤会被撤销，随时能再跳回来）。
+      </div>
+      <div id="hist-list"></div>
+      <div id="hist-empty" class="tip" style="text-align:center;padding:20px 0">
+        还没有任何操作。框选一块区域并生成后，这里会出现完整的时间线。
+      </div>
+    </div>
+    <div class="hist-foot" id="hist-foot" hidden>
+      <button class="ghost" id="hist-preview-off" hidden>退出预览</button>
+      <button class="primary" id="hist-jump" hidden>回到这一步</button>
     </div>
   </div>
 </div>

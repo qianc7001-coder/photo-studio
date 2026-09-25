@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-699%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-802%20passed-brightgreen.svg)](#测试)
 
 给摄影师用的**局部修图**工具：在照片上框选任意区域，交给生图模型修改，结果自动贴回原位置。
 
@@ -40,6 +40,12 @@
 
 ### 统一撤销
 画笔、删除、调参、开关**全部可撤销/重做**（100 步历史）。
+
+### 修图历史
+- **完整时间线**：按顺序列出做过的每一步，每步带摘要（改了什么、当时有几处修改、几点做的）
+- **预览任意一步**：点时间线上任意位置，画面真的回到那一刻，先看效果再决定
+- **一键跳回**：确认后回到选中的那一步，后面的步骤被撤销（确认前随时能跳回来）
+- 不存图片快照，只复用撤销记录 —— 100 步历史几乎不占额外内存
 
 ### 画质
 - 边缘羽化（消除拼接硬边）
@@ -144,7 +150,7 @@ node tools/regression-test.js  # 回归测试（已修复缺陷的防线）
 node tools/e2e-test.js         # 端到端（jsdom + 真实 canvas，逐像素校验）
 ```
 
-当前规模：**699 项**（80 单元 + 387 回归 + 232 端到端）。
+当前规模：**802 项**（121 单元 + 418 回归 + 263 端到端）。
 
 端到端测试会：
 - 启动一个假生图模型服务器
