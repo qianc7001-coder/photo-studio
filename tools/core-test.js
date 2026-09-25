@@ -582,5 +582,143 @@ t('estimateCalls', C.estimateCalls({x:0,y:0,w:3000,h:3000},{maxSide:1400,overlap
 
 
 /* ---------- 后台保活与环境兼容 ---------- */
+
+
+
+
+
+
+// ===== 对比视图手势（测试块） =====
+(() => {
+  // 1) 手势判定：这是修复的核心 —— 双击必须不被当成拖分割线
+  //    修复前：pointerdown 无条件拖分割线，双击的两次点击各把线拽到手指位置
+  const base = { splitX: 400, hitPx: 22, scale: 1, fitScale: 1 };
+  t('按在竖线上 → 拖分割线',
+    C.planCompareDrag(Object.assign({}, base, { x: 400 })) === 'split');
+  t('按在竖线附近（阈值内）→ 拖分割线',
+    C.planCompareDrag(Object.assign({}, base, { x: 415 })) === 'split');
+  t('适应窗口时远离竖线 → 留给双击判定',
+    C.planCompareDrag(Object.assign({}, base, { x: 200 })) === 'tap');
+  t('放大后远离竖线 → 平移画面',
+    C.planCompareDrag(Object.assign({}, base, { x: 200, scale: 3, fitScale: 1 })) === 'pan');
+  // 关键：放大后仍然要能拖分割线，否则用户放大了就没法对比了
+  t('放大后按竖线仍可拖分割线',
+    C.planCompareDrag(Object.assign({}, base, { x: 400, scale: 3, fitScale: 1 })) === 'split');
+  t('阈值可配置', C.planCompareDrag({ x: 130, splitX: 100, hitPx: 40 }) === 'split');
+  t('阈值有下限保护（太小会误触）',
+    C.planCompareDrag({ x: 101, splitX: 100, hitPx: 0 }) === 'split');
+  // 缺参数时 x/splitX 都是 0，判定为 split（保守：不会误触发缩放）
+  t('planCompareDrag 对 null 安全（不崩）', typeof C.planCompareDrag(null) === 'string');
+  t('canPan=false 时不进入平移', 
+    C.planCompareDrag({ x: 200, splitX: 400, scale: 3, fitScale: 1, canPan: false }) === 'tap');
+
+  // 2) 双击缩放
+  const fit = C.makeView(0.5, 10, 10);
+  const geo = { imgW: 400, imgH: 300, viewW: 800, viewH: 600, zoom: 3, maxScale: 12 };
+
+  const z1 = C.planCompareDoubleTap(Object.assign({ view: fit, fitView: fit, px: 400, py: 300 }, geo));
+  t('首次双击会放大', z1.zoomed === true);
+  t('放大后确实比适应窗口大', z1.view.scale > fit.scale);
+  // 小图（400x300 在 800x600 视口）按 3 倍只有 1.5，四周仍是空白，
+  // 所以会被提升到「铺满视口」的 2 倍 —— 这才是用户能看出区别的放大
+  t('小图按铺满视口放大而不是死守 3 倍',
+    Math.abs(z1.view.scale - 2) < 1e-9, z1.view.scale);
+
+  // 小图放大后仍要铺满视口 —— 否则四周全是空白，用户看不出「放大了」
+  // （400x300 图在 800x600 视口里，3 倍 = 1.5，但铺满需要 2 倍）
+  t('小图放大后至少铺满视口',
+    z1.view.scale >= Math.max(800 / 400, 600 / 300) - 1e-9, z1.view.scale);
+
+  // 以点击点为中心放大：用大图验证（放大后仍有平移空间，clamp 不会强制居中）
+  const bigW = 1600, bigH = 1200;
+  const bigFit = C.fitView(bigW, bigH, 800, 600, 10);
+  const bigZ = C.planCompareDoubleTap({
+    view: bigFit, fitView: bigFit, px: 300, py: 200,
+    zoom: 3, imgW: bigW, imgH: bigH, viewW: 800, viewH: 600, maxScale: 12
+  });
+  const pt = { x: 300, y: 200 };
+  const before = C.imageToScreen(C.screenToImage(pt, bigFit), bigFit);
+  const after = C.imageToScreen(C.screenToImage(pt, bigFit), bigZ.view);
+  t('以双击点为中心放大（该点位置不动）',
+    Math.abs(before.x - after.x) < 1 && Math.abs(before.y - after.y) < 1,
+    { before, after });
+  t('大图放大倍数就是 3 倍',
+    Math.abs(bigZ.view.scale / bigFit.scale - 3) < 0.01, bigZ.view.scale / bigFit.scale);
+
+  const z2 = C.planCompareDoubleTap(Object.assign({ view: z1.view, fitView: fit, px: 400, py: 300 }, geo));
+  t('再次双击还原', z2.zoomed === false);
+  t('还原后回到适应窗口比例', Math.abs(z2.view.scale - fit.scale) < 1e-9, z2.view.scale);
+  t('还原后画面居中（不会偏到角落）',
+    Math.abs(z2.view.tx - fit.tx) < 1e-6 && Math.abs(z2.view.ty - fit.ty) < 1e-6, z2.view);
+
+  // 放大后不能露白：视图必须被夹在图像范围内
+  t('放大结果已夹取（不露白）', z1.view.scale >= fit.scale);
+  // 缩放上限
+  const huge = C.planCompareDoubleTap(Object.assign(
+    { view: C.makeView(fit.scale, 0, 0), fitView: fit, px: 400, py: 300, zoom: 999 }, geo));
+  t('缩放不超过上限', huge.view.scale <= geo.maxScale + 1e-9, huge.view.scale);
+  t('planCompareDoubleTap 对 null 安全', typeof C.planCompareDoubleTap(null).view === 'object');
+
+  // 3) 缩放状态描述
+  const dFit = C.describeCompareZoom(fit, fit);
+  t('适应窗口时不算放大', dFit.zoomed === false);
+  t('适应窗口时不显示倍数', dFit.text === '');
+  t('适应窗口时提示可双击放大', /双击/.test(dFit.hint), dFit.hint);
+  t('适应窗口时不需要复位按钮', dFit.canReset === false);
+
+  const dZoom = C.describeCompareZoom(z1.view, fit);
+  t('放大时标记为 zoomed', dZoom.zoomed === true);
+  t('放大时显示倍数', /×/.test(dZoom.text), dZoom.text);
+  t('放大时显示倍数（小图为 4×）', dZoom.text === '4×', dZoom.text);
+  t('放大时提示怎么平移/还原', /平移/.test(dZoom.hint) && /还原/.test(dZoom.hint), dZoom.hint);
+  t('放大时提供复位按钮', dZoom.canReset === true);
+  t('放大后提示仍说明可按竖线拖对比', /竖线/.test(dZoom.hint), dZoom.hint);
+
+  // 倍数显示：大倍数不带小数点
+  t('10 倍以上取整', C.describeCompareZoom(C.makeView(5, 0, 0), C.makeView(0.5, 0, 0)).text === '10×');
+  t('10 倍以下保留一位', C.describeCompareZoom(C.makeView(1.5, 0, 0), C.makeView(0.5, 0, 0)).text === '3×');
+  t('describeCompareZoom 对 null 安全', typeof C.describeCompareZoom(null, null).text === 'string');
+
+  // 4) 接线检查：不能只有纯函数，必须真的接进对比视图
+  const fs3 = require('fs');
+  const appSrc3 = fs3.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html3 = fs3.readFileSync(__dirname + '/../app/index.html', 'utf8');
+  const css3 = fs3.readFileSync(__dirname + '/../app/style.css', 'utf8');
+
+  // 根因回归：drawCompare 之前每帧都用 fitView，导致根本没有缩放状态
+  t('对比视图有可变的缩放状态', /let cmpView = null/.test(appSrc3));
+  t('drawCompare 使用缩放状态而不是每帧 fitView',
+    /const v = cmpView \|\| fit;/.test(appSrc3));
+  t('双击会改缩放状态', /planCompareDoubleTap\(/.test(appSrc3));
+  t('双击以点击点为中心', /px, py,\s*\n\s*zoom: 3/.test(appSrc3) || /px, py/.test(appSrc3));
+  t('按下时先判定手势类型', /planCompareDrag\(/.test(appSrc3));
+  t('只有 split 模式才拖分割线',
+    /mode === 'split'\)[\s\S]{0,400}cmpSplit = C\.clamp01/.test(appSrc3));
+  // 平移要先越过 6px 阈值（否则「按下没动」会被当成拖动，双击就失效了）
+  t('放大后可拖动平移',
+    /mode === 'pan'\)[\s\S]{0,400}clampView/.test(appSrc3));
+  t('平移有起手阈值（避免与点击冲突）',
+    /Math\.hypot\(dx, dy\) > 6\) g\.moved = true/.test(appSrc3));
+  t('有双击时间间隔判定', /now - cmpLastTap < 300/.test(appSrc3));
+  t('有双击位置接近判定（避免误触）', /Math\.hypot\(e\.clientX - cmpLastTapX/.test(appSrc3));
+  t('拖动超过阈值就不算点击', /g\.moved = true/.test(appSrc3));
+  t('支持双指捏合缩放', /cmpPinch/.test(appSrc3));
+  t('支持滚轮缩放（桌面端）', /addEventListener\('wheel'/.test(appSrc3));
+  t('进入对比视图时重置缩放', /cmpView = null;\s*\/\/ 每次进入都从「适应窗口」开始/.test(appSrc3));
+  t('分割线位置按图内比例换算（放大后仍准确）',
+    /\(\(e\.clientX - r\.left\) - dr\.x\) \/ dr\.w/.test(appSrc3));
+
+  // 界面：放大后必须能看到倍数并能复位，否则用户会以为界面坏了
+  t('界面有倍数指示', /id="cmp-zoom"/.test(html3));
+  t('界面有复位按钮', /id="cmp-reset"/.test(html3));
+  t('提示文案有 id（可动态更新）', /id="cmp-hint"/.test(html3));
+  t('倍数指示有样式', /\.cmp-zoom/.test(css3));
+  t('复位按钮有样式', /\.cmp-reset/.test(css3));
+  t('复位按钮避开了右上角标签', /\.cmp-reset[\s\S]{0,200}margin-top/.test(css3));
+})();
+// ===== 手势块结束 =====
+
+
+/* ---------- 对比视图手势 ---------- */
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

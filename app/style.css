@@ -848,3 +848,37 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
   background: rgba(255, 176, 32, .1);
   color: #ffd591;
 }
+
+/* ======================= 对比视图：缩放指示与复位 ======================= */
+.cmp-zoom {
+  position: absolute;
+  top: calc(12px + var(--sat));
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 11px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+  background: rgba(12, 16, 22, .86);
+  border: 1px solid rgba(77, 163, 255, .45);
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+}
+.cmp-reset {
+  position: absolute;
+  top: calc(12px + var(--sat));
+  right: 12px;
+  /* 让开右上角的「修改后」标签 */
+  margin-top: 30px;
+  padding: 6px 13px;
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  background: rgba(12, 16, 22, .86);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(6px);
+}
+.cmp-reset:active { background: #2b323f; }

@@ -2129,6 +2129,165 @@ async function run() {
   t('完成通知文案可读', /生成完成/.test((kaCalls.find((c) => c.notify) || {}).notify || ''));
   Object.defineProperty(doc, 'hidden', { value: false, configurable: true });
 
+  // ---------- 对比视图：缩放（双击与分割线不冲突）
+  // ---------- 对比视图：缩放（双击与分割线不冲突）
+  // ---------- 对比视图：缩放（双击与分割线不冲突）
+  // ---------- 对比视图：缩放（双击与分割线不冲突）
+  // ---------- 对比视图：缩放（双击与分割线不冲突）
+  console.log('\n【14.85】对比视图缩放');
+
+  // 先造一次生成，进入对比视图
+  fake.setColor([130, 90, 220]);
+  S.rect = { x: 60, y: 60, w: 200, h: 150 };
+  doc.getElementById('prompt').value = '对比缩放测试';
+  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+  await waitGen(S);
+  await sleep(120);
+  t('已进入对比视图', doc.getElementById('compare').hidden === false);
+  t('对比视图初始为适应窗口', window.__PS_API.compareView() === null,
+    window.__PS_API.compareView());
+
+  const cmpEl = doc.getElementById('compare');
+  const cmpRect = cmpEl.getBoundingClientRect();
+  const fitV = window.__PS_API.cmpFitView();
+  t('基准视图比例为正', fitV.scale > 0, fitV.scale);
+
+  // 双击（模拟两次快速点击）—— 这是修复的核心：
+  // 修复前 pointerdown 无条件拖分割线，双击永远不生效
+  const cptr = (type, x, y, id) => {
+    const e = new window.Event(type, { bubbles: true });
+    e.clientX = x; e.clientY = y; e.pointerId = id || 21; e.button = 0;
+    cmpEl.dispatchEvent(e);
+  };
+  const tapAt = (x, y) => {
+    cptr('pointerdown', x, y);
+    cptr('pointerup', x, y);
+  };
+
+  // 双击在画面左侧（远离中间的分割线）
+  const tapX = cmpRect.width * 0.25, tapY = cmpRect.height * 0.5;
+  tapAt(tapX, tapY);
+  await sleep(30);
+  t('单击不缩放', window.__PS_API.compareView() === null, window.__PS_API.compareView());
+
+  tapAt(tapX, tapY);
+  await sleep(60);
+  const zv = window.__PS_API.compareView();
+  t('双击后进入缩放状态', !!zv, zv);
+  t('双击后比例确实变大', zv && zv.scale > fitV.scale, { got: zv && zv.scale, fit: fitV.scale });
+  t('放大倍数至少 2 倍',
+    zv && zv.scale / fitV.scale >= 2, zv && (zv.scale / fitV.scale).toFixed(2));
+
+  // 放大后画面不能露白：图像必须覆盖整个视口
+  t('放大后铺满视口（不露白）', (() => {
+    const dr = window.PSCore.imageRectToScreen(
+      { x: 0, y: 0, w: S.docW, h: S.docH }, zv);
+    return dr.x <= 0.5 && dr.y <= 0.5 &&
+      dr.x + dr.w >= cmpRect.width - 0.5 && dr.y + dr.h >= cmpRect.height - 0.5;
+  })(), zv);
+
+  // 界面上要能看出「现在是几倍」
+  const zoomBadge = doc.getElementById('cmp-zoom');
+  t('显示缩放倍数角标', zoomBadge && zoomBadge.hidden === false);
+  t('倍数文案带 ×', /×/.test(zoomBadge.textContent || ''), zoomBadge.textContent);
+  const hintEl = doc.getElementById('cmp-hint');
+  t('提示语改成放大态说明', /平移/.test(hintEl.textContent || ''), hintEl.textContent);
+  t('放大后出现复位按钮', doc.getElementById('cmp-reset').hidden === false);
+
+  // 分割线没有被双击带跑 —— 这是修复前最明显的症状
+  t('双击不会挪动分割线', Math.abs(window.__PS_API.compareSplit() - 0.5) < 0.02,
+    window.__PS_API.compareSplit());
+
+  // 放大后分割线必须仍在视口内可见（否则只看得到单侧，没法对比）
+  const splitOnScreen = (() => {
+    const v = window.__PS_API.compareView();
+    const r = window.PSCore.placeCompareSplit({
+      view: v, imgW: S.docW, imgH: S.docH,
+      split: window.__PS_API.compareSplit(), viewW: cmpRect.width, inset: 14
+    });
+    return r;
+  })();
+  t('放大后分割线仍在视口内（可见）',
+    splitOnScreen.screenX >= 14 && splitOnScreen.screenX <= cmpRect.width - 14,
+    splitOnScreen);
+
+  // 放大后仍可拖分割线（按在竖线当前所在位置）
+  const splitNowX = splitOnScreen.screenX;
+  const split0 = window.__PS_API.compareSplit();
+  cptr('pointerdown', splitNowX, cmpRect.height * 0.5, 31);
+  cptr('pointermove', Math.max(30, splitNowX - 120), cmpRect.height * 0.5, 31);
+  cptr('pointerup', Math.max(30, splitNowX - 120), cmpRect.height * 0.5, 31);
+  await sleep(40);
+  const splitMoved = window.__PS_API.compareSplit();
+  t('放大后按竖线可拖分割线', Math.abs(splitMoved - split0) > 0.005,
+    { before: split0, after: splitMoved });
+  t('缩放状态未被拖动破坏', (() => {
+    const v = window.__PS_API.compareView();
+    return v && Math.abs(v.scale - zv.scale) < 1e-6;
+  })());
+
+  // 放大后拖画面 = 平移（不是拖分割线）
+  const panBefore = Object.assign({}, window.__PS_API.compareView());
+  const splitBeforePan = window.__PS_API.compareSplit();
+  cptr('pointerdown', cmpRect.width * 0.2, cmpRect.height * 0.3, 41);
+  cptr('pointermove', cmpRect.width * 0.2 - 60, cmpRect.height * 0.3 - 40, 41);
+  cptr('pointerup', cmpRect.width * 0.2 - 60, cmpRect.height * 0.3 - 40, 41);
+  await sleep(40);
+  const panAfter = window.__PS_API.compareView();
+  t('放大后拖动会平移画面',
+    Math.abs(panAfter.tx - panBefore.tx) > 1 || Math.abs(panAfter.ty - panBefore.ty) > 1,
+    { before: panBefore, after: panAfter });
+  t('平移不会误改分割线', Math.abs(window.__PS_API.compareSplit() - splitBeforePan) < 0.02,
+    window.__PS_API.compareSplit());
+
+  // 复位按钮
+  doc.getElementById('cmp-reset').dispatchEvent(new window.Event('click'));
+  await sleep(50);
+  t('点「还原」回到适应窗口', window.__PS_API.compareView() === null,
+    window.__PS_API.compareView());
+  t('还原后角标隐藏', doc.getElementById('cmp-zoom').hidden === true);
+  t('还原后复位按钮隐藏', doc.getElementById('cmp-reset').hidden === true);
+  t('还原后提示语恢复', /双击/.test(doc.getElementById('cmp-hint').textContent || ''),
+    doc.getElementById('cmp-hint').textContent);
+
+  // 从「适应窗口」双击 → 放大
+  await sleep(320);                       // 跨过双击间隔窗口，避免与上一次点击串成双击
+  tapAt(tapX, tapY);
+  await sleep(30);
+  tapAt(tapX, tapY);
+  await sleep(60);
+  t('适应窗口双击会放大', window.__PS_API.compareView() !== null,
+    window.__PS_API.compareView());
+
+  // 放大态再双击 → 还原（关键：放大后单指是平移，仍必须能双击还原，
+  // 否则用户被卡在放大态出不去）
+  await sleep(320);
+  tapAt(tapX, tapY);
+  await sleep(30);
+  tapAt(tapX, tapY);
+  await sleep(60);
+  t('放大后再次双击还原', window.__PS_API.compareView() === null,
+    window.__PS_API.compareView());
+
+  // 拖动超过阈值不应被当成点击（避免拖动画布时误触缩放）
+  await sleep(320);
+  cptr('pointerdown', 100, 300, 51);
+  cptr('pointermove', 180, 300, 51);
+  cptr('pointerup', 180, 300, 51);
+  await sleep(30);
+  cptr('pointerdown', 100, 300, 52);
+  cptr('pointerup', 100, 300, 52);
+  await sleep(50);
+  t('拖动过的不算点击（不会误触缩放）', window.__PS_API.compareView() === null,
+    window.__PS_API.compareView());
+
+  // 应用结果，确认缩放没有破坏对比流程
+  doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
+  await sleep(120);
+  t('应用后退出对比视图', doc.getElementById('compare').hidden === true);
+  t('应用后缩放状态已清空', window.__PS_API.compareView() === null);
+  t('对比流程本身没被破坏（编辑已应用）', S.edits.length > 0, S.edits.length);
+
   /* ---------- 环境兼容（老内核） ---------- */
   console.log('\n【14.9】环境兼容');
 

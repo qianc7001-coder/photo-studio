@@ -2448,6 +2448,137 @@
     return list.map((p) => 'ps-' + String(p));
   }
 
+  /* ====================== 7.01g 对比视图手势 ====================== */
+
+  /**
+   * 对比视图的缩放规划。
+   *
+   * 背景：对比视图里「拖分割线」和「双击放大」都用单指，必须区分开，
+   * 否则双击会被当成两次拖动分割线（这正是之前的 bug —— 提示条写着
+   * 「双击画面放大查看」，但双击永远不生效）。
+   *
+   * 区分策略（按优先级）：
+   *   1. **靠近分割线**（水平 ±hitPx 内）→ 拖分割线（用户意图明确）
+   *   2. 已放大（scale > fitScale）→ 单指拖动平移（此时更需要移动画面）
+   *   3. 其它 → 交给双击判定
+   *
+   * 这样「放大后想拖分割线」也仍然可用：只要按在竖线附近即可。
+   *
+   * @param {object} o { x, splitX, hitPx, scale, fitScale, canPan }
+   * @returns {'split'|'pan'|'tap'}
+   */
+  function planCompareDrag(o) {
+    const opt = o || {};
+    const x = num(opt.x, 0);
+    const splitX = num(opt.splitX, 0);
+    const hitPx = Math.max(8, num(opt.hitPx, 22));
+    const scale = num(opt.scale, 1);
+    const fitScale = num(opt.fitScale, scale);
+    const canPan = opt.canPan !== false;
+
+    if (Math.abs(x - splitX) <= hitPx) return 'split';
+    if (canPan && scale > fitScale * 1.001) return 'pan';
+    return 'tap';
+  }
+
+  /**
+   * 双击缩放：在「适应窗口」和「放大」之间切换。
+   *
+   * 以双击点为中心放大（而不是画面中心）—— 用户点哪里就是想看清哪里。
+   * 再次双击回到适应窗口，并把画面居中，避免用户「放大后找不到路回去」。
+   *
+   * 放大倍数取 max(基准×倍数, 填满视口所需比例)：
+   * 只按倍数放大时，小图可能放大后**仍然小于视口**，画面四周还是空白 ——
+   * 那不叫放大，用户看不出区别。所以至少放大到铺满视口。
+   *
+   * @param {object} o { view, fitView, px, py, zoom, imgW, imgH, viewW, viewH, maxScale }
+   * @returns {{view:object, zoomed:boolean}}
+   */
+  function planCompareDoubleTap(o) {
+    const opt = o || {};
+    const fit = opt.fitView || makeView(1, 0, 0);
+    const cur = opt.view || fit;
+    const target = num(opt.zoom, 3);
+    const fitScale = safeScale(fit);
+    const isZoomed = safeScale(cur) > fitScale * 1.001;
+
+    if (isZoomed) {
+      // 已经是放大态 → 回到适应窗口（并居中）
+      return { view: makeView(fit.scale, fit.tx, fit.ty), zoomed: false };
+    }
+    const maxS = num(opt.maxScale, 12);
+    const imgW = Math.max(1, num(opt.imgW, 1)), imgH = Math.max(1, num(opt.imgH, 1));
+    const vw = Math.max(1, num(opt.viewW, 1)), vh = Math.max(1, num(opt.viewH, 1));
+    // 铺满视口所需比例：低于它放大后画面周围仍是空白
+    const cover = Math.max(vw / imgW, vh / imgH);
+    const want = Math.min(maxS, Math.max(fitScale * Math.max(1.2, target), cover));
+    const z = zoomAt(cur, num(opt.px, 0), num(opt.py, 0), want / safeScale(cur),
+      Math.max(0.02, fitScale * 0.4), maxS);
+    const clamped = clampView(z, imgW, imgH, vw, vh);
+    return { view: clamped, zoomed: true };
+  }
+
+  /**
+   * 对比视图的显示信息（缩放倍数、是否可复位）。
+   *
+   * 放大后必须让用户看到「现在是几倍」和「怎么回去」，
+   * 否则容易以为界面坏了。
+   */
+  function describeCompareZoom(view, fitView, o) {
+    const opt = o || {};
+    const s = safeScale(view);
+    const f = safeScale(fitView);
+    const ratio = f > 0 ? s / f : 1;
+    const zoomed = ratio > 1.001;
+    const rounded = ratio >= 10 ? Math.round(ratio) : Math.round(ratio * 10) / 10;
+    return {
+      zoomed,
+      ratio,
+      text: zoomed ? rounded + '×' : '',
+      // 放大后提示怎么操作：拖动平移、双击还原
+      hint: zoomed
+        ? '拖动画面平移 · 按在竖线附近可拖动对比 · 双击还原'
+        : (opt.baseHint || '拖动中间竖线对比 · 双击画面放大查看'),
+      // 放大时给一个显式的复位按钮，不依赖用户记住手势
+      canReset: zoomed
+    };
+  }
+
+  /**
+   * 把分割线的「图内比例」换算成屏幕位置，并在放大后夹到可触及范围内。
+   *
+   * 为什么需要夹取：
+   *   分割线原本按「图内比例」定位。放大后画面远大于视口，
+   *   比例 0.5 的分割线可能落到视口外（比如正好在右边缘之外）——
+   *   这时用户只看得到「修改前」或只看得到「修改后」，
+   *   对比功能等于废了。所以放大态下把线夹在视口内，保证随时能拖。
+   *
+   * @param {object} o { view, imgW, imgH, split, viewW, inset }
+   * @returns {{screenX:number, split:number, clamped:boolean}}
+   */
+  function placeCompareSplit(o) {
+    const opt = o || {};
+    const view = opt.view || makeView(1, 0, 0);
+    const W = Math.max(1, num(opt.viewW, 1));
+    const inset = Math.max(0, num(opt.inset, 14));
+    const dr = imageRectToScreen(
+      { x: 0, y: 0, w: num(opt.imgW, 1), h: num(opt.imgH, 1) }, view);
+    let split = clamp01(num(opt.split, 0.5));
+    let sx = dr.x + dr.w * split;
+    let clamped = false;
+
+    // 只在画面宽于视口时才需要夹（否则整图可见，线不会跑出去）
+    if (dr.w > W) {
+      const lo = inset, hi = W - inset;
+      if (sx < lo || sx > hi) {
+        clamped = true;
+        sx = clamp(sx, lo, hi);
+        split = dr.w > 0 ? clamp01((sx - dr.x) / dr.w) : split;
+      }
+    }
+    return { screenX: sx, split, clamped };
+  }
+
   /* ====================== 7.02 编辑图层（非破坏性） ====================== */
 
   /**
@@ -3257,6 +3388,8 @@
     planKeepAlive, describeKeepAlive, planGenForegroundNotice,
     // 浏览器能力兼容
     planCompat, compatClassNames,
+    // 对比视图手势
+    planCompareDrag, planCompareDoubleTap, describeCompareZoom, placeCompareSplit,
     EXPORT_PRESETS, getExportPreset, planExportSize, stripGpsFromExif, planExportMetadata,
     MODEL_PRICES, DEFAULT_USD_CNY, modelPrice, estimateCost, accumulateSpend, formatUsd, formatCny,
     parseJpegSegments, extractExif, extractICC, readExifOrientation,

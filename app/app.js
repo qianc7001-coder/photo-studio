@@ -2611,6 +2611,25 @@
   let cmpCtx = null;
   let cmpSplit = 0.5;
   let cmpBefore = null, cmpAfter = null;
+  // 对比视图的缩放状态。null = 还没算过（首次进入按「适应窗口」）
+  let cmpView = null;
+  // 手势现场
+  let cmpDrag = null;       // { mode:'split'|'pan', startX, startY, view0, split0 }
+  let cmpPointers = new Map();
+  let cmpPinch = null;      // { dist0, view0, cx, cy }
+  let cmpLastTap = 0, cmpLastTapX = 0, cmpLastTapY = 0;
+
+  /** 当前视口尺寸（对比层是全屏的） */
+  function cmpSize() {
+    const r = $('compare').getBoundingClientRect();
+    return { w: Math.max(1, r.width), h: Math.max(1, r.height) };
+  }
+
+  /** 「适应窗口」的基准视图 —— 双击复位与缩放倍数都以它为参照 */
+  function cmpFitView() {
+    const s = cmpSize();
+    return C.fitView(S.docW, S.docH, s.w, s.h, 10);
+  }
 
   function showCompare() {
     const p = S.pending;
@@ -2634,6 +2653,8 @@
 
     cmpBefore = before; cmpAfter = after;
     cmpSplit = 0.5;
+    cmpView = null;              // 每次进入都从「适应窗口」开始
+    cmpLastTap = 0;
     $('compare').hidden = false;
     layoutCompare();
     drawCompare();
@@ -2648,13 +2669,19 @@
     cmpCv.style.height = r.height + 'px';
     cmpCtx = cmpCv.getContext('2d');
     cmpCtx.setTransform(d, 0, 0, d, 0, 0);
+    // 视口尺寸变了：把缩放状态夹回可视范围，避免露出空白
+    if (cmpView) {
+      cmpView = C.clampView(cmpView, S.docW, S.docH, r.width, r.height);
+    }
   }
 
   function drawCompare() {
     if (!cmpCtx || !cmpBefore) return;
     const r = $('compare').getBoundingClientRect();
     const W = r.width, H = r.height;
-    const v = C.fitView(S.docW, S.docH, W, H, 10);
+    const fit = C.fitView(S.docW, S.docH, W, H, 10);
+    // 没有缩放状态时用适应窗口（首次进入）
+    const v = cmpView || fit;
 
     cmpCtx.clearRect(0, 0, W, H);
     cmpCtx.fillStyle = '#0b0d11';
@@ -2664,7 +2691,13 @@
     cmpCtx.imageSmoothingEnabled = v.scale < 1;
     cmpCtx.drawImage(cmpBefore, dr.x, dr.y, dr.w, dr.h);
 
-    const sx = dr.x + dr.w * cmpSplit;
+    // 放大后分割线可能落到视口外（那样就只剩单侧可见，没法对比了），
+    // 所以统一经 placeCompareSplit 夹到视口内
+    const sp = C.placeCompareSplit({
+      view: v, imgW: S.docW, imgH: S.docH,
+      split: cmpSplit, viewW: W, inset: 14
+    });
+    const sx = sp.screenX;
     cmpCtx.save();
     cmpCtx.beginPath();
     cmpCtx.rect(sx, 0, W - sx, H);
@@ -2672,7 +2705,7 @@
     cmpCtx.drawImage(cmpAfter, dr.x, dr.y, dr.w, dr.h);
     cmpCtx.restore();
 
-    // 选区提示
+    // 选区提示：放大后线宽按比例减细，否则会显得很粗
     const sr = C.imageRectToScreen(S.pending.rect, v);
     cmpCtx.save();
     cmpCtx.strokeStyle = 'rgba(77,163,255,.9)';
@@ -2691,25 +2724,202 @@
     cmpCtx.restore();
 
     $('cmp-handle').style.left = (sx / W * 100) + '%';
+    updateCompareZoomUI(v, fit);
+  }
+
+  /** 把缩放状态刷到界面：倍数、提示语、复位按钮 */
+  function updateCompareZoomUI(view, fit) {
+    const info = C.describeCompareZoom(view, fit);
+    const zoomEl = $('cmp-zoom');
+    if (zoomEl) {
+      zoomEl.textContent = info.text;
+      zoomEl.hidden = !info.zoomed;
+    }
+    const hintEl = $('cmp-hint');
+    if (hintEl && hintEl.textContent !== info.hint) hintEl.textContent = info.hint;
+    const resetEl = $('cmp-reset');
+    if (resetEl) resetEl.hidden = !info.canReset;
+  }
+
+  /** 复位到适应窗口 */
+  function resetCompareZoom() {
+    cmpView = null;
+    drawCompare();
   }
 
   function initCompareInteraction() {
     const el = $('compare');
-    let dragging = false;
-    const move = (clientX) => {
+
+    /** 双击：放大到指定倍数（以点击点为中心），再双击还原 */
+    const doubleTap = (clientX, clientY) => {
       const r = el.getBoundingClientRect();
-      cmpSplit = C.clamp01((clientX - r.left) / r.width);
+      const px = clientX - r.left, py = clientY - r.top;
+      const fit = cmpFitView();
+      const res = C.planCompareDoubleTap({
+        view: cmpView || fit,
+        fitView: fit,
+        px, py,
+        zoom: 3,
+        imgW: S.docW, imgH: S.docH,
+        viewW: r.width, viewH: r.height,
+        maxScale: 12
+      });
+      cmpView = res.zoomed ? res.view : null;   // 还原时直接回到 fit（null 即自适应）
       drawCompare();
     };
+
+    const localX = (e) => e.clientX - el.getBoundingClientRect().left;
+    const localY = (e) => e.clientY - el.getBoundingClientRect().top;
+
     el.addEventListener('pointerdown', (e) => {
       if (e.target.closest('.cmp-actions') || e.target.closest('.cmp-hint')) return;
-      dragging = true;
-      el.setPointerCapture(e.pointerId);
-      move(e.clientX);
+      if (e.target.closest('.cmp-reset')) return;
+      cmpPointers.set(e.pointerId, { x: localX(e), y: localY(e) });
+
+      // 双指：进入捏合缩放
+      if (cmpPointers.size === 2) {
+        const pts = [...cmpPointers.values()];
+        cmpPinch = {
+          dist0: Math.max(1, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y)),
+          view0: cmpView || cmpFitView(),
+          cx: (pts[0].x + pts[1].x) / 2,
+          cy: (pts[0].y + pts[1].y) / 2
+        };
+        cmpDrag = null;
+        try { el.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        return;
+      }
+      if (cmpPointers.size > 2) return;
+
+      const r = el.getBoundingClientRect();
+      const fit = cmpFitView();
+      const v = cmpView || fit;
+      const dr = C.imageRectToScreen({ x: 0, y: 0, w: S.docW, h: S.docH }, v);
+      const splitX = dr.x + dr.w * cmpSplit;
+
+      // 判定这次按下是要拖分割线、平移画面，还是留给双击
+      const mode = C.planCompareDrag({
+        x: localX(e), splitX, hitPx: 22,
+        scale: v.scale, fitScale: fit.scale
+      });
+
+      if (mode === 'split') {
+        cmpDrag = { mode: 'split', pointerId: e.pointerId };
+      } else if (mode === 'pan') {
+        // 注意：pan 模式也要记 moved。放大后单指拖动是平移，
+        // 但用户可能只是「点一下」—— 那种情况仍应参与双击判定，
+        // 否则放大后就再也双击不回去（用户被卡在放大态）。
+        cmpDrag = {
+          mode: 'pan', pointerId: e.pointerId,
+          startX: e.clientX, startY: e.clientY,
+          view0: Object.assign({}, v),
+          moved: false
+        };
+      } else {
+        // tap：先记下，等 pointerup 时判断是不是双击
+        cmpDrag = { mode: 'tap', pointerId: e.pointerId, moved: false, startX: e.clientX, startY: e.clientY };
+      }
+      try { el.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
     });
-    el.addEventListener('pointermove', (e) => { if (dragging) move(e.clientX); });
-    el.addEventListener('pointerup', () => { dragging = false; });
-    el.addEventListener('pointercancel', () => { dragging = false; });
+
+    el.addEventListener('pointermove', (e) => {
+      if (!cmpPointers.has(e.pointerId)) return;
+      cmpPointers.set(e.pointerId, { x: localX(e), y: localY(e) });
+
+      // 捏合缩放
+      if (cmpPinch && cmpPointers.size >= 2) {
+        const pts = [...cmpPointers.values()];
+        const d = Math.max(1, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
+        const fit = cmpFitView();
+        const r = el.getBoundingClientRect();
+        const want = C.zoomAt(cmpPinch.view0, cmpPinch.cx, cmpPinch.cy,
+          d / cmpPinch.dist0, Math.max(0.02, fit.scale * 0.4), 12);
+        cmpView = C.clampView(want, S.docW, S.docH, r.width, r.height);
+        drawCompare();
+        return;
+      }
+
+      const g = cmpDrag;
+      if (!g || g.pointerId !== e.pointerId) return;
+
+      if (g.mode === 'tap') {
+        // 超过阈值就说明不是点击（避免拖动画布被误判成双击）
+        if (Math.hypot(e.clientX - g.startX, e.clientY - g.startY) > 10) g.moved = true;
+        return;
+      }
+
+      if (g.mode === 'split') {
+        const r = el.getBoundingClientRect();
+        const fit = cmpFitView();
+        const v = cmpView || fit;
+        const dr = C.imageRectToScreen({ x: 0, y: 0, w: S.docW, h: S.docH }, v);
+        // 把屏幕坐标反算成「图内比例」，这样放大后拖分割线依然准确
+        cmpSplit = C.clamp01(dr.w > 0 ? ((e.clientX - r.left) - dr.x) / dr.w : 0.5);
+        drawCompare();
+        return;
+      }
+
+      if (g.mode === 'pan') {
+        const dx = e.clientX - g.startX, dy = e.clientY - g.startY;
+        if (Math.hypot(dx, dy) > 6) g.moved = true;
+        if (!g.moved) return;      // 还没超过阈值：可能是点击，先不平移
+        const r = el.getBoundingClientRect();
+        const nv = C.makeView(g.view0.scale,
+          g.view0.tx + dx, g.view0.ty + dy);
+        cmpView = C.clampView(nv, S.docW, S.docH, r.width, r.height);
+        drawCompare();
+      }
+    });
+
+    const endPointer = (e) => {
+      const g = cmpDrag;
+      cmpPointers.delete(e.pointerId);
+
+      if (cmpPinch && cmpPointers.size < 2) cmpPinch = null;
+
+      // tap 模式、以及「按下了但没移动」的 pan 模式，都算一次点击
+      const isTap = g && g.pointerId === e.pointerId && !g.moved &&
+        (g.mode === 'tap' || g.mode === 'pan');
+      if (isTap) {
+        // 双击判定：两次点击间隔 < 300ms 且位置接近
+        const now = Date.now();
+        const near = Math.hypot(e.clientX - cmpLastTapX, e.clientY - cmpLastTapY) < 40;
+        if (now - cmpLastTap < 300 && near) {
+          cmpLastTap = 0;
+          doubleTap(e.clientX, e.clientY);
+        } else {
+          cmpLastTap = now;
+          cmpLastTapX = e.clientX;
+          cmpLastTapY = e.clientY;
+        }
+      }
+      cmpDrag = null;
+    };
+    el.addEventListener('pointerup', endPointer);
+    el.addEventListener('pointercancel', endPointer);
+
+    // 桌面端双击（鼠标）也支持
+    el.addEventListener('dblclick', (e) => {
+      if (e.target.closest('.cmp-actions') || e.target.closest('.cmp-hint')) return;
+      doubleTap(e.clientX, e.clientY);
+    });
+
+    // 滚轮缩放（桌面/外接鼠标）
+    el.addEventListener('wheel', (e) => {
+      if (e.target.closest('.cmp-actions')) return;
+      e.preventDefault();
+      const r = el.getBoundingClientRect();
+      const fit = cmpFitView();
+      const v = cmpView || fit;
+      const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+      const nv = C.zoomAt(v, e.clientX - r.left, e.clientY - r.top, factor,
+        Math.max(0.02, fit.scale * 0.4), 12);
+      cmpView = C.clampView(nv, S.docW, S.docH, r.width, r.height);
+      drawCompare();
+    }, { passive: false });
+
+    const resetBtn = $('cmp-reset');
+    if (resetBtn) resetBtn.onclick = resetCompareZoom;
   }
 
   function applyPending() {
@@ -2755,15 +2965,30 @@
     scheduleSessionSave();
     scheduleWorkSave();           // 记进作品库（跨天可查）
     renderLayers();               // 刷新修改记录面板
-    $('compare').hidden = true;
+    closeCompare();
     updateUI();
     draw();
     toast(S.historyNote ? '已贴回原图（' + S.historyNote + '）' : '已贴回原图', S.historyNote ? 3600 : 2600);
   }
 
+  /**
+   * 关闭对比视图。
+   *
+   * 统一走这里：缩放状态必须一起清掉，否则下次生成时
+   * 会带着上次的缩放和偏移进来（用户看到的是「上次那个放大位置」）。
+   */
+  function closeCompare() {
+    $('compare').hidden = true;
+    cmpView = null;
+    cmpDrag = null;
+    cmpPinch = null;
+    cmpPointers.clear();
+    cmpLastTap = 0;
+  }
+
   function discardPending() {
     S.pending = null;
-    $('compare').hidden = true;
+    closeCompare();
     draw();
     updateUI();
   }
@@ -4147,6 +4372,13 @@
     updateKeepAliveUI,
     notifyGenDone,
     applyCompat,
-    compat: () => S.compat
+    compat: () => S.compat,
+    // 对比视图（供测试与外部调用）
+    compareView: () => cmpView,
+    compareSplit: () => cmpSplit,
+    resetCompareZoom,
+    showCompare,
+    drawCompare,
+    cmpFitView
   };
 })();

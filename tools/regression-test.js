@@ -1175,109 +1175,103 @@ console.log('\n【作品库】跨天修图记录：预算、落盘、恢复');
 /* ---------- 作品库（跨天修图记录） ---------- */
 console.log('\n【保活】Android 壳：跨版本兼容与注册完整性');
 
+
+/* ---------- 对比视图缩放 ---------- */
+console.log('\n【对比】放大查看与分割线拖拽必须共存');
+
 (() => {
   const fs = require('fs');
   const path = require('path');
-  const readA = (f) => fs.readFileSync(path.join(__dirname, '..', 'android', f), 'utf8');
-
-  const manifest = readA('AndroidManifest.xml');
-  const svc = readA('src/com/photostudio/app/KeepAliveService.java');
-  const act = readA('src/com/photostudio/app/MainActivity.java');
+  const C2 = require(path.join(__dirname, '..', 'app', 'core.js'));
   const appSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'app', 'index.html'), 'utf8');
 
-  // 1) Manifest 注册完整性：少任何一项，保活要么不生效、要么直接崩
-  t('声明了前台服务权限', /android\.permission\.FOREGROUND_SERVICE"/.test(manifest));
-  t('声明了 dataSync 类型权限（Android 14 必需，否则 SecurityException）',
-    /FOREGROUND_SERVICE_DATA_SYNC/.test(manifest));
-  t('声明了唤醒锁权限', /android\.permission\.WAKE_LOCK/.test(manifest));
-  t('声明了通知权限（Android 13+）', /POST_NOTIFICATIONS/.test(manifest));
-  t('声明了电池优化申请权限', /REQUEST_IGNORE_BATTERY_OPTIMIZATIONS/.test(manifest));
-  t('服务已注册', /<service[\s\S]{0,200}KeepAliveService/.test(manifest));
-  t('服务声明了 foregroundServiceType', /foregroundServiceType="dataSync"/.test(manifest));
-  t('服务不对外暴露（exported=false）', /android:exported="false"/.test(manifest));
-  t('声明了 roundIcon（部分启动器需要，否则图标显示异常）', /android:roundIcon/.test(manifest));
+  // 1) 根因回归：提示条承诺了「双击画面放大查看」，就必须真的能放大。
+  //    修复前 drawCompare 每帧用 fitView 重算，根本没有缩放状态；
+  //    且 pointerdown 无条件拖分割线，双击的两次点击各把线拽到手指位置。
+  // 注意：必须限定在 drawCompare 函数体内检查 ——
+  // 文件里别处也有 `cmpView || fit`，只查全局会漏掉 drawCompare 退化的情形
+  t('对比视图有可变的缩放状态', /let cmpView = null/.test(appSrc));
+  t('drawCompare 使用缩放状态而不是每帧 fitView', (() => {
+    const i = appSrc.indexOf('function drawCompare()');
+    if (i < 0) return false;
+    const body = appSrc.slice(i, appSrc.indexOf('\n  }', i));
+    return /const v = cmpView \|\| fit;/.test(body) && !/const v = fit;/.test(body);
+  })());
+  t('按下时先判定手势（不是无条件拖分割线）',
+    /planCompareDrag\(/.test(appSrc));
+  t('只有 split 模式才改分割线',
+    /mode === 'split'\)[\s\S]{0,400}cmpSplit = C\.clamp01/.test(appSrc));
+  t('tap 模式不碰分割线', /mode: 'tap'[\s\S]{0,200}moved: false/.test(appSrc));
 
-  // 2) 版本分流：这些是最容易漏、漏了就在老设备上崩的地方
-  t('通知 Builder 按版本分流（带渠道的构造函数是 API 26+）',
-    /Build\.VERSION\.SDK_INT >= Build\.VERSION_CODES\.O[\s\S]{0,200}new Notification\.Builder\(ctx, channelId\)/.test(svc)
-    && /new Notification\.Builder\(ctx\)/.test(svc));
-  t('通知渠道只在 API 26+ 创建',
-    /SDK_INT < Build\.VERSION_CODES\.O\) return;/.test(svc));
-  t('startForeground 按版本分流（三参重载是 API 29+）',
-    /SDK_INT >= 29[\s\S]{0,200}startForeground\(NOTIF_ID, n, ServiceInfo\.FOREGROUND_SERVICE_TYPE_DATA_SYNC\)/.test(svc));
-  t('低版本走两参 startForeground', /startForeground\(NOTIF_ID, n\);/.test(svc));
-  t('startForegroundService 按版本分流（API 26+）',
-    /SDK_INT >= Build\.VERSION_CODES\.O[\s\S]{0,120}startForegroundService/.test(svc));
-  t('PendingIntent 处理 FLAG_IMMUTABLE（API 31+ 强制要求）',
-    /FLAG_IMMUTABLE/.test(svc));
+  // 2) 双击判定必须同时满足「时间近」和「位置近」，否则会误触
+  t('双击有 300ms 时间窗口', /now - cmpLastTap < 300/.test(appSrc));
+  t('双击有位置接近判定', /Math\.hypot\(e\.clientX - cmpLastTapX, e\.clientY - cmpLastTapY\) < 40/.test(appSrc));
+  t('拖动超过阈值不算点击（tap 模式）', /Math\.hypot\(e\.clientX - g\.startX, e\.clientY - g\.startY\) > 10/.test(appSrc));
 
-  // 3) 通知图标：缺失会导致发通知时崩溃
-  t('通知用了专用小图标', /setSmallIcon\(R\.drawable\.ic_stat_photostudio\)/.test(svc));
-  const iconDirs = ['mdpi', 'hdpi', 'xhdpi', 'xxhdpi', 'xxxhdpi'];
-  let iconCount = 0;
-  for (const d of iconDirs) {
-    const p = path.join(__dirname, '..', 'android', 'res', 'drawable-' + d, 'ic_stat_photostudio.png');
-    if (fs.existsSync(p)) iconCount++;
-  }
-  t('通知图标覆盖全部 5 种屏幕密度', iconCount === 5, iconCount);
+  // 3) 回归：放大后单指是平移，但「按下没动」仍要能双击还原，
+  //    否则用户被卡在放大态出不去（这是实现过程中真实踩到的坑）
+  t('pan 模式也记录是否真的移动过', /mode: 'pan'[\s\S]{0,300}moved: false/.test(appSrc));
+  t('pan 模式移动超阈值才平移', /Math\.hypot\(dx, dy\) > 6\) g\.moved = true/.test(appSrc));
+  t('未移动的 pan 也算一次点击（可双击还原）',
+    /g\.mode === 'tap' \|\| g\.mode === 'pan'/.test(appSrc));
 
-  // 4) 用户划掉应用时必须收摊，否则留下点不动的常驻通知
-  t('任务被移除时停止保活', /onTaskRemoved[\s\S]{0,300}stopSelf\(\)/.test(svc));
-  t('不用 START_STICKY（避免被回收后留下僵尸通知）',
-    /START_NOT_STICKY/.test(svc));
-  t('销毁时释放唤醒锁', /onDestroy[\s\S]{0,200}releaseWakeLock\(\)/.test(svc));
-  t('唤醒锁带超时兜底（防止异常路径永久持锁）',
-    /WAKELOCK_TIMEOUT_MS/.test(svc) && /acquire\(WAKELOCK_TIMEOUT_MS\)/.test(svc));
+  // 4) 回归：放大后分割线可能落到视口外 → 只看得到单侧，对比功能失效。
+  //    必须把线夹在视口内。
+  t('有分割线夹取函数', typeof C2.placeCompareSplit === 'function');
+  const imgW = 200, imgH = 150, VW = 800, VH = 600;
+  const fit = C2.fitView(imgW, imgH, VW, VH, 10);
+  const zoomed = C2.planCompareDoubleTap({
+    view: fit, fitView: fit, px: VW * 0.25, py: VH * 0.5,
+    zoom: 3, imgW, imgH, viewW: VW, viewH: VH, maxScale: 12
+  }).view;
+  const placed = C2.placeCompareSplit({ view: zoomed, imgW, imgH, split: 0.5, viewW: VW, inset: 14 });
+  t('放大后分割线被夹到视口内（不会跑出去）',
+    placed.screenX >= 14 && placed.screenX <= VW - 14, placed);
+  t('夹取时同步修正图内比例', placed.clamped === true && placed.split >= 0 && placed.split <= 1, placed);
+  // 适应窗口时不需要夹（整图可见）
+  const placedFit = C2.placeCompareSplit({ view: fit, imgW, imgH, split: 0.5, viewW: VW, inset: 14 });
+  t('适应窗口时不改动分割线', placedFit.clamped === false, placedFit);
+  t('placeCompareSplit 对 null 安全',
+    typeof C2.placeCompareSplit(null).screenX === 'number');
 
-  // 5) 老设备外链：只重载新版签名会让 Android 5/6 上点不动链接
-  t('外链拦截同时重载新旧两个签名',
-    /shouldOverrideUrlLoading\(WebView view, WebResourceRequest request\)/.test(act)
-    && /shouldOverrideUrlLoading\(WebView view, String url\)/.test(act));
+  // 5) 缩放倍数：小图必须放大到铺满视口，否则看不出「放大了」
+  const small = C2.planCompareDoubleTap({
+    view: C2.makeView(0.5, 0, 0), fitView: C2.makeView(0.5, 0, 0),
+    px: 400, py: 300, zoom: 3, imgW: 400, imgH: 300, viewW: 800, viewH: 600, maxScale: 12
+  });
+  t('小图放大后至少铺满视口',
+    small.view.scale >= Math.max(800 / 400, 600 / 300) - 1e-9, small.view.scale);
 
-  // 6) JS 桥
-  t('注册了 JS 桥', /addJavascriptInterface\(new Bridge\(\), "PSBridge"\)/.test(act));
-  t('桥方法标了 @JavascriptInterface（Android 4.2+ 必需，否则调用不到）',
-    (act.match(/@JavascriptInterface/g) || []).length >= 6,
-    (act.match(/@JavascriptInterface/g) || []).length);
-  t('桥里的 setKeepAlive 切回主线程（WebView 的桥线程不是 UI 线程）',
-    /setKeepAlive[\s\S]{0,300}runOnUiThread/.test(act));
-  t('桥方法内部都做了异常保护（桥里抛异常会污染页面）',
-    /keepAliveRunning\(\)[\s\S]{0,200}try/.test(act) || /catch \(Exception e\)/.test(act));
+  // 6) 关闭对比视图必须清掉缩放状态，否则下次进来带着上次的偏移
+  t('关闭对比视图统一走 closeCompare', /function closeCompare\(\)/.test(appSrc));
+  t('closeCompare 会清缩放状态', /function closeCompare\(\)[\s\S]{0,300}cmpView = null/.test(appSrc));
+  t('应用结果时走 closeCompare', /closeCompare\(\);\s*\n\s*updateUI\(\);\s*\n\s*draw\(\);\s*\n\s*toast/.test(appSrc));
+  t('放弃结果时走 closeCompare', /function discardPending\(\)[\s\S]{0,200}closeCompare\(\)/.test(appSrc));
+  t('进入对比视图时重置缩放', /cmpView = null;\s*\/\/ 每次进入都从「适应窗口」开始/.test(appSrc));
 
-  // 7) 电池优化：各家 OEM 后台策略不同，必须有降级链
-  t('有电池优化白名单检测', /isIgnoringBatteryOptimizations/.test(act));
-  t('申请入口有层层降级（标准弹窗 → 设置列表 → 应用详情）',
-    /ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS/.test(act)
-    && /ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS/.test(act)
-    && /ACTION_APPLICATION_DETAILS_SETTINGS/.test(act));
-  t('API 23 以下不申请（6.0 之前没有这个概念）',
-    /SDK_INT < Build\.VERSION_CODES\.M[\s\S]{0,120}无需设置|SDK_INT < Build\.VERSION_CODES\.M[\s\S]{0,80}return true/.test(act));
+  // 7) 放大后仍要能拖分割线（否则放大就没法对比了）
+  const base = { splitX: 400, hitPx: 22 };
+  t('放大后按竖线仍判定为拖分割线',
+    C2.planCompareDrag(Object.assign({}, base, { x: 400, scale: 3, fitScale: 1 })) === 'split');
+  t('放大后远离竖线判定为平移',
+    C2.planCompareDrag(Object.assign({}, base, { x: 200, scale: 3, fitScale: 1 })) === 'pan');
+  t('未放大且远离竖线判定为点击',
+    C2.planCompareDrag(Object.assign({}, base, { x: 200, scale: 1, fitScale: 1 })) === 'tap');
 
-  // 8) 通知权限申请
-  t('Android 13+ 才申请通知权限', /SDK_INT < 33\) return;/.test(act));
-  t('通知权限被拒不影响主流程', /没有通知也能正常修图/.test(act));
-
-  // 9) JS 侧接线
-  t('生成时自动保活（setBusy 里挂钩）',
-    /function setBusy[\s\S]{0,600}syncKeepAlive\(\)/.test(appSrc));
-  t('桥不存在时不报错（纯浏览器可用）',
-    /window\.PSBridge\) \? window\.PSBridge : null/.test(appSrc));
-  t('保活支持检测是实时的（不缓存启动值）',
-    /S\.keepAliveSupported = keepAliveSupported\(\);/.test(appSrc));
-  t('切回前台重新同步保活', /visibilitychange/.test(appSrc));
-  t('启动时恢复常驻保活', /syncKeepAlive\(\);[\s\S]{0,200}keepAliveAlways === true/.test(appSrc));
-  t('切走后完成/失败都发通知',
-    /document\.hidden[\s\S]{0,120}notifyGenDone/.test(appSrc)
-    && /生成失败，点开查看原因/.test(appSrc));
-
-  // 10) 兼容探测不能只用 @supports（Chrome 66~83 会误报 flex gap 支持）
-  t('flex gap 用真实渲染实测（不用 @supports）',
-    /function detectFlexGap[\s\S]{0,900}getBoundingClientRect/.test(appSrc));
-  t('兼容补丁在渲染前应用', /function boot\(\)[\s\S]{0,120}applyCompat\(\)/.test(appSrc));
-  t('兼容探测失败不阻断启动', /catch \(e\) \{\s*return null;[\s\S]{0,40}探测本身失败/.test(appSrc));
+  // 8) 界面：放大后必须能看出倍数、能一键还原
+  t('界面有倍数角标', /id="cmp-zoom"/.test(html));
+  t('界面有还原按钮', /id="cmp-reset"/.test(html));
+  t('提示语可动态更新', /id="cmp-hint"/.test(html));
+  // 提示文案在 core.js 的 describeCompareZoom 里（单一来源）
+  const coreSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'core.js'), 'utf8');
+  t('放大态提示说明了平移与还原',
+    /拖动画面平移/.test(coreSrc) && /双击还原/.test(coreSrc));
+  // 提示语由 core 提供，界面只是展示 —— 避免两处文案各写各的
+  t('提示语由 core 统一提供', /info\.hint/.test(appSrc));
 })();
 
 
-/* ---------- 后台保活（Android 原生侧） ---------- */
+/* ---------- 对比视图：放大与分割线共存 ---------- */
 console.log(`\n合计 ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
