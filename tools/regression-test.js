@@ -1273,5 +1273,182 @@ console.log('\n【对比】放大查看与分割线拖拽必须共存');
 
 
 /* ---------- 对比视图：放大与分割线共存 ---------- */
+console.log('\n【图标】桌面图标必须清晰可辨（对比度 + 自适应图标）');
+
+(() => {
+  const fs = require('fs');
+  const path = require('path');
+  const zlib = require('zlib');
+
+  const RES = path.join(__dirname, '..', 'android', 'res');
+  const APP = path.join(__dirname, '..', 'app');
+
+  /** 解码 PNG（含逐行反滤波），返回 RGBA */
+  function readPNG(p) {
+    const buf = fs.readFileSync(p);
+    let off = 8, w = 0, h = 0, ct = 0;
+    const idat = [];
+    while (off < buf.length) {
+      const len = buf.readUInt32BE(off);
+      const type = buf.toString('ascii', off + 4, off + 8);
+      const data = buf.slice(off + 8, off + 8 + len);
+      if (type === 'IHDR') { w = data.readUInt32BE(0); h = data.readUInt32BE(4); ct = data[9]; }
+      if (type === 'IDAT') idat.push(data);
+      off += 12 + len;
+    }
+    const raw = zlib.inflateSync(Buffer.concat(idat));
+    const bpp = ct === 6 ? 4 : 3;
+    const stride = w * bpp;
+    const out = Buffer.alloc(w * h * 4);
+    let prev = Buffer.alloc(stride);
+    for (let y = 0; y < h; y++) {
+      const f = raw[y * (stride + 1)];
+      const line = Buffer.from(raw.slice(y * (stride + 1) + 1, y * (stride + 1) + 1 + stride));
+      for (let i = 0; i < stride; i++) {
+        const a = i >= bpp ? line[i - bpp] : 0;
+        const b = prev[i];
+        const c = i >= bpp ? prev[i - bpp] : 0;
+        let v = line[i];
+        if (f === 1) v = (v + a) & 255;
+        else if (f === 2) v = (v + b) & 255;
+        else if (f === 3) v = (v + ((a + b) >> 1)) & 255;
+        else if (f === 4) {
+          const p = a + b - c;
+          const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+          v = (v + ((pa <= pb && pa <= pc) ? a : (pb <= pc ? b : c))) & 255;
+        }
+        line[i] = v;
+      }
+      for (let x = 0; x < w; x++) {
+        const o = (y * w + x) * 4;
+        out[o] = line[x * bpp];
+        out[o + 1] = line[x * bpp + 1];
+        out[o + 2] = line[x * bpp + 2];
+        out[o + 3] = bpp === 4 ? line[x * bpp + 3] : 255;
+      }
+      prev = line;
+    }
+    return { w, h, px: out };
+  }
+
+  const lum = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
+
+  // 1) 桌面图标必须「亮」——这是本次问题的根因：
+  //    旧图标底 #1b2230（亮度 30）、框 #33405a（亮度 63），对比度只有 33，
+  //    在深色壁纸上跟背景糊成一片，用户会以为「没有图标」。
+  const DENSITIES = ['mdpi', 'hdpi', 'xhdpi', 'xxhdpi', 'xxxhdpi'];
+  for (const d of DENSITIES) {
+    const p = path.join(RES, 'mipmap-' + d, 'ic_launcher.png');
+    t('桌面图标存在（' + d + '）', fs.existsSync(p));
+    if (!fs.existsSync(p)) continue;
+    const img = readPNG(p);
+    let sum = 0, n = 0, maxL = -1, minL = 999;
+    for (let i = 0; i < img.px.length; i += 4) {
+      if (img.px[i + 3] < 128) continue;
+      const L = lum(img.px[i], img.px[i + 1], img.px[i + 2]);
+      sum += L; n++;
+      if (L > maxL) maxL = L;
+      if (L < minL) minL = L;
+    }
+    t('图标有不透明内容（' + d + '）', n > 0, n);
+    // 亮度范围（对比度）必须够大，否则在壁纸上「糊掉」
+    t('图标对比度足够（' + d + '）', maxL - minL >= 120,
+      { minL: Math.round(minL), maxL: Math.round(maxL), range: Math.round(maxL - minL) });
+    // 平均亮度不能太低
+    t('图标整体不偏暗（' + d + '）', sum / n >= 70, Math.round(sum / n));
+  }
+
+  // 2) 自适应图标（Android 8+）。缺失的话系统会把传统图标硬塞进白底遮罩，
+  //    看起来就是「图标怪怪的」—— 这是本次修的另一个点。
+  const anydpi = path.join(RES, 'mipmap-anydpi-v26');
+  t('有自适应图标目录', fs.existsSync(anydpi));
+  t('自适应图标描述存在', fs.existsSync(path.join(anydpi, 'ic_launcher.xml')));
+  t('圆形自适应图标描述存在', fs.existsSync(path.join(anydpi, 'ic_launcher_round.xml')));
+  const axml = fs.existsSync(path.join(anydpi, 'ic_launcher.xml'))
+    ? fs.readFileSync(path.join(anydpi, 'ic_launcher.xml'), 'utf8') : '';
+  t('自适应图标含 foreground 层', /<foreground/.test(axml));
+  t('自适应图标含 background 层', /<background/.test(axml));
+  t('背景层是矢量（任意尺寸都清晰）',
+    fs.existsSync(path.join(RES, 'drawable', 'ic_launcher_bg.xml')));
+
+  // 3) 自适应图标前景层：内容必须收在中心 66.7% 安全区内，
+  //    否则会被各厂商的遮罩（圆形/水滴/方形）切掉。
+  const SAFE = 0.3335;
+  for (const d of DENSITIES) {
+    const p = path.join(RES, 'mipmap-' + d, 'ic_launcher_foreground.png');
+    t('自适应前景层存在（' + d + '）', fs.existsSync(p));
+    if (!fs.existsSync(p)) continue;
+    const img = readPNG(p);
+    // 108dp 画布，中心 72dp 是可见区
+    const expect = { mdpi: 108, hdpi: 162, xhdpi: 216, xxhdpi: 324, xxxhdpi: 432 }[d];
+    t('前景层尺寸正确（' + d + '）', img.w === expect && img.h === expect, [img.w, img.h, expect]);
+    let outSafe = 0, total = 0;
+    for (let y = 0; y < img.h; y++) {
+      for (let x = 0; x < img.w; x++) {
+        const o = (y * img.w + x) * 4;
+        if (img.px[o + 3] < 128) continue;
+        total++;
+        if (Math.abs(x / img.w - 0.5) > SAFE || Math.abs(y / img.h - 0.5) > SAFE) outSafe++;
+      }
+    }
+    t('前景内容不越出安全区（' + d + '）', outSafe === 0, { outSafe, total });
+    t('前景层有内容（' + d + '）', total > 0, total);
+  }
+
+  // 4) 圆形图标：四角必须透明，否则在圆形遮罩下会露出方块角
+  const rp = path.join(RES, 'mipmap-xxxhdpi', 'ic_launcher_round.png');
+  if (fs.existsSync(rp)) {
+    const img = readPNG(rp);
+    const at = (ux, uy) => {
+      const x = Math.round(ux * (img.w - 1)), y = Math.round(uy * (img.h - 1));
+      return img.px[(y * img.w + x) * 4 + 3];
+    };
+    t('圆形图标四角透明',
+      at(0, 0) === 0 && at(1, 0) === 0 && at(0, 1) === 0 && at(1, 1) === 0,
+      [at(0, 0), at(1, 0), at(0, 1), at(1, 1)]);
+    t('圆形图标中心不透明', at(0.5, 0.5) === 255);
+  } else {
+    t('圆形图标存在', false);
+  }
+
+  // 5) 通知栏图标：必须是纯白剪影（系统会自己染色）
+  const np = path.join(RES, 'drawable-xxhdpi', 'ic_stat_photostudio.png');
+  if (fs.existsSync(np)) {
+    const img = readPNG(np);
+    let colored = 0, white = 0;
+    for (let i = 0; i < img.px.length; i += 4) {
+      if (img.px[i + 3] < 16) continue;
+      const r = img.px[i], g = img.px[i + 1], b = img.px[i + 2];
+      if (r > 240 && g > 240 && b > 240) white++;
+      else colored++;
+    }
+    t('通知图标是纯白剪影', colored === 0, { colored, white });
+  } else {
+    t('通知图标存在', false);
+  }
+
+  // 6) PWA 图标（网页版 / 添加到主屏）
+  t('PWA 图标 192 存在', fs.existsSync(path.join(APP, 'icon-192.png')));
+  t('PWA 图标 512 存在', fs.existsSync(path.join(APP, 'icon-512.png')));
+  t('SVG 图标存在（矢量源）', fs.existsSync(path.join(APP, 'icon.svg')));
+  const svg = fs.readFileSync(path.join(APP, 'icon.svg'), 'utf8');
+  // SVG 是设计源，必须与 PNG 同一套配色（避免两处各画各的）
+  t('SVG 用亮蓝底（与 PNG 一致）', /#5ab0ff|#2b7fe0|#1a5cbf/i.test(svg), svg.match(/#[0-9a-f]{6}/i));
+  t('SVG 含虚线选区（本应用的核心语义）', /stroke-dasharray/.test(svg));
+  t('SVG 含四角手柄', (svg.match(/<circle/g) || []).length >= 4, (svg.match(/<circle/g) || []).length);
+
+  // 7) 构建流程必须会生成图标 —— 否则改了 SVG 也不会进 APK
+  //    （这正是本次的问题：mipmap 是手工放的死文件，改 SVG 完全没效果）
+  const build = fs.readFileSync(path.join(__dirname, '..', 'tools', 'build-apk.sh'), 'utf8');
+  t('构建时会生成桌面图标', /make-icons\.js[^\n]*android\/res|make-icons\.js[^\n]*\$AND\/res/.test(build), build.match(/make-icons[^\n]*/));
+  const mk = fs.readFileSync(path.join(__dirname, '..', 'tools', 'make-icons.js'), 'utf8');
+  t('图标生成器会写 mipmap', /mipmap-' \+ d/.test(mk));
+  t('图标生成器会写自适应图标', /mipmap-anydpi-v26/.test(mk));
+  t('图标生成器会写圆形图标', /ic_launcher_round\.png/.test(mk));
+  t('图标生成器会写通知图标', /ic_stat_photostudio\.png/.test(mk));
+})();
+
+
+/* ---------- 应用图标 ---------- */
 console.log(`\n合计 ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

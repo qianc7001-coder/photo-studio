@@ -1,22 +1,72 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!--
+    修图台图标 · 适配所有屏幕
+
+    设计要点（针对「桌面看不清」的问题）：
+      1. 底色用**亮蓝渐变**而不是深灰 —— 深色壁纸/深色主题下深底会糊成一片
+      2. 相框用白色描边 + 高对比，缩到 48px 仍能辨认
+      3. 核心语义一眼可读：一张照片 + 一块虚线框选（本应用就是「框选局部修改」）
+      4. 图形留足安全边距，圆形/方形/圆角矩形三种桌面遮罩都不会切到内容
+  -->
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#1b2230"/>
-      <stop offset="1" stop-color="#0d1017"/>
+      <stop offset="0" stop-color="#5ab0ff"/>
+      <stop offset="0.55" stop-color="#2b7fe0"/>
+      <stop offset="1" stop-color="#1a5cbf"/>
     </linearGradient>
-    <linearGradient id="ac" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#6cb8ff"/>
-      <stop offset="1" stop-color="#2b7fe0"/>
+    <!-- 照片内容：暖色，与蓝色底形成互补对比 -->
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffd479"/>
+      <stop offset="1" stop-color="#ff9a5c"/>
     </linearGradient>
+    <linearGradient id="hill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f6f4f"/>
+      <stop offset="1" stop-color="#1d4a35"/>
+    </linearGradient>
+    <clipPath id="frameClip">
+      <rect x="116" y="136" width="280" height="240" rx="26"/>
+    </clipPath>
   </defs>
-  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
-  <rect x="96" y="120" width="320" height="272" rx="30" fill="none" stroke="#33405a" stroke-width="14"/>
-  <circle cx="188" cy="212" r="26" fill="#33405a"/>
-  <path d="M116 356 L216 250 L286 322 L330 282 L396 348" fill="none" stroke="#33405a" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
-  <rect x="176" y="240" width="180" height="132" rx="16" fill="none" stroke="url(#ac)" stroke-width="16" stroke-dasharray="34 22"/>
-  <circle cx="176" cy="240" r="15" fill="#fff"/>
-  <circle cx="356" cy="240" r="15" fill="#fff"/>
-  <circle cx="176" cy="372" r="15" fill="#fff"/>
-  <circle cx="356" cy="372" r="15" fill="#fff"/>
-  <path d="M392 96 l14 34 34 14 -34 14 -14 34 -14 -34 -34 -14 34 -14z" fill="url(#ac)"/>
+
+  <!-- 底：亮蓝渐变，圆角 22%（贴合主流桌面图标圆角） -->
+  <rect width="512" height="512" rx="114" fill="url(#bg)"/>
+  <!-- 顶部高光：让图标有立体感，不显得扁平 -->
+  <path d="M0 114 A114 114 0 0 1 114 0 H398 A114 114 0 0 1 512 114 V150
+           C400 200 112 200 0 150 Z" fill="#ffffff" opacity="0.14"/>
+
+  <!-- 照片本体（白色相框 + 暖色内容） -->
+  <rect x="104" y="124" width="304" height="264" rx="34" fill="#ffffff"/>
+  <g clip-path="url(#frameClip)">
+    <!-- 天空 -->
+    <rect x="116" y="136" width="280" height="240" fill="url(#sky)"/>
+    <!-- 太阳 -->
+    <circle cx="206" cy="212" r="30" fill="#fff6d8" opacity="0.95"/>
+    <!-- 山峦：两层，形成纵深 -->
+    <path d="M116 376 L206 262 L268 330 L318 288 L396 376 Z" fill="url(#hill)"/>
+    <path d="M116 376 L172 316 L232 376 Z" fill="#16382a" opacity="0.75"/>
+    <!-- 底部压暗，让山脚沉下去 -->
+    <rect x="116" y="344" width="280" height="32" fill="#123026" opacity="0.5"/>
+  </g>
+  <!-- 相框描边（补在裁剪之上，保证边缘干净） -->
+  <rect x="116" y="136" width="280" height="240" rx="26" fill="none"
+        stroke="#ffffff" stroke-width="12"/>
+
+  <!-- 虚线选区：本应用的核心动作「框选一块来改」 -->
+  <rect x="176" y="236" width="168" height="114" rx="14" fill="none"
+        stroke="#0e1014" stroke-width="18" stroke-dasharray="30 20" opacity="0.28"/>
+  <rect x="176" y="236" width="168" height="114" rx="14" fill="none"
+        stroke="#ffffff" stroke-width="11" stroke-dasharray="30 20"
+        stroke-linecap="round"/>
+
+  <!-- 四角手柄：强化「可拖动调整」的语义 -->
+  <g fill="#ffffff" stroke="#1a5cbf" stroke-width="5">
+    <circle cx="176" cy="236" r="17"/>
+    <circle cx="344" cy="236" r="17"/>
+    <circle cx="176" cy="350" r="17"/>
+    <circle cx="344" cy="350" r="17"/>
+  </g>
+
+  <!-- 右上角火花：点出「AI 生成」 -->
+  <path d="M394 92 l15 37 37 15 -37 15 -15 37 -15 -37 -37 -15 37 -15z"
+        fill="#ffffff" opacity="0.95"/>
 </svg>
