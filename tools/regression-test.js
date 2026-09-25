@@ -607,7 +607,17 @@ console.log('\n【会话】编辑进度必须能持久化（防进程被杀）')
 
 console.log('\n【元数据】EXIF / ICC 必须能读出来并写回去');
 (() => {
-  const napi = require('/tmp/domtest/node_modules/@napi-rs/canvas');
+  // 可选依赖：优先标准解析（CI 里装在项目内），退化到本机固定目录
+  let napi = null;
+  try { napi = require('@napi-rs/canvas'); }
+  catch (e) {
+    try { napi = require('/tmp/domtest/node_modules/@napi-rs/canvas'); }
+    catch (e2) { napi = null; }
+  }
+  if (!napi) {
+    console.log('  ⚠ 跳过：未安装可选依赖 @napi-rs/canvas（npm install --no-save @napi-rs/canvas）');
+    return;
+  }
 
   // 造一个带指定 Orientation 的 EXIF
   const buildTiff = (orientation) => {

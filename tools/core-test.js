@@ -1,4 +1,6 @@
-const C = require('/root/photo-studio/app/core.js');
+// 用相对路径解析：本机、CI 检出目录、任意 clone 位置都能跑
+const path = require('path');
+const C = require(path.join(__dirname, '..', 'app', 'core.js'));
 let pass=0, fail=0;
 const t=(name,cond,extra)=>{ if(cond){pass++;} else {fail++; console.log('FAIL:',name, extra===undefined?'':JSON.stringify(extra));} };
 

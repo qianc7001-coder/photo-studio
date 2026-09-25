@@ -9,8 +9,21 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const zlib = require('zlib');
-const { JSDOM, VirtualConsole } = require('/tmp/domtest/node_modules/jsdom');
-const napi = require('/tmp/domtest/node_modules/@napi-rs/canvas');
+// 可选依赖：优先标准解析（CI 里 npm install 装在项目内），
+// 退化到本机固定目录（本地开发时依赖装在 /tmp/domtest）。
+function loadOptional(name) {
+  try { return require(name); }
+  catch (e) {
+    try { return require('/tmp/domtest/node_modules/' + name); }
+    catch (e2) {
+      console.log('  ⚠ 跳过：未安装可选依赖 ' + name);
+      console.log('    安装方式：npm install --no-save jsdom @napi-rs/canvas');
+      process.exit(0);
+    }
+  }
+}
+const { JSDOM, VirtualConsole } = loadOptional('jsdom');
+const napi = loadOptional('@napi-rs/canvas');
 
 const APP = path.join(__dirname, '..', 'app');
 let pass = 0, fail = 0;
