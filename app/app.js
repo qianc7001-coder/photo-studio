@@ -394,7 +394,10 @@
     el.className = 'ka-state ka-' + d.tone;
     const row = $('ka-always-row');
     if (row) row.hidden = !d.canAlways;
+    // 电池按钮包在 st-row-plain 里（系统设置风格），所以切换整行的显隐 ——
+    // 只切按钮本身会留下一行空白
     const batt = $('ka-battery');
+    const battRow = $('ka-battery-row');
     if (batt) {
       // 电池优化白名单：各家 OEM 的后台限制都靠这一步放宽
       let optimized = false;
@@ -403,6 +406,7 @@
         try { optimized = b.batteryOptimized() === true; } catch (e) { /* ignore */ }
       }
       batt.hidden = !optimized;
+      if (battRow) battRow.hidden = !optimized;
     }
   }
 
@@ -3469,6 +3473,8 @@
       if (row) row.hidden = true;
       const kb = $('ka-battery');
       if (kb) kb.hidden = true;
+      const kbRow = $('ka-battery-row');
+      if (kbRow) kbRow.hidden = true;
     } else {
       updateKeepAliveUI();
     }
@@ -4473,7 +4479,9 @@
     updateUI();
     resizeCanvas();
 
-    $('about').textContent = '修图台 v' + APP_VERSION + ' · 纯本地运行 · 照片只发往你配置的接口';
+    $('about').textContent = '纯本地运行 · 照片只发往你配置的接口';
+    const av = $('about-version');
+    if (av) av.textContent = 'v' + APP_VERSION + '（' + ((window.PS_VERSION && window.PS_VERSION.versionCode) || '?') + '）';
     checkUpgrade();
     // 检查是否有上次未完成的编辑（Android 后台回收很常见）
     if (S.cfg.autoSaveSession !== false) offerSessionRestore();

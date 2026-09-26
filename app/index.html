@@ -273,210 +273,254 @@
     </div>
     <div class="sheet-scroll">
 
-      <section>
-        <h4>生图模型</h4>
-        <label class="field">
-          <span>服务商</span>
-          <select id="set-provider"></select>
+      <!-- ============ 生图模型 ============ -->
+      <div class="st-group">生图模型</div>
+      <div class="st-card">
+        <label class="st-row">
+          <span class="st-label">服务商</span>
+          <select class="st-value" id="set-provider"></select>
         </label>
-        <label class="field">
-          <span>接口地址 (Base URL)</span>
-          <input type="url" id="set-baseurl" placeholder="https://api.siliconflow.cn/v1" autocapitalize="off" autocorrect="off" spellcheck="false">
+        <label class="st-row">
+          <span class="st-label">接口地址</span>
+          <input class="st-input" type="url" id="set-baseurl" placeholder="https://api.siliconflow.cn/v1" autocapitalize="off" autocorrect="off" spellcheck="false">
         </label>
-        <label class="field">
-          <span>API Key</span>
-          <input type="password" id="set-apikey" placeholder="sk-..." autocapitalize="off" autocorrect="off" spellcheck="false">
+        <label class="st-row">
+          <span class="st-label">API Key</span>
+          <input class="st-input" type="password" id="set-apikey" placeholder="sk-..." autocapitalize="off" autocorrect="off" spellcheck="false">
         </label>
-        <label class="field">
-          <span>模型</span>
-          <input type="text" id="set-model" list="model-list" placeholder="Qwen/Qwen-Image-Edit" autocapitalize="off" autocorrect="off" spellcheck="false">
+        <label class="st-row">
+          <span class="st-label">模型</span>
+          <input class="st-input" type="text" id="set-model" list="model-list" placeholder="Qwen/Qwen-Image-Edit" autocapitalize="off" autocorrect="off" spellcheck="false">
           <datalist id="model-list"></datalist>
         </label>
-        <div class="field-row">
-          <button class="ghost small" id="btn-test">测试连接</button>
-          <button class="ghost small" id="btn-detect">自动检测可用模型</button>
-          <span class="status" id="test-status"></span>
-        </div>
+      </div>
+      <div class="st-actions">
+        <button class="st-btn" id="btn-test">测试连接</button>
+        <button class="st-btn" id="btn-detect">自动检测模型</button>
+      </div>
+      <div class="status" id="test-status"></div>
+      <div class="tip" id="provider-tip"></div>
 
-        <!-- 自动检测结果 -->
-        <div id="detect-box" hidden>
-          <div class="detect-head">
-            <span id="detect-summary"></span>
+      <div id="detect-box" hidden>
+        <div class="st-card" style="margin-top:10px">
+          <div class="st-row st-row-plain">
+            <span id="detect-summary" class="st-label"></span>
             <button class="chip" id="detect-close">收起</button>
           </div>
-          <div id="detect-list" class="detect-list"></div>
-          <div class="tip">点任意一项即可选用。标「可编辑」的模型支持参考原图做局部修改，是本应用的首选。</div>
         </div>
+        <div id="detect-list" class="detect-list"></div>
+        <div class="tip">点任意一项即可选用。标「可编辑」的模型支持参考原图做局部修改，是本应用的首选。</div>
+      </div>
 
-        <div class="tip" id="provider-tip"></div>
-      </section>
-
-      <section>
-        <h4>网络</h4>
-        <label class="field">
-          <span>请求方式</span>
-          <select id="set-netmode">
-            <option value="auto">自动（优先本地代理，失败则直连）</option>
-            <option value="proxy">只用本地代理（推荐，无跨域问题）</option>
+      <!-- ============ 网络 ============ -->
+      <div class="st-group">网络</div>
+      <div class="st-card">
+        <label class="st-row">
+          <span class="st-label">请求方式</span>
+          <select class="st-value" id="set-netmode">
+            <option value="auto">自动</option>
+            <option value="proxy">只用本地代理</option>
             <option value="direct">只用浏览器直连</option>
           </select>
         </label>
-        <div class="tip" id="net-tip"></div>
-      </section>
+      </div>
+      <div class="tip" id="net-tip"></div>
 
-      <section>
-        <h4>贴回质量</h4>
-        <label class="field">
-          <span>上下文外扩 <b id="v-ctx">12%</b> <i>让模型看到选区周边的环境</i></span>
-          <input type="range" id="set-ctx" min="0" max="60" value="12">
+      <!-- ============ 贴回质量 ============ -->
+      <div class="st-group">贴回质量</div>
+      <div class="st-card">
+        <label class="st-row st-row-col">
+          <span class="st-label">上下文外扩 <b class="st-badge" id="v-ctx">12%</b></span>
+          <input type="range" class="st-range" id="set-ctx" min="0" max="60" value="12">
+          <span class="st-desc">让模型看到选区周边的环境</span>
         </label>
-        <label class="field">
-          <span>边缘羽化 <b id="v-feather">10 px</b> <i>消除拼接硬边</i></span>
-          <input type="range" id="set-feather" min="0" max="60" value="10">
+        <label class="st-row st-row-col">
+          <span class="st-label">边缘羽化 <b class="st-badge" id="v-feather">10 px</b></span>
+          <input type="range" class="st-range" id="set-feather" min="0" max="60" value="10">
+          <span class="st-desc">消除拼接硬边</span>
         </label>
-        <label class="field">
-          <span>接缝色彩匹配 <b id="v-cm">50%</b> <i>把生成结果的整体色调对齐原图</i></span>
-          <input type="range" id="set-cm" min="0" max="100" value="50">
+        <label class="st-row st-row-col">
+          <span class="st-label">接缝色彩匹配 <b class="st-badge" id="v-cm">50%</b></span>
+          <input type="range" class="st-range" id="set-cm" min="0" max="100" value="50">
+          <span class="st-desc">把生成结果的整体色调对齐原图</span>
         </label>
-        <label class="field">
-          <span>无缝融合 <b id="v-fusion">70%</b> <i>对齐<b>光照渐变、对比度、颗粒</b> —— 这是解决「生成块和周围不契合」的主要手段</i></span>
-          <input type="range" id="set-fusion" min="0" max="100" value="70">
+      </div>
+
+      <div class="st-group">无缝融合</div>
+      <div class="st-card">
+        <label class="st-row st-row-col">
+          <span class="st-label">融合强度 <b class="st-badge" id="v-fusion">70%</b></span>
+          <input type="range" class="st-range" id="set-fusion" min="0" max="100" value="70">
+          <span class="st-desc">对齐光照渐变、对比度、颗粒</span>
         </label>
-        <label class="field">
-          <span>中心保留改动 <b id="v-fusionc">35%</b> <i>选区中心少做多少校正。调高 = 更忠实你的修改意图；调低 = 更贴合周围环境</i></span>
-          <input type="range" id="set-fusionc" min="0" max="100" value="35">
+        <label class="st-row st-row-col">
+          <span class="st-label">中心保留改动 <b class="st-badge" id="v-fusionc">35%</b></span>
+          <input type="range" class="st-range" id="set-fusionc" min="0" max="100" value="35">
+          <span class="st-desc">调高更忠实你的修改意图，调低更贴合环境</span>
         </label>
-        <label class="field">
-          <span>颗粒补偿 <b id="v-fusiong">60%</b> <i>模型输出比真实照片平滑，补上颗粒可避免「那块太干净」</i></span>
-          <input type="range" id="set-fusiong" min="0" max="100" value="60">
+        <label class="st-row st-row-col">
+          <span class="st-label">颗粒补偿 <b class="st-badge" id="v-fusiong">60%</b></span>
+          <input type="range" class="st-range" id="set-fusiong" min="0" max="100" value="60">
+          <span class="st-desc">模型输出比真实照片平滑，补上颗粒避免「那块太干净」</span>
         </label>
-        <label class="switch" style="margin-top:12px;margin-bottom:10px">
-          <input type="checkbox" id="set-envfit" checked>
-          <span>每次请求附带「环境特征」描述（推荐）</span>
+        <label class="st-row">
+          <span class="st-label">请求附带环境特征 <i class="st-desc-inline">每次调用前测量周围环境并写进提示词</i></span>
+          <input type="checkbox" class="st-switch" id="set-envfit" checked>
         </label>
-        <div class="tip">开启后，每次调用都会先<b>测量选区周围的环境</b>（多亮、偏暖还是偏冷、
-          反差强弱、主光来自哪个方向），把结果写进提示词。这样模型有可对照的目标，
-          而不是只收到一句「请保持一致」—— 它本来也不知道该一致成什么样。<br>
-          这是<b>免费</b>的：只是一段文字，不增加调用次数。</div>
-        <div class="tip">「无缝融合」做的是<b>像素级对齐</b>：模型看不到你照片的明暗走向和质感，
-          只能靠提示词猜，所以总差一点。融合在贴回时强制对齐 —— 而且<b>不重新调用模型，不花钱</b>。</div>
-        <label class="field">
-          <span>工作分辨率上限</span>
-          <select id="set-maxres">
-            <option value="2048">2048 px（省内存）</option>
-            <option value="3072" selected>3072 px（推荐）</option>
-            <option value="4096">4096 px（更清晰）</option>
-            <option value="0">不缩放（原始尺寸）</option>
+      </div>
+      <div class="tip">融合做的是<b>像素级对齐</b>；环境特征是把<b>测出来的</b>周围情况写进提示词。
+        两者都不重新调用模型，<b>不花钱</b>。</div>
+
+      <!-- ============ 画质与性能 ============ -->
+      <div class="st-group">画质与性能</div>
+      <div class="st-card">
+        <label class="st-row">
+          <span class="st-label">工作分辨率上限</span>
+          <select class="st-value" id="set-maxres">
+            <option value="2048">2048 px</option>
+            <option value="3072" selected>3072 px</option>
+            <option value="4096">4096 px</option>
+            <option value="0">不缩放</option>
           </select>
         </label>
-        <label class="field">
-          <span>大选区自动分块 <b id="v-tile">关闭</b> <i>默认关闭。开启后选区过大时切成多块分别生成，但<b>每块是模型独立生成的，重叠区接缝可能出现重影或发糊</b>，建议只在单次请求被服务商拒绝（选区超出尺寸上限）时才临时打开</i></span>
-          <input type="range" id="set-tile" min="0" max="2000" step="100" value="0">
+        <label class="st-row">
+          <span class="st-label">小选区自动放大 <i class="st-desc-inline">应对接口最小尺寸限制</i></span>
+          <input type="checkbox" class="st-switch" id="set-upscale" checked>
         </label>
-        <label class="switch" style="margin-bottom:12px">
-          <input type="checkbox" id="set-upscale" checked>
-          <span>小选区自动放大后发送</span>
+        <label class="st-row st-row-col">
+          <span class="st-label">大选区自动分块 <b class="st-badge" id="v-tile">关闭</b></span>
+          <input type="range" class="st-range" id="set-tile" min="0" max="2000" step="100" value="0">
+          <span class="st-desc">默认关闭。分块后每块由模型独立生成，接缝可能出现重影或发糊</span>
         </label>
-        <label class="field">
-          <span>编辑历史内存上限 <b id="v-mem">192 MB</b> <i>超出时较早的编辑会降采样保存，仍超出则丢弃最早的</i></span>
-          <input type="range" id="set-mem" min="64" max="512" step="32" value="192">
+        <label class="st-row st-row-col">
+          <span class="st-label">编辑历史内存上限 <b class="st-badge" id="v-mem">192 MB</b></span>
+          <input type="range" class="st-range" id="set-mem" min="64" max="512" step="32" value="192">
+          <span class="st-desc">超出时较早的编辑会降采样保存，仍超出则丢弃最早的</span>
         </label>
-        <label class="switch" style="margin-bottom:12px">
-          <input type="checkbox" id="set-autosave" checked>
-          <span>自动保存编辑进度（应用被系统回收后可恢复）</span>
+        <label class="st-row">
+          <span class="st-label">自动保存编辑进度 <i class="st-desc-inline">应用被系统回收后可恢复</i></span>
+          <input type="checkbox" class="st-switch" id="set-autosave" checked>
         </label>
+      </div>
 
-        <div class="tip">部分接口对输入图有最小尺寸要求（如总像素不少于 0.66MP）。
-          开启后，框选区域太小时会先放大到合规尺寸再发送，贴回时按原分辨率还原。
-          若你的接口没有此限制、或发现放大后画质下降，可以关掉。</div>
-      </section>
-
-      <section>
-        <h4>后台保活</h4>
-        <div class="tip" style="margin:0 0 10px">
-          生图请求通常要 30~60 秒。这期间如果你切到别的应用或锁屏，
-          系统可能会回收应用 —— 进程一死请求就断了，<b>但模型那边已经出图、钱已经花了</b>。
-          开启保活后，生成期间会常驻一条通知把进程钉住，切走也能拿到结果。
+      <!-- ============ 后台保活 ============ -->
+      <div class="st-group">后台保活</div>
+      <div class="st-card">
+        <label class="st-row">
+          <span class="st-label">生成时自动保活 <i class="st-desc-inline">切走或锁屏也不会中断</i></span>
+          <input type="checkbox" class="st-switch" id="set-keepalive" checked>
+        </label>
+        <label class="st-row" id="ka-always-row">
+          <span class="st-label">一直保活 <i class="st-desc-inline">连续修图时不用每次等</i></span>
+          <input type="checkbox" class="st-switch" id="set-keepalive-always">
+        </label>
+        <div class="st-row st-row-plain">
+          <span class="ka-state ka-muted" id="ka-state">检测中…</span>
         </div>
-        <label class="switch" style="margin-bottom:10px">
-          <input type="checkbox" id="set-keepalive" checked>
-          <span>生成时自动保活（推荐）</span>
-        </label>
-        <label class="switch" id="ka-always-row" style="margin-bottom:10px">
-          <input type="checkbox" id="set-keepalive-always">
-          <span>一直保活（连续修图时不用每次等）</span>
-        </label>
-        <div class="ka-state ka-muted" id="ka-state">检测中…</div>
-        <button class="ghost" id="ka-battery" hidden style="width:100%;margin-top:10px">允许后台运行（系统电池优化）</button>
-        <div class="tip">各家手机系统的后台限制不一样。如果切走后仍会中断，
-          点上面的按钮把本应用加入「不限制后台」名单。</div>
-      </section>
-
-      <section>
-        <h4>成本预估</h4>
-        <label class="field">
-          <span>单价（美元/张） <i>留空则使用内置价格表；填了就以你填的为准</i></span>
-          <input type="number" id="set-price" placeholder="例如 0.04" min="0" step="0.001">
-        </label>
-        <label class="field">
-          <span>汇率（1 美元 = ? 元） <i>仅用于显示人民币参考价</i></span>
-          <input type="number" id="set-usdcny" placeholder="7.1" min="1" max="20" step="0.1">
-        </label>
-        <div class="field-row">
-          <button class="ghost small" id="btn-reset-spend">重置已花统计</button>
-          <span class="status" id="spend-status"></span>
+        <div class="st-row st-row-plain" id="ka-battery-row" hidden>
+          <button class="st-btn" id="ka-battery" style="width:100%">允许后台运行（系统电池优化）</button>
         </div>
-        <div class="tip" id="price-tip"></div>
-      </section>
+      </div>
+      <div class="tip">生图要 30~60 秒，切走时系统可能回收应用 —— 请求断了但模型已经出图、钱已经花了。
+        各家手机系统的后台限制不一样，如果仍会中断，点上面的按钮加入「不限制后台」名单。</div>
 
-      <section>
-        <h4>生成参数</h4>
-        <label class="field">
-          <span>提示词语言</span>
-          <select id="set-lang">
+      <!-- ============ 成本预估 ============ -->
+      <div class="st-group">成本预估</div>
+      <div class="st-card">
+        <label class="st-row">
+          <span class="st-label">单价（美元/张） <i class="st-desc-inline">留空用内置价格表</i></span>
+          <input class="st-input st-input-num" type="number" id="set-price" placeholder="自动" min="0" step="0.001">
+        </label>
+        <label class="st-row">
+          <span class="st-label">汇率（1 美元 = ? 元）</span>
+          <input class="st-input st-input-num" type="number" id="set-usdcny" placeholder="7.1" min="1" max="20" step="0.1">
+        </label>
+      </div>
+      <div class="st-actions">
+        <button class="st-btn" id="btn-reset-spend">重置已花统计</button>
+      </div>
+      <div class="status" id="spend-status"></div>
+      <div class="tip" id="price-tip"></div>
+
+      <!-- ============ 生成参数 ============ -->
+      <div class="st-group">生成参数</div>
+      <div class="st-card">
+        <label class="st-row">
+          <span class="st-label">提示词语言</span>
+          <select class="st-value" id="set-lang">
             <option value="auto">自动跟随输入</option>
             <option value="zh">中文</option>
             <option value="en">English</option>
           </select>
         </label>
-        <label class="field">
-          <span>随机种子 <i>留空为随机</i></span>
-          <input type="number" id="set-seed" placeholder="留空" min="0" max="9999999999">
+        <label class="st-row">
+          <span class="st-label">随机种子 <i class="st-desc-inline">留空为随机</i></span>
+          <input class="st-input st-input-num" type="number" id="set-seed" placeholder="随机" min="0" max="9999999999">
         </label>
-        <label class="field">
-          <span>导出预设</span>
-          <select id="set-preset"></select>
-          <i id="preset-desc"></i>
+        <label class="st-row st-row-col">
+          <span class="st-label">导出预设</span>
+          <select class="st-value" id="set-preset" style="width:100%"></select>
+          <span class="st-desc" id="preset-desc"></span>
         </label>
-        <div id="custom-export" hidden>
-          <label class="field">
-            <span>导出格式</span>
-            <select id="set-format">
+      </div>
+
+      <div id="custom-export" hidden>
+        <div class="st-card">
+          <label class="st-row">
+            <span class="st-label">导出格式</span>
+            <select class="st-value" id="set-format">
               <option value="jpeg">JPEG（体积小）</option>
               <option value="png">PNG（无损）</option>
             </select>
           </label>
-          <label class="field">
-            <span>JPEG 质量 <b id="v-quality">95%</b></span>
-            <input type="range" id="set-quality" min="70" max="100" value="95">
+          <label class="st-row st-row-col">
+            <span class="st-label">JPEG 质量 <b class="st-badge" id="v-quality">95%</b></span>
+            <input type="range" class="st-range" id="set-quality" min="70" max="100" value="95">
           </label>
         </div>
-      </section>
+      </div>
 
-      <section>
-        <h4>隐私</h4>
-        <label class="switch">
-          <input type="checkbox" id="set-mosaic">
-          <span>发送前对选区外的无关区域打码</span>
+      <!-- ============ 隐私 ============ -->
+      <div class="st-group">隐私</div>
+      <div class="st-card">
+        <label class="st-row">
+          <span class="st-label">发送前对选区外打码 <i class="st-desc-inline">保护无关区域</i></span>
+          <input type="checkbox" class="st-switch" id="set-mosaic">
         </label>
-        <div class="tip">照片只会发送到你自己配置的接口地址，本应用不做任何上传。</div>
-      </section>
+      </div>
+      <div class="tip">照片只会发送到你自己配置的接口地址，本应用不做任何上传。</div>
 
-      <section>
-        <button class="ghost" id="btn-whatsnew" style="width:100%;margin-bottom:10px">查看本次更新内容</button>
-        <button class="danger" id="btn-clear">清空所有本地数据</button>
-        <div class="tip" id="about"></div>
-      </section>
+      <!-- ============ 关于 ============ -->
+      <div class="st-group">关于</div>
+      <div class="st-card">
+        <div class="st-row st-row-plain">
+          <span class="st-label">版本</span>
+          <span class="st-value-text" id="about-version">—</span>
+        </div>
+        <button class="st-row st-row-btn" id="btn-whatsnew">
+          <span class="st-label">查看本次更新内容</span>
+          <svg class="st-arrow" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
+        </button>
+        <a class="st-row st-row-btn" id="link-github" href="https://github.com/qianc7001-coder/photo-studio" target="_blank" rel="noopener">
+          <span class="st-label">GitHub 项目主页</span>
+          <svg class="st-arrow" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
+        </a>
+        <a class="st-row st-row-btn" id="link-issues" href="https://github.com/qianc7001-coder/photo-studio/issues" target="_blank" rel="noopener">
+          <span class="st-label">反馈问题 / 提建议</span>
+          <svg class="st-arrow" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
+        </a>
+        <a class="st-row st-row-btn" id="link-releases" href="https://github.com/qianc7001-coder/photo-studio/releases" target="_blank" rel="noopener">
+          <span class="st-label">历史版本下载</span>
+          <svg class="st-arrow" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
+        </a>
+      </div>
+      <div class="tip" id="about"></div>
+
+      <div class="st-card" style="margin-top:10px">
+        <button class="st-row st-row-btn st-danger" id="btn-clear">
+          <span class="st-label">清空所有本地数据</span>
+        </button>
+      </div>
 
     </div>
   </div>

@@ -1732,6 +1732,107 @@ console.log('\n【提示词】每次请求都要带上「测出来的」周围�
 })();
 
 
-/* ---------- 环境契合提示词 ---------- */
+// ===== 设置面板布局回归 =====
+(() => {
+  const fs = require('fs');
+  const path = require('path');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'app', 'index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'app', 'style.css'), 'utf8');
+  const appSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'app.js'), 'utf8');
+  const manifest = fs.readFileSync(path.join(__dirname, '..', 'android', 'AndroidManifest.xml'), 'utf8');
+  const act = fs.readFileSync(path.join(__dirname, '..', 'android', 'src', 'com', 'photostudio', 'app', 'MainActivity.java'), 'utf8');
+
+  const i = html.indexOf('id="settings"');
+  const j = html.indexOf('<script src="version.js">');
+  const seg = html.slice(i, j);
+
+  // 1) 结构：分组 + 卡片 + 行（系统设置的视觉语言）
+  const groups = (seg.match(/class="st-group"/g) || []).length;
+  const cards = (seg.match(/class="st-card"/g) || []).length;
+  t('设置分为多个分组', groups >= 8, groups);
+  t('每组用卡片容器', cards >= 8, cards);
+  t('有分组标题样式', /#settings \.st-group/.test(css));
+  t('有卡片样式（圆角 + 边框）',
+    /#settings \.st-card \{[\s\S]{0,200}border-radius/.test(css), 'card 规则');
+  t('行高符合触控标准（>=44px）', /#settings \.st-row \{[\s\S]{0,200}min-height: 48px/.test(css));
+
+  // 2) 行之间要有分隔线（系统设置的标志性细节）
+  t('行之间有分隔线', /\.st-row \+ \.st-row::before|\.st-row-col \+ \.st-row/.test(css));
+  t('分隔线从左侧内缩（不顶到边）', /left: 14px; right: 0; top: 0/.test(css));
+
+  // 3) 开关要做成拨动开关，不是默认勾选框
+  t('开关是自绘拨动样式', /#settings \.st-switch \{[\s\S]{0,300}appearance: none/.test(css));
+  t('开关有圆形滑块', /\.st-switch::after/.test(css));
+  t('开关选中时有位移', /\.st-switch:checked::after \{ transform: translateX/.test(css));
+  t('开关尺寸合理（宽 40~56px）',
+    /\.st-switch \{[\s\S]{0,200}width: 46px/.test(css));
+
+  // 4) 可点进行要有右箭头（系统设置的视觉提示）
+  t('可点行有右箭头', /class="st-arrow"/.test(seg));
+  t('箭头是描边图标（不是实心）', /\.st-arrow \{[\s\S]{0,200}fill: none/.test(css));
+
+  // 5) 破坏性操作单独成卡 + 红色文字
+  t('清空数据单独成卡', /st-card[\s\S]{0,200}id="btn-clear"/.test(seg));
+  t('清空数据用红色文字', /\.st-danger \.st-label \{ color: #ff8b8b/.test(css));
+
+  // 6) 右侧值要右对齐（系统设置的关键观感）
+  t('输入框值右对齐', /\.st-input \{[\s\S]{0,300}text-align: right/.test(css));
+  t('当前值徽标右浮动', /\.st-badge \{[\s\S]{0,120}float: right/.test(css));
+
+  // 7) GitHub 地址：用户明确要求加的
+  t('设置里有 GitHub 链接', /id="link-github"/.test(seg));
+  t('链接指向正确仓库',
+    /id="link-github"[^>]*href="https:\/\/github\.com\/qianc7001-coder\/photo-studio"/.test(seg));
+  t('有反馈问题入口', /id="link-issues"/.test(seg));
+  t('有问题反馈地址', /issues"/.test(seg));
+  t('有历史版本入口', /id="link-releases"/.test(seg));
+  t('链接在新窗口打开', /id="link-github"[\s\S]{0,200}target="_blank"/.test(seg));
+  t('外链带 rel=noopener（防钓鱼）',
+    /target="_blank" rel="noopener"/.test(seg));
+  // 关键：WebView 必须把外链交给系统浏览器，否则在应用内打不开
+  t('安卓壳会把外链交给系统浏览器', /Intent\.ACTION_VIEW/.test(act));
+  t('本机服务地址不被误拦',
+    /u\.getPort\(\) == server\.getPort\(\)/.test(act));
+  // 老设备上必须两个重载都在，否则点不动（之前修过）
+  t('外链拦截兼容老系统（两个重载）',
+    /shouldOverrideUrlLoading\(WebView view, WebResourceRequest request\)/.test(act) &&
+    /shouldOverrideUrlLoading\(WebView view, String url\)/.test(act));
+
+  // 8) 关于区显示版本号
+  t('关于区显示版本', /id="about-version"/.test(seg));
+  t('版本号由 JS 填入', /\$\('about-version'\)/.test(appSrc));
+
+  // 9) 原有 ID 一个都不能少（改版最容易漏掉绑定目标）
+  const need = ['set-provider', 'set-baseurl', 'set-apikey', 'set-model', 'model-list',
+    'btn-test', 'btn-detect', 'test-status', 'detect-box', 'detect-summary', 'detect-close',
+    'detect-list', 'provider-tip', 'set-netmode', 'net-tip',
+    'v-ctx', 'set-ctx', 'v-feather', 'set-feather', 'v-cm', 'set-cm',
+    'v-fusion', 'set-fusion', 'v-fusionc', 'set-fusionc', 'v-fusiong', 'set-fusiong', 'set-envfit',
+    'set-maxres', 'v-tile', 'set-tile', 'set-upscale', 'v-mem', 'set-mem', 'set-autosave',
+    'set-keepalive', 'ka-always-row', 'set-keepalive-always', 'ka-state', 'ka-battery',
+    'set-price', 'set-usdcny', 'btn-reset-spend', 'spend-status', 'price-tip',
+    'set-lang', 'set-seed', 'set-preset', 'preset-desc', 'custom-export', 'set-format',
+    'v-quality', 'set-quality', 'set-mosaic', 'btn-whatsnew', 'btn-clear', 'about'];
+  const missing = need.filter((id) => seg.indexOf('id="' + id + '"') < 0);
+  t('改版后所有原有 ID 都还在', missing.length === 0, missing);
+
+  // 10) 旧 class 不应残留在设置面板（避免两套样式打架）
+  t('设置面板不再用旧的 field class', !/class="field/.test(seg));
+  t('设置面板不再用旧的 switch class', !/class="switch/.test(seg));
+  // 但旧 class 的样式要保留（其它面板还在用）
+  t('旧样式仍保留（其它面板在用）', /^\.switch \{/m.test(css) || /\.switch \{/.test(css));
+
+  // 11) 保活按钮包在行里时，显隐要切整行（只切按钮会留空白行）
+  t('电池按钮的显隐切换整行', /battRow\.hidden = !optimized/.test(appSrc));
+  t('不支持环境时整行也隐藏', /kbRow\.hidden = true/.test(appSrc));
+
+  // 12) 老内核兼容：不支持 flex gap 时行内间距仍正确
+  t('老内核下行内间距有兜底', /\.ps-no-flex-gap #settings \.st-row > \* \+ \*/.test(css));
+})();
+// ===== 设置界面块结束 =====
+
+
+/* ---------- 设置界面（系统设置风格） ---------- */
+
 console.log(`\n合计 ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

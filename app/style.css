@@ -914,3 +914,236 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 .layer-score.fair .ls-num { color: #ffd591; }
 .layer-score.poor { border-color: rgba(255, 90, 90, .35); }
 .layer-score.poor .ls-num { color: #ff8b8b; }
+
+/* =============================================================================
+ * 设置面板 · 手机系统设置风格
+ *
+ * 参照 iOS / Android 系统设置的视觉语言：
+ *   · 灰色分组标题（小字、全大写感觉、不抢眼）
+ *   · 白色/浅色圆角卡片，行与行之间用细分隔线
+ *   · 左侧标签 + 右侧值/开关，值右对齐
+ *   · 可点进下一级的行带右箭头
+ *   · 破坏性操作单独成卡、红色文字
+ * ========================================================================== */
+
+/* 分组标题 */
+#settings .st-group {
+  margin: 18px 0 7px;
+  padding: 0 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: .5px;
+  color: var(--text-faint);
+}
+#settings .st-group:first-child { margin-top: 4px; }
+
+/* 卡片容器 */
+#settings .st-card {
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+/* 行：默认横向（标签 + 值） */
+#settings .st-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 11px 14px;
+  margin: 0;
+  position: relative;
+}
+/* 行之间的分隔线：最后一行不画 */
+#settings .st-card > .st-row + .st-row::before,
+#settings .st-card > .st-row + .st-row-col::before,
+#settings .st-card > .st-row-col + .st-row::before,
+#settings .st-card > .st-row-col + .st-row-col::before,
+#settings .st-card > .st-row-plain + .st-row::before,
+#settings .st-card > .st-row + .st-row-btn::before,
+#settings .st-card > .st-row-btn + .st-row-btn::before,
+#settings .st-card > .st-row + .st-row-plain::before,
+#settings .st-card > .st-row-plain + .st-row-plain::before {
+  content: '';
+  position: absolute;
+  left: 14px; right: 0; top: 0;
+  height: 1px;
+  background: var(--line-soft);
+}
+
+/* 纵向行：标签一行、控件一行、说明一行 */
+#settings .st-row-col {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 7px;
+  min-height: 0;
+  padding: 13px 14px;
+}
+
+#settings .st-label {
+  font-size: 13.5px;
+  color: var(--text);
+  line-height: 1.4;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* 标签内的小字说明（跟在标题后面） */
+#settings .st-desc-inline {
+  display: block;
+  margin-top: 3px;
+  font-size: 11.5px;
+  font-style: normal;
+  color: var(--text-faint);
+  line-height: 1.45;
+}
+/* 纵向行里的说明 */
+#settings .st-desc {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  line-height: 1.5;
+}
+
+/* 当前值徽标（右对齐显示 12% / 10px 这类） */
+#settings .st-badge {
+  float: right;
+  margin-left: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 右侧值：下拉、输入框 */
+#settings .st-value,
+#settings .st-input {
+  flex: 0 1 auto;
+  width: auto;
+  min-width: 0;
+  max-width: 58%;
+  text-align: right;
+  padding: 6px 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--text-dim);
+  font-size: 13px;
+  transition: background .15s, border-color .15s;
+}
+#settings .st-value:focus,
+#settings .st-input:focus {
+  background: var(--panel);
+  border-color: var(--accent-dim);
+  color: var(--text);
+}
+/* 下拉框保留原生箭头（已有 background-image），右对齐时留出箭头空间 */
+#settings .st-value {
+  padding-right: 24px;
+  background-position: right 2px center;
+  appearance: none;
+}
+#settings .st-input-num { max-width: 46%; }
+#settings .st-input::placeholder { color: var(--text-faint); }
+
+/* 纯文本值（版本号这类） */
+#settings .st-value-text {
+  flex: 0 0 auto;
+  font-size: 13px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 滑块：占满整行 */
+#settings .st-range {
+  width: 100%;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+/* 开关：做成系统设置那种拨动开关 */
+#settings .st-switch {
+  flex: 0 0 auto;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 46px;
+  height: 27px;
+  margin: 0;
+  border-radius: 14px;
+  background: #39414f;
+  position: relative;
+  cursor: pointer;
+  transition: background .2s;
+}
+#settings .st-switch::after {
+  content: '';
+  position: absolute;
+  top: 2.5px; left: 2.5px;
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .4);
+  transition: transform .2s;
+}
+#settings .st-switch:checked { background: var(--accent); }
+#settings .st-switch:checked::after { transform: translateX(19px); }
+#settings .st-switch:disabled { opacity: .45; }
+
+/* 可点击行（进入下一级 / 触发动作） */
+#settings .st-row-btn {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+#settings .st-row-btn:active { background: #2b323f; }
+#settings .st-row-btn .st-label { flex: 1 1 auto; }
+#settings .st-arrow {
+  flex: 0 0 auto;
+  width: 17px; height: 17px;
+  fill: none;
+  stroke: var(--text-faint);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+/* 破坏性操作：红色文字 */
+#settings .st-row-btn.st-danger .st-label { color: #ff8b8b; }
+
+/* 非交互行（状态显示这类） */
+#settings .st-row-plain { cursor: default; }
+
+/* 卡片下方的操作按钮组 */
+#settings .st-actions {
+  display: flex;
+  gap: 9px;
+  margin-top: 9px;
+}
+#settings .st-actions .st-btn { flex: 1 1 0; }
+
+#settings .st-btn {
+  padding: 11px 14px;
+  border-radius: 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 600;
+  transition: background .15s, color .15s;
+}
+#settings .st-btn:active { background: #2b323f; color: var(--text); }
+
+/* 卡片外的提示文字缩进一点，和卡片对齐 */
+#settings .tip { margin: 8px 4px 0; }
+
+/* 兼容老内核：不支持 flex gap 时用 margin 兜底 */
+.ps-no-flex-gap #settings .st-row > * + * { margin-left: 12px; }
+.ps-no-flex-gap #settings .st-row-col > * + * { margin-left: 0; margin-top: 7px; }
+.ps-no-flex-gap #settings .st-actions > * + * { margin-left: 9px; }
