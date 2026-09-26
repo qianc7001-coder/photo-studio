@@ -59,11 +59,35 @@ function api(method, url, body) {
 }
 
 /**
- * 列出「本地 HEAD 相对远程 commit」的改动文件。
+ * 列出「要推送的改动文件」。
+ *
+ * 基准点的选择很关键：
+ *   远程的 commit 可能是通过 API 建的（不在本地对象库里），
+ *   直接 `git diff <远程sha> HEAD` 会报 "bad object"。
+ *   所以优先用本地记录的上次同步点（.git/ps-last-push），
+ *   没有就退回远程 sha，再不行就用「相对 HEAD~1」。
  * 用 -z 输出以 NUL 分隔，避免中文文件名被转义成八进制（踩过的坑）。
  */
-function changedFiles(remoteSha) {
-  const out = git(['diff', '--name-status', '-z', remoteSha, 'HEAD']);
+function diffBase(remoteSha) {
+  const marker = path.join(ROOT, '.git', 'ps-last-push');
+  try {
+    const saved = fs.readFileSync(marker, 'utf8').trim();
+    if (saved) {
+      try { git(['cat-file', '-e', saved + '^{commit}']); return saved; } catch (e) { /* 本地没有 */ }
+    }
+  } catch (e) { /* 首次推送 */ }
+  try { git(['cat-file', '-e', remoteSha + '^{commit}']); return remoteSha; } catch (e) { /* 不在本地 */ }
+  try { return git(['rev-parse', 'HEAD~1']).trim(); } catch (e) { return null; }
+}
+
+/** 记下这次同步到哪，供下次 diff 用 */
+function saveSyncPoint(sha) {
+  try { fs.writeFileSync(path.join(ROOT, '.git', 'ps-last-push'), sha + '\n'); } catch (e) { /* 忽略 */ }
+}
+
+function changedFiles(base) {
+  if (!base) return [];
+  const out = git(['diff', '--name-status', '-z', base, 'HEAD']);
   const parts = out.split('\0').filter((x) => x !== '');
   const files = [];
   for (let i = 0; i < parts.length; i++) {
@@ -99,13 +123,14 @@ function main() {
   }
   const remoteSha = ref.object.sha;
 
-  // 2) 本地 HEAD 相对远程的改动
-  const files = changedFiles(remoteSha);
+  // 2) 算出要推送的改动（基准点见 diffBase 的说明）
+  const base = diffBase(remoteSha);
+  const files = changedFiles(base);
   if (!files.length) {
     console.log('本地与远程一致，无需推送（远程 ' + remoteSha.slice(0, 7) + '）');
     return;
   }
-  console.log(`远程 ${remoteSha.slice(0, 7)} → 本地 HEAD，改动 ${files.length} 个文件：`);
+  console.log(`基准 ${base ? base.slice(0, 7) : '(无)'} → 本地 HEAD，改动 ${files.length} 个文件：`);
   for (const f of files) console.log('  ' + (f.deleted ? '删除 ' : '修改 ') + f.file);
   if (DRY) { console.log('\n[预览] 未实际推送'); return; }
 
@@ -160,6 +185,7 @@ function main() {
     console.error('✗ 更新分支失败：' + ((upd && (upd.message || upd.__raw)) || '未知'));
     process.exit(1);
   }
+  saveSyncPoint(commit.sha);
   console.log('');
   console.log('✓ 已推送 ' + commit.sha.slice(0, 7) + ' → ' + BRANCH);
   console.log('  ' + msg.split('\n')[0]);

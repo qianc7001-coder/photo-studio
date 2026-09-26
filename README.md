@@ -217,6 +217,8 @@ tools/
   bump-version.js 版本号自增守卫
   core-test.js / regression-test.js / e2e-test.js  测试
   insert-block.js 幂等插入测试块（避免重复插入）
+  publish-archive.js 把本地归档发布为 GitHub Release（幂等）
+  push-via-api.js 用 REST API 推送提交（github.com 被拦时的备用通道）
 version.json     版本号与更新说明（唯一来源）
 ```
 
