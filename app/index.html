@@ -35,6 +35,9 @@
     <button class="tb-btn icon" id="btn-save" title="导出" disabled>
       <svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
     </button>
+    <button class="tb-btn icon" id="btn-photoinfo" title="照片信息" disabled>
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5M12 8v.01"/></svg>
+    </button>
     <button class="tb-btn icon" id="btn-library" title="修图记录">
       <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 9v11"/></svg>
       <b id="lib-count" hidden>0</b>
@@ -48,12 +51,20 @@
   <main id="stage">
     <canvas id="cv"></canvas>
 
-    <!-- 空状态 -->
-    <div id="empty">
-      <div class="empty-card">
-        <svg class="empty-ico" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
-        <h2>导入一张照片开始修图</h2>
-        <p>框选任意位置和大小 → 写一句要求 → 生图模型改完自动贴回原处</p>
+    <!-- 首页：修改历史（打开应用先看到修过的照片） -->
+    <div id="home">
+      <div class="home-head">
+        <div class="home-title">修改历史</div>
+        <button class="home-new" id="btn-home-pick">
+          <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+          <span>修新照片</span>
+        </button>
+      </div>
+      <div id="home-list" class="home-list"></div>
+      <div id="home-empty" class="home-empty" hidden>
+        <svg viewBox="0 0 24 24" class="home-empty-ico"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
+        <h2>还没有修图记录</h2>
+        <p>修过的照片会自动留档在这里<br>框选一块 → 写一句要求 → 模型改完自动贴回</p>
         <button class="primary" id="btn-pick">选择照片</button>
         <button class="ghost" id="btn-demo">用示例图试试</button>
       </div>
@@ -121,6 +132,11 @@
         <svg viewBox="0 0 24 24"><path d="M18 11V6a2 2 0 0 0-4 0v5"/><path d="M14 10V4a2 2 0 0 0-4 0v6"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2a8 8 0 0 1-8-8"/></svg>
         <span>平移</span>
       </button>
+      <button class="tool" data-mode="guide" id="btn-guide">
+        <svg viewBox="0 0 24 24"><path d="M4 20 20 4"/><circle cx="4" cy="20" r="2"/><circle cx="20" cy="4" r="2"/><path d="M4 8h4M16 16h4M8 4v4M16 16v4" opacity=".5"/></svg>
+        <span>引导线</span>
+        <b id="guide-count" hidden>0</b>
+      </button>
       <button class="tool" id="btn-fit">
         <svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M16 21h3a2 2 0 0 0 2-2v-3M8 21H5a2 2 0 0 1-2-2v-3"/></svg>
         <span>适应</span>
@@ -151,6 +167,15 @@
       <button class="chip" id="brush-clear">全部重来</button>
     </div>
     <div id="brush-tip" hidden>默认整块选区都会修改。涂抹过的地方会标成灰色，表示「这里不要动」。</div>
+
+    <!-- 引导线参数 -->
+    <div id="guide-bar" hidden>
+      <span class="lbl">类型</span>
+      <div class="chips" id="guide-kinds"></div>
+      <button class="chip" id="guide-clear">清空</button>
+    </div>
+    <div id="guide-tip" hidden>在照片上拖一条线，告诉模型「地平线/主体应该在这里」。
+      比文字描述准确得多 —— 拖完点生成即可。</div>
 
     <!-- 选区参数 -->
     <div id="sel-bar">
@@ -260,6 +285,78 @@
 
 <!-- 作品大图预览 -->
 <div id="work-preview" hidden></div>
+
+<!-- ======================= 照片信息面板 ======================= -->
+<div id="photoinfo" class="sheet" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-body">
+    <div class="sheet-head">
+      <h3>照片信息</h3>
+      <button class="tb-btn icon" data-close>
+        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="sheet-scroll" id="photoinfo-body"></div>
+  </div>
+</div>
+
+<!-- ======================= 导出设置面板 ======================= -->
+<div id="exportpanel" class="sheet" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-body">
+    <div class="sheet-head">
+      <h3>导出</h3>
+      <button class="tb-btn icon" data-close>
+        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="sheet-scroll">
+      <div class="st-group">格式</div>
+      <div class="st-card" id="exp-formats"></div>
+      <div class="st-group">大小（长边像素）</div>
+      <div class="st-card" id="exp-sizes"></div>
+      <div class="st-card" style="margin-top:9px">
+        <label class="st-row" id="exp-custom-row" hidden>
+          <span class="st-label">自定义长边 <i class="st-desc-inline">0 = 不缩放</i></span>
+          <input class="st-input st-input-num" type="number" id="exp-custom" min="0" max="16384" step="100" placeholder="0">
+        </label>
+        <label class="st-row st-row-col" id="exp-quality-row">
+          <span class="st-label">JPEG 质量 <b class="st-badge" id="exp-quality-val">95%</b></span>
+          <input type="range" class="st-range" id="exp-quality" min="60" max="100" value="95">
+        </label>
+        <label class="st-row">
+          <span class="st-label">保留拍摄信息 <i class="st-desc-inline">EXIF：机型/镜头/参数</i></span>
+          <input type="checkbox" class="st-switch" id="exp-exif" checked>
+        </label>
+        <label class="st-row">
+          <span class="st-label">保留定位信息 <i class="st-desc-inline">分享到社交平台建议关闭</i></span>
+          <input type="checkbox" class="st-switch" id="exp-gps" checked>
+        </label>
+        <label class="st-row">
+          <span class="st-label">保留色彩配置 <i class="st-desc-inline">ICC：保证颜色一致</i></span>
+          <input type="checkbox" class="st-switch" id="exp-icc" checked>
+        </label>
+      </div>
+      <div class="st-group">这次导出</div>
+      <div class="st-card">
+        <div class="st-row st-row-plain">
+          <span class="st-label">输出尺寸</span>
+          <span class="st-value-text" id="exp-out-size">—</span>
+        </div>
+        <div class="st-row st-row-plain">
+          <span class="st-label">预计体积</span>
+          <span class="st-value-text" id="exp-out-size-est">—</span>
+        </div>
+      </div>
+      <div class="tip" id="exp-hint"></div>
+      <div class="st-actions" style="margin-top:14px">
+        <button class="primary" id="exp-do" style="flex:1 1 auto">导出这张</button>
+      </div>
+      <div class="tip">导出用的是当前画面（含所有已应用的修改）。
+        若工作分辨率低于原图，会先按原图尺寸重新合成一遍再导出，保证清晰度。</div>
+    </div>
+  </div>
+</div>
 
 <!-- ======================= 设置面板 ======================= -->
 <div id="settings" class="sheet" hidden>

@@ -1113,6 +1113,472 @@ t('estimateCalls', C.estimateCalls({x:0,y:0,w:3000,h:3000},{maxSide:1400,overlap
 
 
 /* ---------- 环境契合提示词 ---------- */
+// ===== 照片信息 · 引导线 · 导出设置（测试块） =====
+(() => {
+  /* ---------- 功能 1：照片信息（EXIF 解析 + 展示分组） ---------- */
+
+  /** 造一个最小可用的 little-endian TIFF：IFD0 + ExifIFD */
+  function makeTiff(entries0, entriesExif) {
+    // 布局：[头 8B][IFD0][IFD0 数据区][ExifIFD][ExifIFD 数据区]
+    const HEAD = 8;
+    const ifd0Size = 2 + entries0.length * 12 + 4;
+    const ifd0Off = HEAD;
+    const data0Off = ifd0Off + ifd0Size;
+    // 先算 IFD0 数据区大小
+    const dataOf = (entries) => {
+      let n = 0;
+      for (const e of entries) {
+        if (e.type === 2) n += e.str.length + 1;
+        else if (e.type === 5 || e.type === 10) n += 8;
+        else if (e.type === 3) n += 2;
+        else if (e.type === 4 || e.type === 9) n += 4;
+      }
+      return n;
+    };
+    const exifOff = data0Off + dataOf(entries0);
+    const exifSize = 2 + entriesExif.length * 12 + 4;
+    const dataExifOff = exifOff + exifSize;
+    const total = dataExifOff + dataOf(entriesExif);
+
+    const b = new Uint8Array(total);
+    const dv = new DataView(b.buffer);
+    b[0] = 0x49; b[1] = 0x49; b[2] = 0x2a; b[3] = 0x00;   // II, 42
+    dv.setUint32(4, ifd0Off, true);
+
+    const writeIfd = (off, entries, dataOff) => {
+      dv.setUint16(off, entries.length, true);
+      let cursor = dataOff;
+      entries.forEach((e, i) => {
+        const eo = off + 2 + i * 12;
+        dv.setUint16(eo, e.tag, true);
+        dv.setUint16(eo + 2, e.type, true);
+        if (e.type === 2) {
+          dv.setUint32(eo + 4, e.str.length + 1, true);
+          if (e.str.length + 1 <= 4) {
+            for (let k = 0; k < e.str.length; k++) b[eo + 8 + k] = e.str.charCodeAt(k);
+          } else {
+            dv.setUint32(eo + 8, cursor, true);
+            for (let k = 0; k < e.str.length; k++) b[cursor + k] = e.str.charCodeAt(k);
+            cursor += e.str.length + 1;
+          }
+        } else if (e.type === 3) {
+          dv.setUint32(eo + 4, 1, true);
+          dv.setUint16(eo + 8, e.v, true);
+        } else if (e.type === 4) {
+          dv.setUint32(eo + 4, 1, true);
+          dv.setUint32(eo + 8, e.v, true);
+        } else if (e.type === 5) {
+          dv.setUint32(eo + 4, 1, true);
+          dv.setUint32(eo + 8, cursor, true);
+          dv.setUint32(cursor, e.num, true);
+          dv.setUint32(cursor + 4, e.den, true);
+          cursor += 8;
+        }
+      });
+      dv.setUint32(off + 2 + entries.length * 12, 0, true);   // 无下一个 IFD
+    };
+    writeIfd(ifd0Off, entries0, data0Off);
+    writeIfd(exifOff, entriesExif, dataExifOff);
+    return b;
+  }
+
+  const tiff = makeTiff([
+    { tag: 0x010F, type: 2, str: 'Canon' },
+    { tag: 0x0110, type: 2, str: 'Canon EOS R5' },
+    { tag: 0x0112, type: 3, v: 1 },
+    { tag: 0x0131, type: 2, str: 'Firmware 1.8.1' },
+    { tag: 0x8769, type: 4, v: 8 + (2 + 5 * 12 + 4) + 0 }   // ExifIFD 指针（占位，下面修正）
+  ], [
+    { tag: 0x829A, type: 5, num: 1, den: 500 },
+    { tag: 0x829D, type: 5, num: 28, den: 10 },
+    { tag: 0x8827, type: 3, v: 800 },
+    { tag: 0x9003, type: 2, str: '2024:09:23 15:42:07' },
+    { tag: 0x920A, type: 5, num: 85, den: 1 },
+    { tag: 0xA434, type: 2, str: 'RF85mm F1.2 L USM' }
+  ]);
+  // 修正 ExifIFD 指针（= 头 + IFD0 + IFD0 数据区）
+  (() => {
+    const dv = new DataView(tiff.buffer);
+    const dataOf0 = 6 + 13 + 2 + 15 + 4;              // Canon / EOS R5 / SHORT / Firmware / LONG
+    dv.setUint32(8 + 2 + 4 * 12 + 8, 8 + (2 + 5 * 12 + 4) + dataOf0, true);
+  })();
+
+  const ex = C.parseExifFields(tiff);
+  t('EXIF 厂商', ex.make === 'Canon', ex.make);
+  t('EXIF 机型', ex.model === 'Canon EOS R5', ex.model);
+  t('EXIF 镜头', ex.lensModel === 'RF85mm F1.2 L USM', ex.lensModel);
+  t('EXIF 快门 1/500', Math.abs(ex.exposureTime - 0.002) < 1e-9, ex.exposureTime);
+  t('EXIF 光圈 f/2.8', Math.abs(ex.fNumber - 2.8) < 1e-9, ex.fNumber);
+  t('EXIF ISO 800', ex.iso === 800, ex.iso);
+  t('EXIF 焦距 85mm', Math.abs(ex.focalLength - 85) < 1e-9, ex.focalLength);
+  t('EXIF 拍摄时间', ex.dateTimeOriginal === '2024:09:23 15:42:07', ex.dateTimeOriginal);
+  t('EXIF 软件', ex.software === 'Firmware 1.8.1', ex.software);
+  // 容错：损坏 / 空数据不能抛错
+  t('EXIF 空数据返回 {}', Object.keys(C.parseExifFields(null)).length === 0);
+  t('EXIF 短数据返回 {}', Object.keys(C.parseExifFields(new Uint8Array(3))).length === 0);
+  t('EXIF 非法头返回 {}', Object.keys(C.parseExifFields(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]))).length === 0);
+  t('EXIF 截断数据不抛错', (() => {
+    try { C.parseExifFields(tiff.slice(0, 20)); return true; } catch (e) { return false; }
+  })());
+
+  // 时间格式化
+  t('EXIF 时间 冒号→横线', C.formatExifDate('2024:09:23 15:42:07') === '2024-09-23 15:42:07');
+  t('EXIF 时间 空值', C.formatExifDate('') === '' && C.formatExifDate(null) === '');
+  t('EXIF 时间 非标准格式原样返回', C.formatExifDate('2024-09-23') === '2024-09-23');
+
+  // 展示分组
+  const groups = C.describePhotoInfo({
+    exif: ex, width: 8192, height: 5464, sizeBytes: 24 * 1024 * 1024,
+    fileName: 'DSC01234.jpg', mime: 'image/jpeg', icc: true, iccIsSrgb: true
+  });
+  const gname = groups.map((g) => g.group);
+  t('信息分组含文件', gname.indexOf('文件') >= 0, gname);
+  t('信息分组含拍摄设备', gname.indexOf('拍摄设备') >= 0, gname);
+  t('信息分组含拍摄参数', gname.indexOf('拍摄参数') >= 0, gname);
+  t('信息分组含时间', gname.indexOf('时间') >= 0, gname);
+  const find = (g, label) => {
+    const grp = groups.find((x) => x.group === g);
+    if (!grp) return null;
+    const it = grp.items.find((x) => x.label === label);
+    return it ? it.value : null;
+  };
+  t('显示尺寸', find('文件', '尺寸') === '8192 × 5464 像素', find('文件', '尺寸'));
+  t('显示像素数', find('文件', '像素数') === '44.8 MP', find('文件', '像素数'));
+  t('显示机型不重复厂商名', find('拍摄设备', '相机 / 手机') === 'Canon EOS R5', find('拍摄设备', '相机 / 手机'));
+  t('显示光圈', find('拍摄参数', '光圈') === 'f/2.8', find('拍摄参数', '光圈'));
+  t('显示快门为分数', find('拍摄参数', '快门') === '1/500 秒', find('拍摄参数', '快门'));
+  t('显示 ISO', find('拍摄参数', 'ISO') === 'ISO 800', find('拍摄参数', 'ISO'));
+  t('显示焦距', find('拍摄参数', '焦距') === '85 mm', find('拍摄参数', '焦距'));
+  t('显示拍摄时间（已格式化）', find('时间', '拍摄时间') === '2024-09-23 15:42:07', find('时间', '拍摄时间'));
+  t('显示色彩配置', find('色彩与方向', '色彩配置') === 'sRGB（标准）', find('色彩与方向', '色彩配置'));
+  // 厂商名已在机型里时不再重复拼
+  t('机型含厂商时不重复', (() => {
+    const g = C.describePhotoInfo({ exif: { make: 'SONY', model: 'SONY ILCE-7M4' } });
+    const grp = g.find((x) => x.group === '拍摄设备');
+    return grp.items[0].value === 'SONY ILCE-7M4';
+  })());
+  // 空 EXIF：只显示文件信息，不崩
+  t('无 EXIF 时只剩文件组', (() => {
+    const g = C.describePhotoInfo({ width: 100, height: 100, fileName: 'a.png' });
+    return g.length === 1 && g[0].group === '文件';
+  })());
+  t('完全空参数不崩', Array.isArray(C.describePhotoInfo()) && C.describePhotoInfo().length === 0);
+  // GPS 只提示不显示坐标（隐私）
+  t('有 GPS 时提示隐私', (() => {
+    const g = C.describePhotoInfo({ exif: { hasGps: true }, width: 10, height: 10 });
+    const grp = g.find((x) => x.group === '隐私');
+    return !!grp && /GPS/.test(grp.items[0].value);
+  })());
+  t('无 GPS 时不出现隐私组',
+    C.describePhotoInfo({ exif: {}, width: 10, height: 10 }).every((g) => g.group !== '隐私'));
+  // 曝光时间 >= 1 秒时不用分数（长曝光）
+  t('长曝光显示秒数', (() => {
+    const g = C.describePhotoInfo({ exif: { exposureTime: 30 }, width: 10, height: 10 });
+    return g.find((x) => x.group === '拍摄参数').items[0].value === '30.0 秒';
+  })());
+  // 等效焦距与原焦距差 1mm 以内时不重复显示
+  t('等效焦距接近时不重复', (() => {
+    const g = C.describePhotoInfo({ exif: { focalLength: 85, focalLength35: 85.4 }, width: 10, height: 10 });
+    return g.find((x) => x.group === '拍摄参数').items[0].value === '85 mm';
+  })());
+  t('等效焦距差异大时显示', (() => {
+    const g = C.describePhotoInfo({ exif: { focalLength: 50, focalLength35: 75 }, width: 10, height: 10 });
+    return g.find((x) => x.group === '拍摄参数').items[0].value === '50 mm（等效 75 mm）';
+  })());
+
+  /* ---------- 功能 3：引导线 ---------- */
+
+  t('引导线类型有 4 种', C.GUIDE_KINDS.length === 4);
+  t('取引导线类型', C.getGuideKind('vertical').zh === '垂直线');
+  t('未知类型退化为第一种', C.getGuideKind('nope').id === 'horizon');
+  t('未知类型 null 也不崩', C.getGuideKind(null).id === 'horizon');
+  // 归一化：夹取端点
+  t('归一化夹取越界端点', (() => {
+    const g = C.normalizeGuide({ kind: 'horizon', x1: -1, y1: 2, x2: 3, y2: -5 });
+    return g.x1 === 0 && g.y1 === 1 && g.x2 === 1 && g.y2 === 0;
+  })());
+  t('归一化补齐缺失字段', (() => {
+    const g = C.normalizeGuide({});
+    return g.kind === 'horizon' && g.x1 === 0 && g.y1 === 0 && g.x2 === 0 && g.y2 === 0;
+  })());
+  t('归一化空值不崩', C.normalizeGuide(null).kind === 'horizon');
+
+  t('水平判定', C.guideOrientation({ x1: 0, y1: .5, x2: 1, y2: .5 }) === 'horizontal');
+  t('垂直判定', C.guideOrientation({ x1: .5, y1: 0, x2: .5, y2: 1 }) === 'vertical');
+  t('斜向判定', C.guideOrientation({ x1: 0, y1: 0, x2: 1, y2: 1 }) === 'diagonal');
+  t('点判定（零长度）', C.guideOrientation({ x1: .5, y1: .5, x2: .5, y2: .5 }) === 'point');
+
+  // 构图说明
+  const gdesc = C.describeGuides({
+    guides: [{ kind: 'horizon', x1: 0, y1: .62, x2: 1, y2: .62 }], isZh: true
+  });
+  t('引导线说明含百分比位置', /62%/.test(gdesc), gdesc);
+  t('引导线说明含「构图引导」', /构图引导/.test(gdesc));
+  t('引导线说明含地平线', /地平线/.test(gdesc));
+  t('引导线说明要求不要画出线条', /不要.*画出任何线条/.test(gdesc));
+  t('三分法位置会点名', /三分之一处|三分之二处/.test(C.describeGuides({
+    guides: [{ kind: 'horizon', x1: 0, y1: 1 / 3, x2: 1, y2: 1 / 3 }], isZh: true
+  })));
+  t('居中位置会点名', /居中/.test(C.describeGuides({
+    guides: [{ kind: 'vertical', x1: .5, y1: 0, x2: .5, y2: 1 }], isZh: true
+  })));
+  t('英文版输出英文', /Composition guides/.test(C.describeGuides({
+    guides: [{ kind: 'horizon', x1: 0, y1: .6, x2: 1, y2: .6 }], isZh: false
+  })));
+  t('空引导线返回空串', C.describeGuides({ guides: [], isZh: true }) === '');
+  t('无参数返回空串', C.describeGuides() === '');
+  t('主体位置类型有专门文案', /主体应出现/.test(C.describeGuides({
+    guides: [{ kind: 'subject', x1: .3, y1: .4, x2: .3, y2: .4 }], isZh: true
+  })));
+  t('斜线类型有专门文案', /斜向引导线/.test(C.describeGuides({
+    guides: [{ kind: 'diagonal', x1: 0, y1: 1, x2: 1, y2: 0 }], isZh: true
+  })));
+  t('多条引导线都写进说明', (() => {
+    const d = C.describeGuides({
+      guides: [
+        { kind: 'horizon', x1: 0, y1: .3, x2: 1, y2: .3 },
+        { kind: 'vertical', x1: .7, y1: 0, x2: .7, y2: 1 }
+      ], isZh: true
+    });
+    return /地平线/.test(d) && /垂直参考线/.test(d) && /2 条/.test(d);
+  })());
+
+  // 坐标换算：引导线存在「相对选区」的坐标系里，发请求前必须换算到请求图坐标
+  t('mapGuides 无外扩时原样', (() => {
+    const r = C.mapGuidesToRequest({
+      guides: [{ kind: 'horizon', x1: 0, y1: .5, x2: 1, y2: .5 }],
+      rect: { x: 0, y: 0, w: 100, h: 100 }, ctxRect: { x: 0, y: 0, w: 100, h: 100 }
+    });
+    return r.length === 1 && Math.abs(r[0].y1 - .5) < 1e-9 && Math.abs(r[0].y2 - .5) < 1e-9;
+  })());
+  // 关键：有上下文外扩时必须补偿，否则引导线位置整体偏移
+  t('mapGuides 外扩时补偿偏移', (() => {
+    const r = C.mapGuidesToRequest({
+      guides: [{ kind: 'horizon', x1: 0, y1: .5, x2: 1, y2: .5 }],
+      rect: { x: 100, y: 100, w: 100, h: 100 },
+      ctxRect: { x: 88, y: 88, w: 124, h: 124 }     // 上下左右各外扩 12
+    });
+    // 引导线在文档坐标 y = 100 + 50 = 150 → 请求图 (150-88)/124 = 0.5
+    return Math.abs(r[0].y1 - 0.5) < 1e-9;
+  })());
+  t('mapGuides 外扩时横向也补偿', (() => {
+    const r = C.mapGuidesToRequest({
+      guides: [{ kind: 'vertical', x1: .25, y1: 0, x2: .25, y2: 1 }],
+      rect: { x: 100, y: 100, w: 100, h: 100 },
+      ctxRect: { x: 88, y: 88, w: 124, h: 124 }
+    });
+    // x = 100 + 25 = 125 → (125-88)/124
+    return Math.abs(r[0].x1 - (37 / 124)) < 1e-9;
+  })());
+  t('mapGuides 结果夹在 0~1', (() => {
+    const r = C.mapGuidesToRequest({
+      guides: [{ kind: 'horizon', x1: -5, y1: -5, x2: 9, y2: 9 }],
+      rect: { x: 0, y: 0, w: 100, h: 100 }, ctxRect: { x: 0, y: 0, w: 100, h: 100 }
+    });
+    return r[0].x1 === 0 && r[0].y1 === 0 && r[0].x2 === 1 && r[0].y2 === 1;
+  })());
+  t('mapGuides 空列表返回空数组', C.mapGuidesToRequest({ guides: [], rect: {}, ctxRect: {} }).length === 0);
+  t('mapGuides 无参数不崩', C.mapGuidesToRequest().length === 0);
+  // 分块：块外的线必须丢掉，否则 clamp 会把它压到边缘，模型以为「地平线在图最上边」
+  t('分块时丢掉块外的引导线', (() => {
+    const r = C.mapGuidesToRequest({
+      guides: [{ kind: 'horizon', x1: 0, y1: .05, x2: 1, y2: .05 }],
+      rect: { x: 0, y: 0, w: 200, h: 200 },
+      ctxRect: { x: 0, y: 100, w: 200, h: 100 },   // 只看下半块
+      clip: true
+    });
+    return r.length === 0;
+  })());
+  t('分块时保留块内的引导线', (() => {
+    const r = C.mapGuidesToRequest({
+      guides: [{ kind: 'horizon', x1: 0, y1: .75, x2: 1, y2: .75 }],
+      rect: { x: 0, y: 0, w: 200, h: 200 },
+      ctxRect: { x: 0, y: 100, w: 200, h: 100 },
+      clip: true
+    });
+    return r.length === 1 && Math.abs(r[0].y1 - 0.5) < 1e-9;
+  })());
+  t('不开 clip 时行为不变（向后兼容）', (() => {
+    const r = C.mapGuidesToRequest({
+      guides: [{ kind: 'horizon', x1: 0, y1: .05, x2: 1, y2: .05 }],
+      rect: { x: 0, y: 0, w: 200, h: 200 },
+      ctxRect: { x: 0, y: 100, w: 200, h: 100 }
+    });
+    return r.length === 1 && r[0].y1 === 0;
+  })());
+
+  // buildPrompt 接入引导线
+  const gp = C.buildPrompt({
+    instruction: '换天空', language: 'zh', scope: 'region',
+    guideDesc: '【构图引导】地平线在 62%'
+  });
+  t('buildPrompt 带上引导线说明', /构图引导/.test(gp), gp.slice(0, 80));
+  t('buildPrompt 没有引导线时不受影响', !/构图引导/.test(C.buildPrompt({ instruction: '换天空', language: 'zh' })));
+  t('引导线说明排在「只改动」之前（模型更当回事）', (() => {
+    const s2 = C.buildPrompt({ instruction: 'x', language: 'zh', guideDesc: '引导段' });
+    return s2.indexOf('引导段') < s2.indexOf('只改动上面描述的内容');
+  })());
+
+  /* ---------- 功能 4：导出设置（格式 / 大小） ---------- */
+
+  t('导出格式含 JPEG', C.EXPORT_FORMATS.some((f) => f.id === 'jpeg'));
+  t('导出格式含 PNG', C.EXPORT_FORMATS.some((f) => f.id === 'png'));
+  t('导出尺寸档位非空', C.EXPORT_SIZES.length > 0);
+  t('尺寸档位含原图', C.EXPORT_SIZES.some((s2) => s2.maxSide === 0));
+  // 界面从「原始尺寸」往下排，所以正数档位是降序的（大 → 小）
+  t('尺寸档位按从大到小', (() => {
+    const v = C.EXPORT_SIZES.map((s2) => s2.maxSide).filter((x) => x > 0);
+    for (let i = 1; i < v.length; i++) if (v[i] > v[i - 1]) return false;
+    return true;
+  })());
+  t('原始尺寸排在第一个', C.EXPORT_SIZES[0].maxSide === 0);
+
+  const cp = C.makeCustomPreset({ format: 'jpeg', maxSide: 2000, quality: 0.9 });
+  t('自定义预设 id', cp.id === 'custom');
+  t('自定义预设格式', cp.format === 'jpeg');
+  t('自定义预设长边', cp.maxSide === 2000);
+  t('自定义预设质量', Math.abs(cp.quality - 0.9) < 1e-9);
+  t('PNG 时质量无意义置 1', C.makeCustomPreset({ format: 'png', quality: 0.7 }).quality === 1);
+  t('质量低于 60% 被抬到 60%', Math.abs(C.makeCustomPreset({ format: 'jpeg', quality: 0.1 }).quality - 0.6) < 1e-9);
+  t('质量高于 1 被夹到 1', C.makeCustomPreset({ format: 'jpeg', quality: 5 }).quality === 1);
+  t('长边负数夹到 0', C.makeCustomPreset({ maxSide: -100 }).maxSide === 0);
+  t('长边超大夹到 16384', C.makeCustomPreset({ maxSide: 999999 }).maxSide === 16384);
+  t('未知格式退化为 JPEG', C.makeCustomPreset({ format: 'bmp' }).format === 'jpeg');
+  t('自定义预设默认保留元数据', (() => {
+    const p = C.makeCustomPreset({});
+    return p.keepExif === true && p.keepGps === true && p.keepIcc === true;
+  })());
+  t('自定义预设可关闭元数据', C.makeCustomPreset({ keepExif: false }).keepExif === false);
+  t('空参数不崩', C.makeCustomPreset().id === 'custom');
+
+  // 尺寸规划 + 提示
+  const h1 = C.planExportWithHint(6000, 4000, C.makeCustomPreset({ maxSide: 2000 }));
+  t('缩放：6000→2000', h1.w === 2000 && h1.h === 1333, [h1.w, h1.h]);
+  t('缩放时给出说明', /2000/.test(h1.hint), h1.hint);
+  // 关键：小图不能放大（会糊）
+  const h2 = C.planExportWithHint(1200, 800, C.makeCustomPreset({ maxSide: 4000 }));
+  t('小图不放大', h2.w === 1200 && h2.h === 800, [h2.w, h2.h]);
+  t('不放大时说明为什么', /原图|放大|1200/.test(h2.hint), h2.hint);
+  const h3 = C.planExportWithHint(3000, 2000, C.makeCustomPreset({ maxSide: 0 }));
+  t('原尺寸不缩放', h3.w === 3000 && h3.h === 2000);
+  t('尺寸规划空参数不崩', C.planExportWithHint(0, 0, null).w >= 0);
+
+  // 体积预估
+  const eJ = C.estimateExportSize({ w: 3000, h: 2000, format: 'jpeg', quality: 0.95 });
+  t('JPEG 体积预估有数字', eJ.bytes > 0, eJ);
+  t('JPEG 体积预估有文案', typeof eJ.text === 'string' && eJ.text.length > 0, eJ.text);
+  const eP = C.estimateExportSize({ w: 3000, h: 2000, format: 'png' });
+  t('PNG 预估大于同尺寸 JPEG', eP.bytes > eJ.bytes, [eP.bytes, eJ.bytes]);
+  t('体积随尺寸增长', C.estimateExportSize({ w: 6000, h: 4000, format: 'jpeg', quality: 0.95 }).bytes >
+    C.estimateExportSize({ w: 1500, h: 1000, format: 'jpeg', quality: 0.95 }).bytes);
+  t('JPEG 质量越高体积越大', C.estimateExportSize({ w: 3000, h: 2000, format: 'jpeg', quality: 1 }).bytes >
+    C.estimateExportSize({ w: 3000, h: 2000, format: 'jpeg', quality: 0.6 }).bytes);
+  t('体积预估空参数不崩', C.estimateExportSize().bytes >= 0);
+
+  // planExportMetadata 尊重面板选项
+  const fakeMeta = { source: 'jpeg', exif: { make: 'Canon' }, icc: new Uint8Array([1]), iccIsSrgb: true };
+  t('关闭 EXIF 时不写入', C.planExportMetadata(fakeMeta, C.makeCustomPreset({ keepExif: false })).exif === null);
+  t('保留 EXIF 时写入', C.planExportMetadata(fakeMeta, C.makeCustomPreset({ keepExif: true })).exif !== null);
+  t('关闭 ICC 时不写入', C.planExportMetadata(fakeMeta, C.makeCustomPreset({ keepIcc: false })).icc === null);
+
+  /* ---------- 界面接线（防止逻辑写好了但没接上） ---------- */
+  const fs7 = require('fs');
+  const appSrc7 = fs7.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html7 = fs7.readFileSync(__dirname + '/../app/index.html', 'utf8');
+  const css7 = fs7.readFileSync(__dirname + '/../app/style.css', 'utf8');
+
+  // 首页 = 修改历史
+  t('HTML 有首页容器', /id="home"/.test(html7));
+  t('首页标题是「修改历史」', /修改历史/.test(html7));
+  t('首页可跳去修新照片', /id="btn-home-pick"/.test(html7));
+  t('首页复用作品库数据', /C\.groupWorksByDay\(S\.library/.test(appSrc7));
+  t('有照片时首页自动收起', /const showHome = !S\.img;/.test(appSrc7));
+  t('启动时渲染首页', /bind\(\);[\s\S]{0,300}renderHome\(\)/.test(appSrc7));
+  t('启动时同步工具栏', /bind\(\);[\s\S]{0,300}syncToolbar\(\)/.test(appSrc7));
+  t('打开照片后展开工具栏', /renderHome\(\);\s*\n\s*syncToolbar\(\);/.test(appSrc7));
+  t('收起用 class 保留过渡动画', /classList\.toggle\('collapsed', !visible\)/.test(appSrc7));
+  t('CSS 有收起态', /#bottombar\.collapsed/.test(css7));
+
+  // 照片信息
+  t('顶栏有照片信息按钮', /id="btn-photoinfo"/.test(html7));
+  t('有照片信息面板', /id="photoinfo"/.test(html7));
+  t('没照片时按钮禁用', /piBtn\.disabled = !S\.img;/.test(appSrc7));
+  t('按钮绑定打开面板', /\$\('btn-photoinfo'\)\.onclick = openPhotoInfo;/.test(appSrc7));
+  t('面板可关闭', /#photoinfo \[data-close\]/.test(appSrc7));
+  t('用 describePhotoInfo 渲染', /C\.describePhotoInfo\(/.test(appSrc7));
+
+  // 引导线
+  t('工具行有引导线按钮', /id="btn-guide"/.test(html7));
+  t('引导线按钮带 data-mode', /data-mode="guide" id="btn-guide"/.test(html7));
+  t('有类型选择条', /id="guide-kinds"/.test(html7));
+  t('有清空按钮', /id="guide-clear"/.test(html7));
+  t('有数量角标', /id="guide-count"/.test(html7));
+  // 引导线会进提示词，所以必须常显（非引导模式下淡化），否则用户会忘了自己画过
+  t('画布上会画引导线', /if \(S\.guides\.length && S\.rect\) drawGuides\(S\.mode !== 'guide'\);/.test(appSrc7));
+  t('非引导线模式下淡化显示', /function drawGuides\(dim\)/.test(appSrc7));
+  t('引导线只在选区内画', /引导线只能画在选区内/.test(appSrc7));
+  t('引导线存入状态', /S\.guides\.push\(draft\)/.test(appSrc7));
+  t('点已有引导线可删除', /S\.guides\.splice\(hitIdx, 1\)/.test(appSrc7));
+  t('太短的手抖轨迹会丢弃', /S\.guides\.pop\(\)/.test(appSrc7));
+  t('抬手后对齐方向', /C\.snapGuide\(d\)/.test(appSrc7));
+  // 吸附：手抖出来的小斜角必须被拉直，否则模型会以为「地平线是斜的」
+  t('吸附拉平小斜角', (() => {
+    const g = C.snapGuide({ kind: 'horizon', x1: 0.1, y1: 0.5, x2: 0.9, y2: 0.52 });
+    return Math.abs(g.y2 - g.y1) < 1e-9;
+  })());
+  t('吸附拉直小偏角', (() => {
+    const g = C.snapGuide({ kind: 'vertical', x1: 0.5, y1: 0.1, x2: 0.52, y2: 0.9 });
+    return Math.abs(g.x2 - g.x1) < 1e-9;
+  })());
+  // 关键：透视下的地平线本来就可能斜，超过阈值不能强行掰直
+  t('大角度斜线保持原样', (() => {
+    const g = C.snapGuide({ kind: 'diagonal', x1: 0, y1: 1, x2: 1, y2: 0 });
+    return g.x1 === 0 && g.y1 === 1 && g.x2 === 1 && g.y2 === 0;
+  })());
+  t('竖着画的「地平线」改判为垂直线', (() => {
+    const g = C.snapGuide({ kind: 'horizon', x1: 0.5, y1: 0.1, x2: 0.5, y2: 0.9 });
+    return g.kind === 'vertical';
+  })());
+  t('横着画的「垂直线」改判为地平线', (() => {
+    const g = C.snapGuide({ kind: 'vertical', x1: 0.1, y1: 0.5, x2: 0.9, y2: 0.5 });
+    return g.kind === 'horizon';
+  })());
+  t('零长度线不崩', (() => {
+    const g = C.snapGuide({ kind: 'horizon', x1: 0.5, y1: 0.5, x2: 0.5, y2: 0.5 });
+    return g.x1 === 0.5 && g.y1 === 0.5;
+  })());
+  t('吸附空值不崩', C.snapGuide(null).kind === 'horizon');
+  t('吸附后端点仍在 0~1', (() => {
+    const g = C.snapGuide({ kind: 'horizon', x1: -1, y1: 5, x2: 2, y2: 5 });
+    return g.x1 >= 0 && g.x2 <= 1 && g.y1 >= 0 && g.y2 <= 1;
+  })());
+  t('换选区会清掉引导线', /S\.guides = \[\];/.test(appSrc7));
+  t('换图会清掉引导线', /S\.guides = \[\];\s*\/\/ 引导线跟着选区走/.test(appSrc7));
+  t('引导线写进会话存档', /guides: S\.guides,/.test(appSrc7));
+  t('恢复会话时读回引导线', /j\.guides\.map\(C\.normalizeGuide\)/.test(appSrc7));
+  t('提示词里带上引导线', /guideDesc/.test(appSrc7));
+  t('请求前换算到请求图坐标', /C\.mapGuidesToRequest\(/.test(appSrc7));
+
+  // 导出面板
+  t('有导出面板', /id="exportpanel"/.test(html7));
+  t('面板里有格式选择', /id="exp-formats"/.test(html7));
+  t('面板里有大小选择', /id="exp-sizes"/.test(html7));
+  t('面板里有自定义长边输入', /id="exp-custom"/.test(html7));
+  t('面板里有质量滑块', /id="exp-quality"/.test(html7));
+  t('面板里有导出按钮', /id="exp-do"/.test(html7));
+  t('显示输出尺寸', /id="exp-out-size"/.test(html7));
+  t('显示预计体积', /id="exp-out-size-est"/.test(html7));
+  t('保存按钮打开导出面板', /\$\('btn-save'\)\.onclick = openExportPanel;/.test(appSrc7));
+  t('导出按钮绑定导出', /\$\('exp-do'\)\.onclick/.test(appSrc7));
+  t('导出用面板里的设置', /exportImage\(currentExportPreset\(\)\)/.test(appSrc7));
+  t('面板选择会被记住', /S\.cfg\.expFormat = expFormat;/.test(appSrc7));
+  t('面板字段纳入持久化', /'expFormat', 'expMaxSide', 'expQuality'/.test(appSrc7));
+  t('面板字段有类型校正（防脏数据）', /c\.expQuality = clampNum\(c\.expQuality, 60, 100, 95\);/.test(appSrc7));
+  t('面板设置不影响设置页预设', !/S\.cfg\.exportPreset = 'custom';/.test(appSrc7));
+  t('CSS 有导出面板样式', /#exportpanel/.test(css7));
+})();
+/* ---------- 照片信息 / 引导线 / 导出设置 ---------- */
+
 // ===== 检查更新（测试块） =====
 (() => {
   // 1) 版本号解析

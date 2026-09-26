@@ -358,7 +358,9 @@ async function run() {
 
   t('图片已载入', S.imgW === 400 && S.imgH === 300, [S.imgW, S.imgH]);
   t('文档尺寸 = 原图', S.docW === 400 && S.docH === 300, [S.docW, S.docH]);
-  t('空状态已隐藏', doc.getElementById('empty').hidden === true);
+  // 首页（修改历史）在打开照片后必须收起，否则会盖住画布
+  t('首页已收起', doc.getElementById('home').hidden === true);
+  t('工具栏已展开', doc.getElementById('bottombar').classList.contains('collapsed') === false);
   t('导出按钮启用', doc.getElementById('btn-save').disabled === false);
 
   console.log('   [探针] viewCanvas=', !!S.viewCanvas, 'real=', !!(S.viewCanvas && S.viewCanvas.__real), 'size=', S.viewCanvas && S.viewCanvas.__real ? [S.viewCanvas.__real.width, S.viewCanvas.__real.height] : null);
@@ -1245,8 +1247,8 @@ async function run() {
 
   // 1) 微信预设：应缩到长边 2000
   S.cfg.exportPreset = 'wechat';
-  doc.getElementById('btn-save').dispatchEvent(new window.Event('click'));
-  await sleep(900);
+  S.cfg.expPresetChosen = false;   // 清掉面板记忆，走「首次跟随预设」
+  await clickExport(900);
   t('微信预设导出了文件', !!epBlob);
   if (epBlob) {
     const buf = Buffer.from(await epBlob.arrayBuffer());
@@ -1272,8 +1274,8 @@ async function run() {
   // 2) 原尺寸预设：不应缩放
   epBlob = null;
   S.cfg.exportPreset = 'full';
-  doc.getElementById('btn-save').dispatchEvent(new window.Event('click'));
-  await sleep(1200);
+  S.cfg.expPresetChosen = false;   // 让面板重新跟随预设
+  await clickExport(1200);
   t('原尺寸预设导出了文件', !!epBlob);
   if (epBlob) {
     const buf = Buffer.from(await epBlob.arrayBuffer());
@@ -1284,8 +1286,8 @@ async function run() {
   // 3) 网页预设：不保留元数据
   epBlob = null;
   S.cfg.exportPreset = 'web';
-  doc.getElementById('btn-save').dispatchEvent(new window.Event('click'));
-  await sleep(900);
+  S.cfg.expPresetChosen = false;
+  await clickExport(900);
   t('网页预设导出了文件', !!epBlob);
   if (epBlob) {
     const buf = Buffer.from(await epBlob.arrayBuffer());
@@ -1591,6 +1593,15 @@ async function run() {
   t('1:1 比例已应用', Math.abs(S.rect.w / S.rect.h - 1) < 0.06, S.rect.w / S.rect.h);
   t('比例按钮高亮', chip11.classList.contains('on'));
 
+  /** 点导出：先打开导出面板，再确认导出（导出入口已改为面板） */
+  async function clickExport(wait) {
+    doc.getElementById('btn-save').dispatchEvent(new window.Event('click'));
+    await sleep(120);
+    const doBtn = doc.getElementById('exp-do');
+    if (doBtn) doBtn.dispatchEvent(new window.Event('click'));
+    await sleep(wait || 700);
+  }
+
   /* ---------- 导出 ---------- */
   console.log('\n【13】导出');
   let exported = null, exportedSize = 0;
@@ -1602,9 +1613,19 @@ async function run() {
   };
   window.URL.createObjectURL = (b) => { exportedSize = b.size || 0; return 'blob:fake'; };
   window.URL.revokeObjectURL = () => { };
-  S.cfg.format = 'png';
+  // 面板里选 PNG + 原尺寸，验证导出真的用了面板里的设置
+  S.cfg.exportPreset = 'full';
   doc.getElementById('btn-save').dispatchEvent(new window.Event('click'));
+  await sleep(120);
+  t('导出面板已打开', doc.getElementById('exportpanel').hidden === false);
+  t('面板默认跟随设置页预设（JPEG）',
+    doc.querySelector('#exp-formats .selected .st-label').textContent.indexOf('JPEG') >= 0);
+  doc.querySelector('#exp-formats [data-fmt="png"]').dispatchEvent(new window.Event('click'));
+  await sleep(60);
+  t('选了 PNG 后质量滑块隐藏', doc.getElementById('exp-quality-row').hidden === true);
+  doc.getElementById('exp-do').dispatchEvent(new window.Event('click'));
   await sleep(600);
+  t('导出后面板自动关闭', doc.getElementById('exportpanel').hidden === true);
   t('导出触发下载', !!exported, exported);
   // 扩展名跟随导出预设（默认原尺寸交付 = JPEG）
   t('导出文件名带时间戳', /^retouched_\d{8}_\d{6}\.(jpg|png)$/.test(exported || ''), exported);
@@ -2569,6 +2590,461 @@ async function run() {
   window.PSBridge = savedBridge2;
   window.localStorage.removeItem('photoStudio.updateCheck.v1');
   window.__PS_API.updateUI();
+
+  /* ---------- v3.0.0 新功能：首页 / 照片信息 / 引导线 / 导出设置 ---------- */
+  console.log('\n【26】首页（修改历史）+ 工具栏收起');
+  {
+    // 回到首页：清掉当前照片（直接换一张新图会立刻进编辑页，所以这里手工复位）
+    S.img = null;
+    window.__PS_API.renderHome();
+    window.__PS_API.syncToolbar();
+    await sleep(60);
+    t('没照片时显示首页', window.__PS_API.isHomeVisible() === true);
+    t('没照片时工具栏收起', window.__PS_API.toolbarVisible() === false);
+    t('收起态打了 collapsed 类',
+      doc.getElementById('bottombar').classList.contains('collapsed') === true);
+    t('首页标题是「修改历史」',
+      /修改历史/.test(doc.querySelector('#home .home-title').textContent));
+    // 有修图记录时必须列出来（这就是「昨天修的今天还能看到」）
+    t('首页列出了修图记录',
+      doc.querySelectorAll('#home .home-item').length === S.library.length,
+      [doc.querySelectorAll('#home .home-item').length, S.library.length]);
+    t('列表非空（前提：前面已造出记录）', S.library.length > 0, S.library.length);
+    const firstName = doc.querySelector('#home .home-item .home-name');
+    t('条目显示文件名', !!firstName && firstName.textContent.length > 0,
+      firstName && firstName.textContent);
+    t('条目有缩略图', !!doc.querySelector('#home .home-item img.home-thumb'));
+    t('条目显示时间与修改数',
+      /处修改/.test(doc.querySelector('#home .home-item .home-sub').textContent));
+
+    // 点首页条目 → 进编辑页（有 session 时）
+    const editable = S.library.find((w) => w.session);
+    if (editable) {
+      // restoreSession 要等 Image 的 onload，jsdom 不解码 data: URL，这里换真实解码
+      const RealImage26 = window.Image;
+      window.Image = class {
+        constructor() {
+          this.onload = null; this.onerror = null;
+          this.width = 0; this.height = 0; this._src = '';
+        }
+        set src(v) {
+          this._src = v;
+          const m = /^data:[^;]+;base64,(.*)$/.exec(String(v));
+          if (!m) { setTimeout(() => this.onerror && this.onerror(new Error('bad src')), 0); return; }
+          napi.loadImage(Buffer.from(m[1], 'base64')).then((im) => {
+            this.__real = im;
+            this.width = im.width; this.height = im.height;
+            if (this.onload) this.onload();
+          }).catch((e) => { if (this.onerror) this.onerror(e); });
+        }
+        get src() { return this._src; }
+      };
+      // continueWork 在「当前有未导出修改」时会弹确认框，测试里自动确认
+      const savedConfirm26 = window.confirm;
+      window.confirm = () => true;
+      const btn = doc.querySelector('#home .home-item[data-work-id="' + editable.id + '"]');
+      btn.dispatchEvent(new window.Event('click'));
+      await sleep(500);
+      t('点历史条目进入编辑页', window.__PS_API.isHomeVisible() === false);
+      t('进入编辑页后工具栏展开', window.__PS_API.toolbarVisible() === true);
+      t('工具栏收起类已移除',
+        doc.getElementById('bottombar').classList.contains('collapsed') === false);
+      t('画布有内容', !!S.viewCanvas && S.docW > 0);
+      window.confirm = savedConfirm26;
+      window.Image = RealImage26;
+    } else {
+      t('点历史条目进入编辑页（无 session，跳过）', true);
+      t('进入编辑页后工具栏展开（跳过）', true);
+      t('工具栏收起类已移除（跳过）', true);
+      t('画布有内容（跳过）', true);
+    }
+  }
+
+  console.log('\n【27】照片信息：能看清这张是什么机器什么参数拍的');
+  {
+    S.cfg.maxRes = 0;   // 前面的用例把它改成过 200，必须复位
+    // 造一张带完整 EXIF 的图（机型/镜头/快门/光圈/ISO/焦距/时间）
+    const piC = napi.createCanvas(1200, 800);
+    const piX = piC.getContext('2d');
+    piX.fillStyle = 'rgb(40,80,120)'; piX.fillRect(0, 0, 1200, 800);
+    const piJpeg = piC.toBuffer('image/jpeg', 0.9);
+    // 手工拼一个 little-endian TIFF：IFD0（厂商/机型）+ ExifIFD（快门/光圈/ISO/时间/焦距/镜头）
+    const ifd0Tags = [
+      { tag: 0x010f, type: 2, str: 'Canon' },
+      { tag: 0x0110, type: 2, str: 'Canon EOS R5' }
+    ];
+    const exTags = [
+      { tag: 0x829a, type: 5, num: 1, den: 500 },
+      { tag: 0x829d, type: 5, num: 28, den: 10 },
+      { tag: 0x8827, type: 3, v: 800 },
+      { tag: 0x9003, type: 2, str: '2024:09:23 15:42:07' },
+      { tag: 0x920a, type: 5, num: 85, den: 1 },
+      { tag: 0xa434, type: 2, str: 'RF85mm F1.2 L USM' }
+    ];
+    const dataBytes = (list) => list.reduce((n, e) => {
+      if (e.type === 2) return n + (e.str.length + 1 > 4 ? e.str.length + 1 : 0);
+      if (e.type === 5) return n + 8;
+      return n;
+    }, 0);
+    const ifd0Size = 2 + (ifd0Tags.length + 1) * 12 + 4;   // +1 = ExifIFD 指针
+    const ifd0DataOff = 8 + ifd0Size;
+    const exifOff = ifd0DataOff + dataBytes(ifd0Tags);
+    const exifSize = 2 + exTags.length * 12 + 4;
+    const exifDataOff = exifOff + exifSize;
+    const tf = new Uint8Array(exifDataOff + dataBytes(exTags));
+    const dv = new DataView(tf.buffer);
+    tf[0] = 0x49; tf[1] = 0x49; tf[2] = 0x2a; tf[3] = 0;
+    dv.setUint32(4, 8, true);
+
+    const writeIfd = (off, list, dataOff) => {
+      dv.setUint16(off, list.length, true);
+      let cursor = dataOff;
+      list.forEach((e, i) => {
+        const eo = off + 2 + i * 12;
+        dv.setUint16(eo, e.tag, true);
+        dv.setUint16(eo + 2, e.type, true);
+        if (e.type === 2) {
+          dv.setUint32(eo + 4, e.str.length + 1, true);
+          if (e.str.length + 1 <= 4) {
+            for (let k = 0; k < e.str.length; k++) tf[eo + 8 + k] = e.str.charCodeAt(k);
+          } else {
+            dv.setUint32(eo + 8, cursor, true);
+            for (let k = 0; k < e.str.length; k++) tf[cursor + k] = e.str.charCodeAt(k);
+            cursor += e.str.length + 1;
+          }
+        } else if (e.type === 3) {
+          dv.setUint32(eo + 4, 1, true);
+          dv.setUint16(eo + 8, e.v, true);
+        } else if (e.type === 5) {
+          dv.setUint32(eo + 4, 1, true);
+          dv.setUint32(eo + 8, cursor, true);
+          dv.setUint32(cursor, e.num, true);
+          dv.setUint32(cursor + 4, e.den, true);
+          cursor += 8;
+        }
+      });
+      dv.setUint32(off + 2 + list.length * 12, 0, true);
+    };
+    writeIfd(8, ifd0Tags, ifd0DataOff);
+    // IFD0 最后一项：ExifIFD 指针（writeIfd 只写了 2 项，这里补第 3 项并改条目数）
+    {
+      dv.setUint16(8, ifd0Tags.length + 1, true);
+      const eo = 8 + 2 + ifd0Tags.length * 12;
+      dv.setUint16(eo, 0x8769, true);
+      dv.setUint16(eo + 2, 4, true);
+      dv.setUint32(eo + 4, 1, true);
+      dv.setUint32(eo + 8, exifOff, true);
+    }
+    writeIfd(exifOff, exTags, exifDataOff);
+
+    const piPl = new Uint8Array(6 + tf.length);
+    piPl[0] = 0x45; piPl[1] = 0x78; piPl[2] = 0x69; piPl[3] = 0x66; piPl.set(tf, 6);
+    const piLen = piPl.length + 2;
+    const piSeg = new Uint8Array(4 + piPl.length);
+    piSeg[0] = 0xff; piSeg[1] = 0xe1; piSeg[2] = (piLen >> 8) & 255; piSeg[3] = piLen & 255;
+    piSeg.set(piPl, 4);
+    const piFile = Buffer.concat([piJpeg.subarray(0, 2), piSeg, piJpeg.subarray(2)]);
+
+    const piIn = doc.getElementById('file-input');
+    Object.defineProperty(piIn, 'files', {
+      value: [new window.File([new Uint8Array(piFile)], 'DSC01234.jpg', { type: 'image/jpeg' })],
+      configurable: true
+    });
+    piIn.dispatchEvent(new window.Event('change'));
+    await sleep(400);
+    t('带 EXIF 的照片已载入', S.docW === 1200 && S.docH === 800, [S.docW, S.docH]);
+    t('EXIF 已捕获', !!(S.meta && S.meta.exif));
+
+    t('有照片时信息按钮可用', doc.getElementById('btn-photoinfo').disabled === false);
+    doc.getElementById('btn-photoinfo').dispatchEvent(new window.Event('click'));
+    await sleep(120);
+    t('照片信息面板已打开', doc.getElementById('photoinfo').hidden === false);
+    const piText = doc.getElementById('photoinfo-body').textContent;
+    t('显示文件名', /DSC01234\.jpg/.test(piText), piText.slice(0, 80));
+    t('显示机型', /Canon EOS R5/.test(piText));
+    t('显示镜头', /RF85mm F1\.2/.test(piText));
+    t('显示光圈', /f\/2\.8/.test(piText));
+    t('显示快门', /1\/500/.test(piText));
+    t('显示 ISO', /ISO 800/.test(piText));
+    t('显示焦距', /85 mm/.test(piText));
+    t('显示拍摄时间（已格式化）', /2024-09-23 15:42:07/.test(piText));
+    t('显示尺寸', /1200 × 800/.test(piText));
+    t('分组标题存在', /拍摄设备/.test(piText) && /拍摄参数/.test(piText));
+    // 关闭
+    doc.querySelector('#photoinfo [data-close]').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    t('照片信息面板可关闭', doc.getElementById('photoinfo').hidden === true);
+  }
+
+  console.log('\n【28】引导线：构图意图精确传给模型');
+  {
+    S.cfg.provider = 'siliconflow';
+    S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
+    S.cfg.model = 'Qwen/Qwen-Image-Edit';
+    S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.tile = 0; S.cfg.upscaleSmall = false;
+    S.cfg.contextPct = 12;      // 关键：有上下文外扩，引导线必须补偿偏移
+    S.cfg.fusion = 0; S.cfg.envFit = false; S.cfg.mosaic = false;
+
+    // 框一块选区
+    const cv2 = doc.getElementById('cv');
+    const r2 = cv2.getBoundingClientRect();
+    const mk2 = (type, x, y) => {
+      const e = new window.Event(type, { bubbles: true, cancelable: true });
+      e.clientX = r2.left + x; e.clientY = r2.top + y;
+      e.pointerId = 1; e.button = 0; e.pointerType = 'touch';
+      cv2.dispatchEvent(e);
+    };
+    mk2('pointerdown', 60, 60); mk2('pointermove', 200, 160); mk2('pointerup', 200, 160);
+    await sleep(80);
+    t('选区已建立', !!S.rect && S.rect.w > 10, S.rect);
+
+    // 进引导线模式
+    doc.getElementById('btn-guide').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('引导线模式已激活', S.mode === 'guide');
+    t('引导线参数条已显示', doc.getElementById('guide-bar').hidden === false);
+    t('引导线提示已显示', doc.getElementById('guide-tip').hidden === false);
+    t('类型选择器有 4 个选项',
+      doc.querySelectorAll('#guide-kinds [data-gk]').length === 4);
+    t('默认类型是地平线',
+      doc.querySelector('#guide-kinds [data-gk="horizon"]').classList.contains('on'));
+
+    // 画一条水平线（选区中心高度）
+    const sel0 = { x: r2.left + 0, y: r2.top + 0 };
+    const sr = window.PSCore.imageRectToScreen(S.rect, S.view);
+    const gy = r2.top + sr.y + sr.h * 0.5;
+    const gx1 = r2.left + sr.x + sr.w * 0.1;
+    const gx2 = r2.left + sr.x + sr.w * 0.9;
+    mk2('pointerdown', gx1 - r2.left, gy - r2.top);
+    mk2('pointermove', gx2 - r2.left, gy - r2.top + 3);
+    mk2('pointerup', gx2 - r2.left, gy - r2.top + 3);
+    await sleep(80);
+    t('引导线已记录', S.guides.length === 1, S.guides);
+    t('引导线类型正确', S.guides[0].kind === 'horizon', S.guides[0]);
+    t('引导线归一化坐标在 0~1',
+      S.guides[0].y1 >= 0 && S.guides[0].y1 <= 1 && S.guides[0].x2 > S.guides[0].x1);
+    t('数量角标已更新',
+      doc.getElementById('guide-count').textContent === '1' &&
+      doc.getElementById('guide-count').hidden === false);
+    t('方向被对齐（几乎水平）',
+      Math.abs(S.guides[0].y2 - S.guides[0].y1) < 0.02, S.guides[0]);
+
+    // 画第二条：垂直线
+    doc.querySelector('#guide-kinds [data-gk="vertical"]').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    t('切换到垂直线类型', S.guideKind === 'vertical');
+    const gx = r2.left + sr.x + sr.w * 0.35;
+    mk2('pointerdown', gx - r2.left, gy - r2.top - sr.h * 0.3);
+    mk2('pointermove', gx - r2.left + 2, gy - r2.top + sr.h * 0.3);
+    mk2('pointerup', gx - r2.left + 2, gy - r2.top + sr.h * 0.3);
+    await sleep(80);
+    t('第二条引导线已记录', S.guides.length === 2, S.guides.length);
+    t('第二条是垂直线', S.guides[1].kind === 'vertical');
+
+    // 生成：请求里的提示词必须带引导线说明
+    const before28 = fake.seen.length;
+    fake.setColor([90, 200, 90]);
+    doc.getElementById('prompt').value = '换成阴天';
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 6000);
+    if (S.pending) {
+      doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
+      await sleep(120);
+    }
+    t('带引导线生成了', S.edits.length > 0, S.edits.length);
+    const gen28 = fake.seen.slice(before28).filter((x) => x.body && x.body.prompt);
+    t('发起了请求', gen28.length > 0, gen28.length);
+    if (gen28.length) {
+      const pr = gen28[0].body.prompt;
+      t('提示词含构图引导段', /构图引导/.test(pr), pr.slice(0, 200));
+      t('提示词写了地平线位置', /地平线/.test(pr));
+      t('提示词写了垂直线位置', /垂直参考线/.test(pr));
+      t('提示词要求不要画出线条', /不要.*画出任何线条/.test(pr));
+      // 关键：引导线位置必须按 contextPct 补偿，不能直接用选区内的归一化值
+      t('引导线位置已换算到请求图坐标（不是选区内的原值）',
+        !new RegExp('高度 50%').test(pr), pr.slice(0, 260));
+    }
+
+    // 引导线不进图片：请求图里不能出现引导线的青色（#3ddcc4）。
+    // 这和当初「蓝色掩膜被模型当成画面内容」是同一类坑，必须逐像素确认。
+    if (gen28.length) {
+      const imgStr = String(gen28[0].body.image || '');
+      const m28 = /^data:image\/(jpeg|png);base64,(.*)$/.exec(imgStr);
+      t('请求里带了参考图', !!m28);
+      if (m28) {
+        const im28 = await napi.loadImage(Buffer.from(m28[2], 'base64'));
+        const cc28 = napi.createCanvas(im28.width, im28.height);
+        const cx28 = cc28.getContext('2d');
+        cx28.drawImage(im28, 0, 0);
+        const px28 = cx28.getImageData(0, 0, im28.width, im28.height).data;
+        let cyan28 = 0;
+        for (let i = 0; i < px28.length; i += 4) {
+          // 引导线颜色 61,220,196：允许编码误差
+          if (Math.abs(px28[i] - 61) < 30 && Math.abs(px28[i + 1] - 220) < 30 &&
+              Math.abs(px28[i + 2] - 196) < 30) cyan28++;
+        }
+        t('请求图里没有引导线像素（线只画在屏幕上）', cyan28 === 0, cyan28);
+      }
+    } else {
+      t('请求里带了参考图（跳过）', true);
+      t('请求图里没有引导线像素（跳过）', true);
+    }
+
+    // 点已有的线 → 删除
+    mk2('pointerdown', gx1 - r2.left, gy - r2.top);
+    mk2('pointerup', gx1 - r2.left, gy - r2.top);
+    await sleep(80);
+    t('点已有引导线可删除', S.guides.length === 1, S.guides.length);
+
+    // 清空
+    doc.getElementById('guide-clear').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('清空按钮生效', S.guides.length === 0);
+    t('角标归零后隐藏', doc.getElementById('guide-count').hidden === true);
+
+    // 换选区会清掉引导线（相对坐标失效）—— 必须在框选模式下重新拉框
+    doc.querySelector('.tool[data-mode="select"]').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    window.__PS_API.setGuides([{ kind: 'horizon', x1: 0, y1: .5, x2: 1, y2: .5 }]);
+    t('测试用引导线已设置', S.guides.length === 1);
+    mk2('pointerdown', 20, 20); mk2('pointermove', 90, 90); mk2('pointerup', 90, 90);
+    await sleep(80);
+    t('重新框选会清掉引导线', S.guides.length === 0, S.guides.length);
+    t('重新框选建立了新选区', !!S.rect && S.rect.w > 10, S.rect);
+    await sleep(80);
+    t('离开引导线模式后参数条收起', doc.getElementById('guide-bar').hidden === true);
+    t('引导线按钮高亮已移除',
+      doc.getElementById('btn-guide').classList.contains('active') === false);
+    S.cfg.contextPct = 0;
+  }
+
+  console.log('\n【29】导出设置：格式与大小可选，且真的生效');
+  {
+    S.cfg.provider = 'siliconflow';
+    S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
+    S.cfg.model = 'Qwen/Qwen-Image-Edit';
+    S.cfg.maxRes = 0;
+    // 造一张 1600x1200 的图
+    const exC = napi.createCanvas(1600, 1200);
+    const exX = exC.getContext('2d');
+    exX.fillStyle = 'rgb(70,110,150)'; exX.fillRect(0, 0, 1600, 1200);
+    exX.fillStyle = 'rgb(240,240,240)'; exX.fillRect(500, 400, 600, 400);
+    const exFile = exC.toBuffer('image/jpeg', 0.9);
+    const exIn = doc.getElementById('file-input');
+    Object.defineProperty(exIn, 'files', {
+      value: [new window.File([new Uint8Array(exFile)], 'export.jpg', { type: 'image/jpeg' })],
+      configurable: true
+    });
+    exIn.dispatchEvent(new window.Event('change'));
+    await sleep(400);
+    t('测试图已载入', S.docW === 1600 && S.docH === 1200, [S.docW, S.docH]);
+
+    // 拦截导出
+    let exBlob = null;
+    const exOrigCreate = doc.createElement.bind(doc);
+    doc.createElement = function (tag) {
+      const el = exOrigCreate(tag);
+      if (tag === 'a') el.click = () => {};
+      return el;
+    };
+    window.URL.createObjectURL = (b) => { exBlob = b; return 'blob:ex'; };
+    window.URL.revokeObjectURL = () => {};
+
+    S.cfg.expPresetChosen = false;
+    S.cfg.exportPreset = 'full';
+    doc.getElementById('btn-save').dispatchEvent(new window.Event('click'));
+    await sleep(150);
+    t('导出面板已打开', doc.getElementById('exportpanel').hidden === false);
+    t('格式列表有 JPEG 与 PNG',
+      doc.querySelectorAll('#exp-formats [data-fmt]').length === 2);
+    t('大小列表含原始尺寸与自定义',
+      doc.querySelectorAll('#exp-sizes [data-size]').length === window.PSCore.EXPORT_SIZES.length + 1);
+    t('显示输出尺寸', /1600 × 1200/.test(doc.getElementById('exp-out-size').textContent),
+      doc.getElementById('exp-out-size').textContent);
+    t('显示预计体积', /约/.test(doc.getElementById('exp-out-size-est').textContent),
+      doc.getElementById('exp-out-size-est').textContent);
+
+    // 1) 选 1080px + JPEG
+    doc.querySelector('#exp-sizes [data-size="1080"]').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('选了 1080 后输出尺寸更新', /1080 × 810/.test(doc.getElementById('exp-out-size').textContent),
+      doc.getElementById('exp-out-size').textContent);
+    doc.querySelector('#exp-formats [data-fmt="jpeg"]').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    t('JPEG 时质量滑块可见', doc.getElementById('exp-quality-row').hidden === false);
+    exBlob = null;
+    doc.getElementById('exp-do').dispatchEvent(new window.Event('click'));
+    await sleep(900);
+    t('导出了文件', !!exBlob);
+    if (exBlob) {
+      const buf = Buffer.from(await exBlob.arrayBuffer());
+      t('产物是 JPEG', buf[0] === 0xff && buf[1] === 0xd8, [buf[0], buf[1]]);
+      const im = await napi.loadImage(buf);
+      t('长边缩到 1080', Math.max(im.width, im.height) === 1080, [im.width, im.height]);
+      t('比例保持 4:3', Math.abs(im.width / im.height - 4 / 3) < 0.02, im.width / im.height);
+    }
+
+    // 2) 选 PNG + 原尺寸
+    doc.getElementById('btn-save').dispatchEvent(new window.Event('click'));
+    await sleep(150);
+    doc.querySelector('#exp-formats [data-fmt="png"]').dispatchEvent(new window.Event('click'));
+    doc.querySelector('#exp-sizes [data-size="orig"]').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('PNG 时质量滑块隐藏', doc.getElementById('exp-quality-row').hidden === true);
+    t('PNG 原尺寸的输出尺寸', /1600 × 1200/.test(doc.getElementById('exp-out-size').textContent));
+    exBlob = null;
+    doc.getElementById('exp-do').dispatchEvent(new window.Event('click'));
+    await sleep(1200);
+    t('导出了 PNG', !!exBlob);
+    if (exBlob) {
+      const buf = Buffer.from(await exBlob.arrayBuffer());
+      t('产物是 PNG', buf[0] === 0x89 && buf[1] === 0x50, [buf[0], buf[1]]);
+      const im = await napi.loadImage(buf);
+      t('PNG 保持原尺寸', im.width === 1600 && im.height === 1200, [im.width, im.height]);
+    }
+
+    // 3) 自定义长边 + 小图不放大
+    doc.getElementById('btn-save').dispatchEvent(new window.Event('click'));
+    await sleep(150);
+    doc.querySelector('#exp-sizes [data-size="custom"]').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('选自定义后出现输入框', doc.getElementById('exp-custom-row').hidden === false);
+    const ci = doc.getElementById('exp-custom');
+    ci.value = '4000';
+    ci.dispatchEvent(new window.Event('input'));
+    await sleep(80);
+    t('自定义 4000 不放大原图（仍是 1600）',
+      /1600 × 1200/.test(doc.getElementById('exp-out-size').textContent),
+      doc.getElementById('exp-out-size').textContent);
+    t('不放大时给出说明',
+      doc.getElementById('exp-hint').textContent.length > 0,
+      doc.getElementById('exp-hint').textContent);
+
+    // 4) 面板选择会被记住
+    doc.querySelector('#exp-formats [data-fmt="png"]').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    exBlob = null;
+    doc.getElementById('exp-do').dispatchEvent(new window.Event('click'));
+    await sleep(900);
+    t('面板选择已写入配置', S.cfg.expPresetChosen === true && S.cfg.expFormat === 'png');
+    t('面板选择已落盘',
+      JSON.parse(window.localStorage.getItem('photoStudio.cfg.v1')).expFormat === 'png');
+    // 再次打开：应沿用上次的 PNG，而不是回到设置页的 full(JPEG)
+    S.cfg.exportPreset = 'full';
+    doc.getElementById('btn-save').dispatchEvent(new window.Event('click'));
+    await sleep(150);
+    t('再次打开沿用上次选择',
+      doc.querySelector('#exp-formats .selected .st-label').textContent.indexOf('PNG') >= 0,
+      doc.querySelector('#exp-formats .selected .st-label').textContent);
+    doc.querySelector('#exportpanel [data-close]').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    t('面板可关闭', doc.getElementById('exportpanel').hidden === true);
+
+    doc.createElement = exOrigCreate;
+    S.cfg.expPresetChosen = false;
+    S.cfg.expFormat = 'jpeg';
+  }
+
 
   /* ---------- 无 JS 错误 ---------- */
   console.log('\n【15】运行健康度');

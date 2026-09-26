@@ -47,6 +47,10 @@ body { overflow: hidden; }
   flex-direction: column;
   height: 100vh;
   height: 100dvh;   /* 支持 dvh 的浏览器用动态视口高度，避免地址栏遮挡 */
+  /* 工具栏收起时用绝对定位（不占位），必须有个定位祖先把它框住，
+     否则会以视口为基准 —— 老内核下可能算错高度 */
+  position: relative;
+  overflow: hidden;
 }
 
 svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
@@ -99,20 +103,6 @@ button:disabled { opacity: .38; cursor: default; }
 #cv { display: block; width: 100%; height: 100%; touch-action: none; }
 
 /* 空状态 */
-#empty {
-  position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0;
-  display: flex; align-items: center; justify-content: center;
-  padding: 20px;
-  background:
-    radial-gradient(1000px 500px at 50% -10%, rgba(77, 163, 255, .10), transparent 70%),
-    var(--bg-canvas);
-}
-.empty-card { text-align: center; max-width: 330px; }
-.empty-ico { width: 54px; height: 54px; stroke-width: 1.2; color: var(--accent); opacity: .85; margin-bottom: 6px; }
-.empty-card h2 { font-size: 17px; margin: 10px 0 6px; }
-.empty-card p { font-size: 12.5px; color: var(--text-faint); margin: 0 0 20px; line-height: 1.6; }
-.empty-card .primary, .empty-card .ghost { display: block; width: 100%; margin-bottom: 9px; }
-
 /* 提示条 */
 #toast {
   position: absolute; left: 50%; bottom: 18px; transform: translate(-50%, 14px);
@@ -327,14 +317,27 @@ ul.whatsnew li { margin-bottom: 5px; }
 }
 .tool svg { width: 18px; height: 18px; }
 .tool.active { background: rgba(77, 163, 255, .14); color: var(--accent); }
+/* 引导线用青色，和「框选/画笔/平移」的蓝色区分开 —— 它是构图工具，不是选择工具 */
+#btn-guide.active { background: rgba(61, 220, 196, .14); color: #3ddcc4; }
+#btn-guide.active b { background: #3ddcc4; color: #06231e; }
 .tool:active { background: #262d3a; }
 
-#brush-bar, #sel-bar {
+#brush-bar, #sel-bar, #guide-bar {
   display: flex; align-items: center; gap: 8px;
   padding: 1px 12px 6px;
   overflow-x: auto; scrollbar-width: none;
 }
-#brush-bar::-webkit-scrollbar, #sel-bar::-webkit-scrollbar { display: none; }
+#brush-bar::-webkit-scrollbar, #sel-bar::-webkit-scrollbar, #guide-bar::-webkit-scrollbar { display: none; }
+/* 引导线提示：青色左边框，和画笔提示区分开 */
+#brush-tip, #guide-tip {
+  font-size: 11.5px; color: var(--text-faint); line-height: 1.6;
+  padding: 0 12px 7px;
+  word-break: break-word;
+}
+#guide-tip {
+  border-left: 2px solid #3ddcc4;
+  margin-left: 12px; padding-left: 8px;
+}
 .lbl { font-size: 11px; color: var(--text-faint); flex: 0 0 auto; }
 .val { font-size: 11px; color: var(--text-dim); min-width: 30px; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
 
@@ -789,6 +792,7 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 .ps-no-flex-gap #tools > * + * { margin-left: 2px; }
 .ps-no-flex-gap .tool > * + * { margin-top: 2px; }
 .ps-no-flex-gap #brush-bar > * + *,
+.ps-no-flex-gap #guide-bar > * + *,
 .ps-no-flex-gap #sel-bar > * + * { margin-left: 8px; }
 .ps-no-flex-gap .chips > * + * { margin-left: 6px; }
 .ps-no-flex-gap .row > * + * { margin-left: 8px; }
@@ -812,6 +816,10 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 .ps-no-flex-gap .wp-head > * + * { margin-left: 10px; }
 .ps-no-flex-gap .wp-actions > * + * { margin-left: 9px; }
 .ps-no-flex-gap #upgrade-bar > * + * { margin-left: 8px; }
+.ps-no-flex-gap .home-head > * + * { margin-left: 10px; }
+.ps-no-flex-gap .home-new > * + * { margin-left: 6px; }
+.ps-no-flex-gap .home-item > * + * { margin-left: 12px; }
+.ps-no-flex-gap .pi-row > * + * { margin-left: 12px; }
 
 /* 注意：这里**不能**给 .lib-grid 加兜底 —— grid 的 gap 从 Chrome 57 就支持了，
    比 flex gap（Chrome 84）早得多。给它加 margin 反而会多出一层间距。
@@ -1147,3 +1155,210 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 .ps-no-flex-gap #settings .st-row > * + * { margin-left: 12px; }
 .ps-no-flex-gap #settings .st-row-col > * + * { margin-left: 0; margin-top: 7px; }
 .ps-no-flex-gap #settings .st-actions > * + * { margin-left: 9px; }
+
+/* =============================================================================
+ * 首页（修改历史）
+ *
+ * 打开应用先看到「修过的照片」，而不是一个空白画布 ——
+ * 摄影师多数时候是回来接着改，而不是每次都修新图。
+ * ========================================================================== */
+#home {
+  position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-canvas);
+  z-index: 5;
+}
+.home-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 14px 10px;
+  flex: 0 0 auto;
+}
+.home-title {
+  flex: 1 1 auto;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: .3px;
+}
+.home-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: linear-gradient(#4da3ff, #2b7fe0);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 2px 10px rgba(43, 127, 224, .3);
+}
+.home-new svg {
+  width: 15px; height: 15px;
+  fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round;
+}
+.home-new:active { filter: brightness(.9); }
+
+.home-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 0 14px calc(20px + var(--sab));
+}
+.home-empty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 20px 30px calc(40px + var(--sab));
+  text-align: center;
+}
+.home-empty-ico {
+  width: 54px; height: 54px;
+  fill: none; stroke: var(--accent); stroke-width: 1.2;
+  opacity: .85; margin-bottom: 4px;
+}
+.home-empty h2 { font-size: 17px; margin: 10px 0 8px; }
+.home-empty p { font-size: 12.5px; color: var(--text-faint); margin: 0 0 20px; line-height: 1.7; }
+.home-empty .primary, .home-empty .ghost { display: block; width: 100%; margin-bottom: 9px; max-width: 300px; }
+
+/* 首页的日期分组 */
+.home-day {
+  font-size: 11.5px; font-weight: 600; letter-spacing: .5px;
+  color: var(--text-faint);
+  margin: 16px 0 9px;
+}
+.home-day:first-child { margin-top: 4px; }
+
+/* 首页记录卡片：横向一行，缩略图在左 */
+.home-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 9px;
+  margin-bottom: 9px;
+  border-radius: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  text-align: left;
+  transition: background .15s, border-color .15s;
+}
+.home-item:active { background: #2b323f; border-color: var(--accent-dim); }
+.home-thumb {
+  flex: 0 0 auto;
+  width: 62px; height: 62px;
+  border-radius: 9px;
+  object-fit: cover;
+  background: var(--panel);
+}
+.home-meta { flex: 1 1 auto; min-width: 0; }
+.home-name {
+  font-size: 13.5px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.home-sub {
+  font-size: 11.5px; color: var(--text-faint);
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.home-go {
+  flex: 0 0 auto;
+  width: 20px; height: 20px;
+  fill: none; stroke: var(--text-faint);
+  stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round;
+}
+.home-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  background: rgba(77, 163, 255, .16);
+  color: var(--accent);
+  vertical-align: 1px;
+}
+
+/* =============================================================================
+ * 工具栏默认收起
+ *
+ * 首页不需要工具栏（还没打开照片）；进入编辑页才显示，
+ * 腾出竖向空间给画布 —— 手机屏幕高度是最稀缺的资源。
+ * ========================================================================== */
+#bottombar {
+  transition: transform .22s ease, opacity .22s ease;
+}
+#bottombar.collapsed {
+  transform: translateY(100%);
+  opacity: 0;
+  pointer-events: none;
+  /* 收起时不能占位，否则画布下方留一条空白 */
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+}
+
+/* =============================================================================
+ * 照片信息面板
+ * ========================================================================== */
+#photoinfo .sheet-body { max-width: 560px; }
+.pi-group {
+  font-size: 11.5px; font-weight: 600; letter-spacing: .5px;
+  color: var(--text-faint);
+  margin: 16px 0 7px;
+}
+.pi-group:first-child { margin-top: 4px; }
+.pi-card {
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.pi-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 10px 14px;
+  position: relative;
+}
+.pi-row + .pi-row::before {
+  content: '';
+  position: absolute;
+  left: 14px; right: 0; top: 0;
+  height: 1px;
+  background: var(--line-soft);
+}
+.pi-label {
+  flex: 0 0 auto;
+  font-size: 12.5px;
+  color: var(--text-faint);
+  min-width: 74px;
+}
+.pi-value {
+  flex: 1 1 auto;
+  font-size: 13.5px;
+  color: var(--text);
+  text-align: right;
+  word-break: break-all;
+  font-variant-numeric: tabular-nums;
+}
+.pi-value.pi-warn { color: #ffd591; }
+.pi-empty { font-size: 12.5px; color: var(--text-faint); text-align: center; padding: 24px 0; }
+
+/* =============================================================================
+ * 导出设置面板
+ * ========================================================================== */
+#exportpanel .sheet-body { max-width: 560px; }
+/* 可点选的行（格式 / 尺寸）：选中时右侧出现对勾 */
+#exp-formats .st-row-btn.selected,
+#exp-sizes .st-row-btn.selected { background: rgba(77, 163, 255, .08); }
+#exp-formats .st-row-btn.selected .st-label,
+#exp-sizes .st-row-btn.selected .st-label { color: var(--accent); font-weight: 600; }
+.exp-check {
+  flex: 0 0 auto;
+  width: 19px; height: 19px;
+  fill: none; stroke: var(--accent);
+  stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round;
+}

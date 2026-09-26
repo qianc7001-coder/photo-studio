@@ -58,6 +58,11 @@
     keepAliveSupported: false,
     keepAliveState: null, // { on, reason, note }
     updateRelease: null,  // 检测到的新版本（release 对象）
+    toolbarVisible: false, // 工具栏是否展开（首页收起，编辑页展开）
+    // 引导线：把「构图意图」画给模型看（比文字描述准确得多）
+    // 坐标是「相对选区的归一化值」0~1，这样选区移动/缩放时不用重算
+    guides: [],
+    guideKind: 'horizon',
 
     // 待确认的生成结果
     pending: null,
@@ -126,7 +131,18 @@
     usdCny: 7.1,               // 汇率（仅用于人民币参考价）
     format: 'jpeg',
     quality: 95,
-    mosaic: false
+    mosaic: false,
+    // 导出面板记住上一次的选择。
+    // 刻意与设置页的 exportPreset 分开存 —— 用户临时改一次导出格式，
+    // 不应该把设置页里选的「交付预设」也改掉。
+    // expPresetChosen=false 表示「还没在面板里选过」→ 首次打开跟随设置页预设。
+    expPresetChosen: false,
+    expFormat: 'jpeg',
+    expMaxSide: 0,
+    expQuality: 95,
+    expKeepExif: true,
+    expKeepGps: true,
+    expKeepIcc: true
   };
 
   // 配置存储键。注意：这里刻意保持键名稳定 —— 覆盖安装后必须能读到旧设置，
@@ -148,6 +164,7 @@
     'provider', 'baseUrl', 'apiKey', 'model', 'netMode',
     'contextPct', 'feather', 'colorMatch', 'maxRes', 'tile',
     'lang', 'seed', 'format', 'quality', 'mosaic', 'upscaleSmall', 'exportPreset',
+    'expPresetChosen', 'expFormat', 'expMaxSide', 'expQuality', 'expKeepExif', 'expKeepGps', 'expKeepIcc',
     'priceOverride', 'usdCny',
     'historyBudgetMB', 'autoSaveSession',
     'keepAlive', 'keepAliveAlways',
@@ -191,6 +208,11 @@
       c.maxRes = clampNum(c.maxRes, 0, 8192, DEFAULT_CFG.maxRes);
       c.tile = clampNum(c.tile, 0, 2000, DEFAULT_CFG.tile);
       c.quality = clampNum(c.quality, 70, 100, DEFAULT_CFG.quality);
+      // 导出面板的记忆字段：历史脏数据（比如手改 localStorage）不能把导出搞崩
+      c.expMaxSide = clampNum(c.expMaxSide, 0, 16384, 0);
+      c.expQuality = clampNum(c.expQuality, 60, 100, 95);
+      if (!C.EXPORT_FORMATS.some((f) => f.id === c.expFormat)) c.expFormat = 'jpeg';
+      c.expPresetChosen = c.expPresetChosen === true;
       if (!c.baseUrl && c.provider) {
         const p = C.getProvider(c.provider);
         if (p && p.baseUrl) c.baseUrl = p.baseUrl;
@@ -861,7 +883,9 @@
     S.redo = [];
     S.rect = null;
     S.strokes = [];
+    S.guides = [];       // 引导线跟着选区走，换图必须清掉
     S.pending = null;
+    updateGuideBadge();
     S.docVersion++;      // 旧文档的生成结果一律作废
     S.docRev++;          // 换图 → 打包缓存失效
     // 换图 = 换一件作品：生成新的作品 id。
@@ -870,6 +894,9 @@
     S.workId = null;
     S.workStartedAt = 0;
     try { localStorage.removeItem(LS_KEY_SESSION); } catch (e) { /* ignore */ }
+    // 进入编辑页：收起首页、展开工具栏
+    renderHome();
+    syncToolbar();
 
     $('file-name').textContent = name;
     const metaBits = [];
@@ -880,7 +907,7 @@
     $('file-meta').textContent = `${S.imgW}×${S.imgH}` +
       (scale < 1 ? ` → 工作 ${S.docW}×${S.docH}` : '') +
       (metaBits.length ? ` · 含${metaBits.join(' / ')}` : '');
-    $('empty').hidden = true;
+    // 首页空状态由 renderHome 统一管理（上面已调用），这里不再单独操作
     $('hud').hidden = false;
     $('btn-save').disabled = false;
     $('btn-undo').disabled = true;
@@ -1106,6 +1133,10 @@
       drawMaskOverlay();
     }
 
+    // 引导线：只要存在就画出来 —— 它会进提示词，用户必须随时看得见。
+    // 非引导线模式下画淡一点，避免和选区抢注意力。
+    if (S.guides.length && S.rect) drawGuides(S.mode !== 'guide');
+
     // 选区
     if (S.rect) drawSelection();
 
@@ -1145,6 +1176,121 @@
     maskRaf = requestAnimationFrame(() => {
       maskRaf = 0;
       draw();
+    });
+  }
+
+  /* ============================ 引导线 ============================ */
+
+  /**
+   * 绘制引导线。
+   *
+   * 视觉设计：用醒目的青色 + 端点圆点 + 类型标签，
+   * 与选区（蓝色虚线）和画笔（灰色）区分开，一眼能认出。
+   */
+  function drawGuides(dim) {
+    if (!S.rect || !S.guides.length) return;
+    const rect = C.clampRect(S.rect, S.docW, S.docH);
+    const sr = C.imageRectToScreen(rect, S.view);
+
+    ctx.save();
+    if (dim) ctx.globalAlpha = 0.42;
+    ctx.lineCap = 'round';
+    for (const g of S.guides) {
+      // 归一化坐标 → 屏幕坐标
+      const x1 = sr.x + g.x1 * sr.w, y1 = sr.y + g.y1 * sr.h;
+      const x2 = sr.x + g.x2 * sr.w, y2 = sr.y + g.y2 * sr.h;
+
+      // 外描边（深色）保证在任何底图上都看得清
+      ctx.strokeStyle = 'rgba(0,0,0,.55)';
+      ctx.lineWidth = 5;
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+
+      ctx.strokeStyle = '#3ddcc4';
+      ctx.lineWidth = 2.5;
+      ctx.setLineDash([9, 5]);
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      ctx.setLineDash([]);
+
+      // 端点
+      for (const [px, py] of [[x1, y1], [x2, y2]]) {
+        ctx.beginPath();
+        ctx.arc(px, py, 5.5, 0, Math.PI * 2);
+        ctx.fillStyle = '#3ddcc4';
+        ctx.fill();
+        ctx.strokeStyle = '#0b1014';
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+      }
+
+      // 类型标签（贴着线中点）
+      const kind = C.getGuideKind(g.kind);
+      const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+      ctx.font = '600 11px -apple-system, "PingFang SC", sans-serif';
+      const label = kind.zh;
+      const tw = ctx.measureText(label).width;
+      const bx = mx - tw / 2 - 6, by = my - 21;
+      ctx.fillStyle = 'rgba(11,16,20,.82)';
+      ctx.beginPath();
+      const rr = 5;
+      ctx.moveTo(bx + rr, by);
+      ctx.lineTo(bx + tw + 12 - rr, by);
+      ctx.quadraticCurveTo(bx + tw + 12, by, bx + tw + 12, by + rr);
+      ctx.lineTo(bx + tw + 12, by + 16 - rr);
+      ctx.quadraticCurveTo(bx + tw + 12, by + 16, bx + tw + 12 - rr, by + 16);
+      ctx.lineTo(bx + rr, by + 16);
+      ctx.quadraticCurveTo(bx, by + 16, bx, by + 16 - rr);
+      ctx.lineTo(bx, by + rr);
+      ctx.quadraticCurveTo(bx, by, bx + rr, by);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#3ddcc4';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(label, bx + 6, by + 3);
+    }
+    ctx.restore();
+  }
+
+  /** 把屏幕坐标换算成「相对选区的归一化坐标」 */
+  function screenToGuideNorm(p) {
+    if (!S.rect) return { x: 0.5, y: 0.5 };
+    const rect = C.clampRect(S.rect, S.docW, S.docH);
+    const ip = C.screenToImage(p, S.view);
+    return {
+      x: Math.max(0, Math.min(1, (ip.x - rect.x) / Math.max(1, rect.w))),
+      y: Math.max(0, Math.min(1, (ip.y - rect.y) / Math.max(1, rect.h)))
+    };
+  }
+
+  /** 更新引导线数量角标 */
+  function updateGuideBadge() {
+    const b = $('guide-count');
+    if (!b) return;
+    const n = S.guides.length;
+    b.textContent = String(n);
+    b.hidden = n === 0;
+  }
+
+  function clearGuides() {
+    if (!S.guides.length) return;
+    S.guides = [];
+    updateGuideBadge();
+    draw();
+    toast('已清空引导线');
+  }
+
+  /** 渲染引导线类型选择器 */
+  function renderGuideKinds() {
+    const el = $('guide-kinds');
+    if (!el) return;
+    el.innerHTML = C.GUIDE_KINDS.map((k) =>
+      '<button class="chip' + (k.id === S.guideKind ? ' on' : '') + '" data-gk="' + k.id + '" title="' +
+        esc(k.desc) + '">' + esc(k.zh) + '</button>').join('');
+    el.querySelectorAll('[data-gk]').forEach((b) => {
+      b.onclick = () => {
+        S.guideKind = b.dataset.gk;
+        renderGuideKinds();
+      };
     });
   }
 
@@ -1268,6 +1414,27 @@
       return;
     }
 
+    if (S.mode === 'guide') {
+      if (!S.rect) { toast('先框选一块区域，再画引导线'); return; }
+      const rect = C.clampRect(S.rect, S.docW, S.docH);
+      if (!C.pointInRect(ip, rect)) { toast('引导线只能画在选区内'); return; }
+      // 点已有的引导线 = 删除（比找小叉号方便）
+      const hitIdx = hitGuide(p);
+      if (hitIdx >= 0) {
+        S.guides.splice(hitIdx, 1);
+        updateGuideBadge();
+        draw();
+        toast('已删除一条引导线');
+        return;
+      }
+      const n0 = screenToGuideNorm(p);
+      const draft = { kind: S.guideKind, x1: n0.x, y1: n0.y, x2: n0.x, y2: n0.y };
+      S.guides.push(draft);
+      S.gesture = { type: 'guide', draft, rect };
+      draw();
+      return;
+    }
+
     if (S.mode === 'brush') {
       if (!S.rect) { toast('先框选一块区域，再用画笔'); return; }
       const rect = C.clampRect(S.rect, S.docW, S.docH);
@@ -1301,10 +1468,13 @@
       };
       return;
     }
-    // 空白处：重新开始框选（笔迹随旧选区一起丢弃）
+    // 空白处：重新开始框选（笔迹和引导线都随旧选区一起丢弃 ——
+    // 引导线存的是「相对选区」的归一化坐标，换了选区位置就完全对不上了）
     S.gesture = { type: 'create', start: ip };
     S.rect = { x: ip.x, y: ip.y, w: 0, h: 0 };
     S.strokes = [];
+    S.guides = [];
+    updateGuideBadge();
     invalidateMask();
   });
 
@@ -1330,6 +1500,14 @@
       g.stroke.points.push({ x: ip.x, y: ip.y });
       invalidateMask();
       scheduleMaskRedraw();   // 合并同一帧内的多次移动，避免卡顿
+      return;
+    }
+    if (g.type === 'guide') {
+      const n = screenToGuideNorm(p);
+      g.draft.x2 = n.x;
+      g.draft.y2 = n.y;
+      // 拖到选区外也允许：夹回边界，用户不用精确收手
+      draw();
       return;
     }
     const ip = C.screenToImage(p, S.view);
@@ -1360,6 +1538,27 @@
       draw(); updateUI();
       return;
     }
+    if (g.type === 'guide') {
+      const d = g.draft;
+      // 太短的手抖轨迹丢掉，避免出现一个「点」
+      if (Math.hypot((d.x2 - d.x1) * g.rect.w, (d.y2 - d.y1) * g.rect.h) <
+          Math.max(12, Math.hypot(g.rect.w, g.rect.h) * 0.06)) {
+        S.guides.pop();
+      } else {
+        // 吸附到常见方向，模型拿到的是干净的构图意图而不是手抖斜线
+        const snapped = C.snapGuide(d);
+        d.x1 = snapped.x1; d.y1 = snapped.y1;
+        d.x2 = snapped.x2; d.y2 = snapped.y2;
+        d.kind = snapped.kind;
+        updateGuideBadge();
+        toast('已加引导线：' + C.getGuideKind(d.kind).zh);
+      }
+      S.gesture = null;
+      updateGuideBadge();
+      draw();
+      updateUI();
+      return;
+    }
     if (g.type === 'create' || g.type === 'transform') {
       if (S.rect && (S.rect.w < 8 || S.rect.h < 8)) {
         S.rect = null;      // 太小的误触一律丢掉，避免出现 1x1 选区
@@ -1374,6 +1573,26 @@
   }
   cv.addEventListener('pointerup', endPointer);
   cv.addEventListener('pointercancel', endPointer);
+
+  /** 命中测试：屏幕坐标是否落在某条引导线附近，返回下标或 -1 */
+  function hitGuide(p) {
+    if (!S.rect || !S.guides.length) return -1;
+    const rect = C.clampRect(S.rect, S.docW, S.docH);
+    const sr = C.imageRectToScreen(rect, S.view);
+    const TOL = 14;
+    for (let i = S.guides.length - 1; i >= 0; i--) {
+      const g = S.guides[i];
+      const x1 = sr.x + g.x1 * sr.w, y1 = sr.y + g.y1 * sr.h;
+      const x2 = sr.x + g.x2 * sr.w, y2 = sr.y + g.y2 * sr.h;
+      const dx = x2 - x1, dy = y2 - y1;
+      const len2 = dx * dx + dy * dy;
+      let t = len2 ? ((p.x - x1) * dx + (p.y - y1) * dy) / len2 : 0;
+      t = Math.max(0, Math.min(1, t));
+      const d = Math.hypot(p.x - (x1 + t * dx), p.y - (y1 + t * dy));
+      if (d <= TOL) return i;
+    }
+    return -1;
+  }
 
   function invalidateMask() { maskCacheKey = ''; maskCache = null; }
 
@@ -1890,6 +2109,14 @@
         const envDesc = envMeas
           ? C.describeEnvironment({ stats: envMeas.stats, plane: envMeas.plane, isZh: lang === 'zh' })
           : '';
+        // 引导线：把用户画在选区里的线换算到「这一块请求图」的坐标，
+        // 再翻译成构图说明写进提示词。分块时丢掉落在块外的线（见 mapGuidesToRequest）。
+        const tileGuides = S.guides.length
+          ? C.mapGuidesToRequest({ guides: S.guides, rect, ctxRect: built.rect, clip: tiles.length > 1 })
+          : [];
+        const guideDesc = tileGuides.length
+          ? C.describeGuides({ guides: tileGuides, isZh: lang === 'zh' })
+          : '';
         let promptText = C.buildPrompt({
           instruction: $('prompt').value,
           style: $('style-select').value,
@@ -1898,7 +2125,8 @@
           centerPct: areaPct,
           language: lang,
           envDesc,                       // 周围环境的客观特征（测出来的，不是编的）
-          envFit: envFitOn
+          envFit: envFitOn,
+          guideDesc                      // 用户画的构图引导线（位置精确，比文字描述准）
         });
         if (tiles.length > 1) promptText += '。' + C.tileHint(i, tiles.length, lang === 'zh');
 
@@ -2537,6 +2765,8 @@
     if (i >= 0) S.library[i] = rec; else S.library.unshift(rec);
     saveLibrary();
     updateLibraryBadge();
+    // 首页就是「修改历史」，记录变了要立刻反映出来
+    if (isHomeVisible()) renderHome();
   }
 
   /** 防抖保存：编辑过程中频繁写 localStorage 会卡 */
@@ -2552,6 +2782,318 @@
     const n = S.library.length;
     b.textContent = String(n);
     b.hidden = n === 0;
+  }
+
+  /* ============================ 照片信息 ============================ */
+
+  /**
+   * 展示当前照片的基本信息（EXIF / 尺寸 / 体积 / 色彩配置）。
+   *
+   * 数据来源：导入时已解析并存进 S.meta（EXIF/ICC），尺寸与体积在 setImage 时记录。
+   * 所以打开面板是瞬时的，不需要重新读文件。
+   */
+  function openPhotoInfo() {
+    const el = $('photoinfo');
+    const body = $('photoinfo-body');
+    if (!el || !body) return;
+
+    if (!S.img) {
+      body.innerHTML = '<div class="pi-empty">还没有打开照片</div>';
+      el.hidden = false;
+      return;
+    }
+
+    // EXIF 字段：S.meta.exif 是 TIFF 段，需要解析成字段
+    let exifFields = {};
+    try {
+      if (S.meta && S.meta.exif) exifFields = C.parseExifFields(S.meta.exif);
+    } catch (e) { exifFields = {}; }
+
+    const groups = C.describePhotoInfo({
+      exif: exifFields,
+      width: S.imgW, height: S.imgH,
+      sizeBytes: S.fileSize || 0,
+      fileName: ($('file-name').textContent || '').replace(/（已恢复）$/, ''),
+      mime: S.fileMime || '',
+      icc: S.meta && S.meta.icc,
+      iccIsSrgb: !S.meta || S.meta.iccIsSrgb !== false
+    });
+
+    if (!groups.length) {
+      body.innerHTML = '<div class="pi-empty">读不到这张照片的信息</div>';
+      el.hidden = false;
+      return;
+    }
+
+    body.innerHTML = groups.map((g) =>
+      '<div class="pi-group">' + esc(g.group) + '</div>' +
+      '<div class="pi-card">' +
+        g.items.map((it) =>
+          '<div class="pi-row">' +
+            '<span class="pi-label">' + esc(it.label) + '</span>' +
+            '<span class="pi-value' + (/GPS|定位/.test(it.value) ? ' pi-warn' : '') + '">' +
+              esc(it.value) + '</span>' +
+          '</div>').join('') +
+      '</div>'
+    ).join('');
+    el.hidden = false;
+  }
+
+  function closePhotoInfo() { $('photoinfo').hidden = true; }
+
+  /* ============================ 导出设置 ============================ */
+
+  /**
+   * 导出面板：让用户在导出前选择格式与大小。
+   *
+   * 为什么单独做一个面板（而不是只放在设置里）：
+   *   导出是高频动作，而格式/尺寸经常每张都不一样（这张要发微信、那张要交客户）。
+   *   埋在设置里每次都要翻两层，所以提到导出按钮上。
+   */
+  let expFormat = 'jpeg';
+  let expMaxSide = 0;          // 0 = 原始尺寸
+  let expQuality = 95;
+  let expCustomSide = 0;       // 自定义长边
+
+  function openExportPanel() {
+    if (!S.viewCanvas) { toast('先打开一张照片'); return; }
+    // 首次打开：跟随设置页里选的交付预设（用户刚在设置里选了「微信」，
+    // 打开导出面板却还是「原尺寸」会让人以为设置没生效）；
+    // 之后打开：记住上次在面板里选的那一套。
+    const preset = C.getExportPreset(S.cfg.exportPreset);
+    const chosen = S.cfg.expPresetChosen === true;
+    expFormat = (chosen && S.cfg.expFormat) || preset.format || 'jpeg';
+    expMaxSide = Number(chosen ? S.cfg.expMaxSide : preset.maxSide) || 0;
+    expQuality = Math.round(Number(chosen ? S.cfg.expQuality : (preset.quality || 0.95) * 100));
+    if (!(expQuality >= 60 && expQuality <= 100)) expQuality = 95;
+    expCustomSide = expMaxSide > 0 && !C.EXPORT_SIZES.some((x) => x.maxSide === expMaxSide) ? expMaxSide : 0;
+    renderExportPanel();
+    $('exportpanel').hidden = false;
+  }
+
+  function closeExportPanel() { $('exportpanel').hidden = true; }
+
+  /** 当前导出设置对应的预设对象 */
+  function currentExportPreset() {
+    return C.makeCustomPreset({
+      format: expFormat,
+      maxSide: expMaxSide,
+      quality: expQuality / 100,
+      keepExif: $('exp-exif') ? $('exp-exif').checked : true,
+      keepGps: $('exp-gps') ? $('exp-gps').checked : true,
+      keepIcc: $('exp-icc') ? $('exp-icc').checked : true
+    });
+  }
+
+  function renderExportPanel() {
+    // ---- 格式 ----
+    const fEl = $('exp-formats');
+    if (fEl) {
+      fEl.innerHTML = C.EXPORT_FORMATS.map((f) =>
+        '<button class="st-row st-row-btn' + (f.id === expFormat ? ' selected' : '') + '" data-fmt="' + f.id + '">' +
+          '<span class="st-label">' + esc(f.label) + '</span>' +
+          (f.id === expFormat
+            ? '<svg class="exp-check" viewBox="0 0 24 24"><path d="m5 13 4 4L19 7"/></svg>'
+            : '') +
+        '</button>').join('');
+      fEl.querySelectorAll('[data-fmt]').forEach((b) => {
+        b.onclick = () => { expFormat = b.dataset.fmt; renderExportPanel(); };
+      });
+    }
+
+    // ---- 尺寸 ----
+    const sEl = $('exp-sizes');
+    if (sEl) {
+      const sizes = C.EXPORT_SIZES.concat([{ id: 'custom', label: '自定义…', maxSide: -1 }]);
+      sEl.innerHTML = sizes.map((sz) => {
+        const sel = sz.id === 'custom' ? !!expCustomSide : (expMaxSide === sz.maxSide && !expCustomSide);
+        return '<button class="st-row st-row-btn' + (sel ? ' selected' : '') + '" data-size="' + sz.id + '">' +
+          '<span class="st-label">' + esc(sz.label) + '</span>' +
+          (sel ? '<svg class="exp-check" viewBox="0 0 24 24"><path d="m5 13 4 4L19 7"/></svg>' : '') +
+        '</button>';
+      }).join('');
+      sEl.querySelectorAll('[data-size]').forEach((b) => {
+        b.onclick = () => {
+          const id = b.dataset.size;
+          if (id === 'custom') {
+            expCustomSide = expCustomSide || Math.max(1, Math.min(16384, Math.max(S.imgW, S.imgH)));
+            expMaxSide = expCustomSide;
+          } else {
+            expCustomSide = 0;
+            const sz = C.EXPORT_SIZES.find((x) => x.id === id);
+            expMaxSide = sz ? sz.maxSide : 0;
+          }
+          renderExportPanel();
+        };
+      });
+    }
+
+    // 自定义输入框
+    const cRow = $('exp-custom-row');
+    const cInput = $('exp-custom');
+    if (cRow) cRow.hidden = !expCustomSide;
+    if (cInput) {
+      cInput.value = String(expCustomSide || 0);
+      cInput.oninput = () => {
+        expCustomSide = Math.max(0, Math.min(16384, Number(cInput.value) || 0));
+        expMaxSide = expCustomSide;
+        updateExportSummary();
+      };
+    }
+
+    // 质量滑块（PNG 时无意义，隐藏）
+    const qRow = $('exp-quality-row');
+    const qInput = $('exp-quality');
+    if (qRow) qRow.hidden = expFormat === 'png';
+    if (qInput) {
+      qInput.value = String(expQuality);
+      qInput.oninput = () => {
+        expQuality = Number(qInput.value) || 95;
+        $('exp-quality-val').textContent = expQuality + '%';
+        updateExportSummary();
+      };
+      $('exp-quality-val').textContent = expQuality + '%';
+    }
+
+    // 元数据开关：同样恢复上次的选择（首次打开跟随设置页预设）
+    const basePreset = C.getExportPreset(S.cfg.exportPreset);
+    const meta0 = {
+      expKeepExif: basePreset.keepExif !== false,
+      expKeepGps: basePreset.keepGps !== false,
+      expKeepIcc: basePreset.keepIcc !== false
+    };
+    for (const [id, key] of [['exp-exif', 'expKeepExif'], ['exp-gps', 'expKeepGps'], ['exp-icc', 'expKeepIcc']]) {
+      const el = $(id);
+      if (!el) continue;
+      el.checked = S.cfg.expPresetChosen === true ? (S.cfg[key] !== false) : meta0[key];
+      el.onchange = updateExportSummary;
+    }
+
+    updateExportSummary();
+  }
+
+  /** 刷新「输出尺寸 / 预计体积」这两行 */
+  function updateExportSummary() {
+    if (!S.viewCanvas) return;
+    const preset = currentExportPreset();
+    // 用**原图**尺寸算（导出时会按原图重新合成）
+    const plan = C.planExportWithHint(S.imgW, S.imgH, preset);
+    const sizeEl = $('exp-out-size');
+    const estEl = $('exp-out-size-est');
+    const hintEl = $('exp-hint');
+    if (sizeEl) sizeEl.textContent = plan.w + ' × ' + plan.h + ' px';
+    if (estEl) {
+      const est = C.estimateExportSize({
+        w: plan.w, h: plan.h, format: expFormat, quality: expQuality / 100
+      });
+      estEl.textContent = '约 ' + est.text + '（' + (expFormat === 'png' ? 'PNG 无损' : 'JPEG') + '）';
+    }
+    if (hintEl) hintEl.textContent = plan.hint;
+  }
+
+  /* ============================ 首页（修改历史） ============================ */
+
+  /**
+   * 首页显示什么：有照片在编辑 → 收起；没照片 → 显示修改历史。
+   *
+   * 设计意图：摄影师多数时候是回来接着改上次那张，而不是每次都修新图。
+   * 打开应用先看到历史记录，比看到一个空白画布有用得多。
+   */
+  function isHomeVisible() {
+    const home = $('home');
+    return !!home && !home.hidden;
+  }
+
+  /** 刷新首页（进入/退出编辑、记录变化时调用） */
+  function renderHome() {
+    const home = $('home');
+    if (!home) return;
+    // 有照片在编辑时不显示首页（用户要看画布）
+    const showHome = !S.img;
+    home.hidden = !showHome;
+    if (!showHome) return;
+
+    const list = $('home-list');
+    const empty = $('home-empty');
+    if (!list) return;
+
+    const groups = C.groupWorksByDay(S.library, Date.now());
+    if (empty) empty.hidden = S.library.length > 0;
+    if (!S.library.length) { list.innerHTML = ''; return; }
+
+    list.innerHTML = '';
+    for (const g of groups) {
+      const head = document.createElement('div');
+      head.className = 'home-day';
+      head.textContent = g.label;
+      list.appendChild(head);
+
+      for (const w of g.items) {
+        const item = document.createElement('button');
+        item.className = 'home-item';
+        item.dataset.workId = w.id;
+
+        const img = document.createElement('img');
+        img.className = 'home-thumb';
+        img.loading = 'lazy';
+        img.alt = w.name;
+        if (w.thumb) img.src = w.thumb;
+        item.appendChild(img);
+
+        const meta = document.createElement('div');
+        meta.className = 'home-meta';
+        const nm = document.createElement('div');
+        nm.className = 'home-name';
+        nm.textContent = w.name;
+        // 能继续编辑的标一下，用户才知道点进去能接着改
+        if (w.session) {
+          const tag = document.createElement('span');
+          tag.className = 'home-tag';
+          tag.textContent = '可继续编辑';
+          nm.appendChild(tag);
+        }
+        const sub = document.createElement('div');
+        sub.className = 'home-sub';
+        sub.textContent = C.formatWorkClock(w.at) + ' · ' + w.edits + ' 处修改' +
+          (w.docW ? ' · ' + w.docW + '×' + w.docH : '');
+        meta.appendChild(nm);
+        meta.appendChild(sub);
+        item.appendChild(meta);
+
+        const go = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        go.setAttribute('class', 'home-go');
+        go.setAttribute('viewBox', '0 0 24 24');
+        const gp = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        gp.setAttribute('d', 'm9 6 6 6-6 6');
+        go.appendChild(gp);
+        item.appendChild(go);
+
+        item.onclick = () => {
+          // 有编辑数据就直接进编辑页；没有（已被空间清理）就只预览
+          if (w.session) continueWork(w.id);
+          else openWorkPreview(w.id);
+        };
+        list.appendChild(item);
+      }
+    }
+  }
+
+  /** 工具栏展开 / 收起 */
+  function setToolbarVisible(visible) {
+    const bar = $('bottombar');
+    if (!bar) return;
+    // 收起时用 class 而不是 hidden：要保留过渡动画
+    bar.classList.toggle('collapsed', !visible);
+    S.toolbarVisible = !!visible;
+  }
+
+  /**
+   * 同步「是否显示工具栏」。
+   * 打开照片后进入编辑页 → 展开；回到首页 → 收起。
+   */
+  function syncToolbar() {
+    const editing = !!S.img;
+    setToolbarVisible(editing);
   }
 
   function openLibrary() {
@@ -3457,11 +3999,14 @@
 
   /* ============================ 导出 ============================ */
 
-  async function exportImage() {
+  async function exportImage(overridePreset) {
     if (!S.viewCanvas) return;
-    // 按预设决定格式/质量（自定义时用设置里的值）
-    const preset = C.getExportPreset(S.cfg.exportPreset);
-    const isCustom = preset.id === 'custom';
+    // 导出面板里选好的设置优先；没有（比如旧入口/快捷导出）才回落到设置页的预设
+    const preset = overridePreset || C.getExportPreset(S.cfg.exportPreset);
+    // 设置页那个「自定义」预设的格式/质量存在 S.cfg 里，需要特殊照顾；
+    // 而导出面板生成的预设（explicit）自带格式与质量，必须直接用它自己那套 ——
+    // 否则用户在面板里选了 PNG，导出出来还是 JPEG。
+    const isCustom = preset.id === 'custom' && preset.explicit !== true;
     const fmt = (isCustom ? (S.cfg.format === 'png') : (preset.format === 'png'))
       ? 'image/png' : 'image/jpeg';
     const q = isCustom ? ((Number(S.cfg.quality) || 95) / 100) : preset.quality;
@@ -3579,6 +4124,8 @@
     $('btn-undo').disabled = !(undoStack && undoStack.canUndo());
     $('btn-redo').disabled = !(undoStack && undoStack.canRedo());
     $('btn-save').disabled = !S.viewCanvas;
+    const piBtn = $('btn-photoinfo');
+    if (piBtn) piBtn.disabled = !S.img;
 
     // 历史按钮上的步数（不含「原图」那一格）
     const hb = $('hist-count');
@@ -3651,6 +4198,11 @@
     const inBrush = S.mode === 'brush';
     $('brush-bar').hidden = !inBrush;
     $('brush-tip').hidden = !inBrush;
+    const inGuide = S.mode === 'guide';
+    $('guide-bar').hidden = !inGuide;
+    $('guide-tip').hidden = !inGuide;
+    $('btn-guide').classList.toggle('active', inGuide);
+    updateGuideBadge();
     $('brush-erase').setAttribute('aria-pressed', String(S.brushErase));
     $('brush-erase').classList.toggle('on', S.brushErase);
     $('brush-restore').setAttribute('aria-pressed', String(!S.brushErase));
@@ -3986,9 +4538,32 @@
     // 顶栏
     $('btn-open').onclick = () => $('file-input').click();
     $('btn-pick').onclick = () => $('file-input').click();
+    $('btn-home-pick').onclick = () => $('file-input').click();
     $('btn-demo').onclick = useDemoImage;
     $('btn-settings').onclick = openSettings;
-    $('btn-save').onclick = exportImage;
+    $('btn-save').onclick = openExportPanel;
+    $('btn-photoinfo').onclick = openPhotoInfo;
+    document.querySelectorAll('#photoinfo [data-close]').forEach((el) => { el.onclick = closePhotoInfo; });
+    document.querySelectorAll('#exportpanel [data-close]').forEach((el) => { el.onclick = closeExportPanel; });
+    $('exp-do').onclick = async () => {
+      const btn = $('exp-do');
+      btn.disabled = true;
+      try {
+        // 记住这套选择（下次打开面板还是它），但不改设置页的预设
+        S.cfg.expFormat = expFormat;
+        S.cfg.expMaxSide = expMaxSide;
+        S.cfg.expQuality = expQuality;
+        S.cfg.expKeepExif = $('exp-exif').checked;
+        S.cfg.expKeepGps = $('exp-gps').checked;
+        S.cfg.expKeepIcc = $('exp-icc').checked;
+        S.cfg.expPresetChosen = true;    // 之后打开面板就按这套来
+        saveCfg();
+        closeExportPanel();
+        await exportImage(currentExportPreset());
+      } finally {
+        btn.disabled = false;
+      }
+    };
     $('btn-undo').onclick = undo;
     $('btn-redo').onclick = redo;
 
@@ -4002,12 +4577,24 @@
 
     // 工具
     document.querySelectorAll('.tool[data-mode]').forEach((b) => {
+      if (b.id === 'btn-guide') return;   // 引导线有自己的处理（见下）
       b.onclick = () => {
         S.mode = b.dataset.mode;
         if (S.mode !== 'brush') { S.strokes = []; invalidateMask(); }
         updateUI(); draw();
       };
     });
+    $('btn-guide').onclick = () => {
+      // 引导线按钮不走通用逻辑：它要保证进入模式后类型选择器是渲染好的
+      S.mode = 'guide';
+      S.strokes = []; invalidateMask();
+      renderGuideKinds();
+      if (!S.rect) toast('先框选一块区域，再画引导线');
+      else toast('在选区内拖一条线，告诉模型构图位置');
+      updateUI(); draw();
+    };
+    $('guide-clear').onclick = clearGuides;
+    renderGuideKinds();
     $('btn-layers').onclick = openLayers;
     document.querySelectorAll('#layers [data-close]').forEach((el) => { el.onclick = closeLayers; });
     $('btn-history').onclick = openHistory;
@@ -4022,6 +4609,7 @@
       const m = 0.08;
       S.rect = C.clampRect({ x: S.docW * m, y: S.docH * m, w: S.docW * (1 - 2 * m), h: S.docH * (1 - 2 * m) }, S.docW, S.docH);
       S.strokes = []; invalidateMask();
+      S.guides = []; updateGuideBadge();
       snapRectToModel(); draw(); updateUI();
     };
 
@@ -4458,6 +5046,8 @@
         docW: S.docW, docH: S.docH,
         rect: S.rect,
         strokes: S.strokes,
+        guides: S.guides,          // 引导线也是用户的手工成果，不能丢
+        guideKind: S.guideKind,    // 上次选的引导线类型
         dropped: plan.dropped,
         items: plan.items.map((it) => Object.assign({}, it, {
           mask: it.mask ? C.packMask(new Float32Array(it.mask)) : null,
@@ -4551,16 +5141,23 @@
       S.docRev++;                  // 打包缓存失效
       S.rect = j.rect || null;
       S.strokes = j.strokes || [];
+      // 旧版本存档里没有 guides 字段 → 退化成空数组，不影响恢复
+      S.guides = Array.isArray(j.guides) ? j.guides.map(C.normalizeGuide) : [];
+      S.guideKind = C.getGuideKind(j.guideKind).id;
+      renderGuideKinds();
+      updateGuideBadge();
 
       $('file-name').textContent = (j.fileName || 'photo.jpg') + '（已恢复）';
       $('file-meta').textContent = `${S.docW}×${S.docH} · 已恢复 ${S.edits.length} 处修改` +
         (j.dropped ? `（较早的 ${j.dropped} 次未能保存）` : '');
-      $('empty').hidden = true;
       $('hud').hidden = false;
       $('btn-save').disabled = false;
 
       rebuildViewCanvas();
       fitToScreen();
+      // 恢复 = 回到编辑页，首页要收起、工具栏要展开
+      renderHome();
+      syncToolbar();
       updateUI();
       toast('已恢复上次未完成的编辑（' + S.edits.length + ' 处修改）', 3600);
     } catch (e) {
@@ -4722,6 +5319,10 @@
     undoStack = C.createUndoStack(100);
     refreshBgColor();
     bind();
+    // 首屏就是「修改历史」：没有照片时显示首页，工具栏默认收起。
+    // 必须在 bind 之后 —— 渲染出来的条目要能绑定点击事件。
+    renderHome();
+    syncToolbar();
     syncSettingsUI();
     updateUI();
     resizeCanvas();
@@ -4811,6 +5412,28 @@
     writeUpdateState,
     fetchReleases,
     openExternal,
+    // 首页 / 工具栏 / 照片信息 / 导出（供测试与外部调用）
+    renderHome,
+    isHomeVisible,
+    setToolbarVisible,
+    syncToolbar,
+    toolbarVisible: () => S.toolbarVisible,
+    openPhotoInfo,
+    closePhotoInfo,
+    openExportPanel,
+    closeExportPanel,
+    currentExportPreset,
+    renderExportPanel,
+    updateExportSummary,
+    exportPresetState: () => ({ expFormat, expMaxSide, expQuality, expCustomSide }),
+    exportImage,
+    // 引导线（供测试与外部调用）
+    guides: () => S.guides,
+    setGuides: (list) => { S.guides = (list || []).map(C.normalizeGuide); updateGuideBadge(); draw(); },
+    clearGuides,
+    renderGuideKinds,
+    drawGuides,
+    hitGuide,
     // 对比视图（供测试与外部调用）
     compareView: () => cmpView,
     compareSplit: () => cmpSplit,

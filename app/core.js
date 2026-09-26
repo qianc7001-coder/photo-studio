@@ -1726,6 +1726,115 @@
   }
 
   /**
+   * 导出尺寸的自定义选项（长边像素）。
+   *
+   * 用户明确要求「可以选择格式、大小」，所以除了内置预设，
+   * 还要能自己定尺寸 —— 预设覆盖不到的场合（比如交付要求长边 2400）就得手动填。
+   */
+  const EXPORT_SIZES = [
+    { id: 'orig', label: '原始尺寸', maxSide: 0 },
+    { id: '4096', label: '4096 px（4K 级）', maxSide: 4096 },
+    { id: '3000', label: '3000 px（长边）', maxSide: 3000 },
+    { id: '2400', label: '2400 px', maxSide: 2400 },
+    { id: '2000', label: '2000 px（微信）', maxSide: 2000 },
+    { id: '1600', label: '1600 px（网页）', maxSide: 1600 },
+    { id: '1080', label: '1080 px（手机屏）', maxSide: 1080 }
+  ];
+
+  const EXPORT_FORMATS = [
+    { id: 'jpeg', label: 'JPEG（体积小，通用）', mime: 'image/jpeg', ext: 'jpg' },
+    { id: 'png', label: 'PNG（无损，体积大）', mime: 'image/png', ext: 'png' }
+  ];
+
+  /**
+   * 把「自定义导出设置」规范化成和预设一样的结构，供 exportImage 统一使用。
+   *
+   * 这样自定义与预设走同一条代码路径，不会出现「预设能用、自定义漏了某项」。
+   *
+   * @param {object} o { format, maxSide, quality, keepExif, keepGps, keepIcc }
+   * @returns {object} 与 EXPORT_PRESETS 元素同构
+   */
+  function makeCustomPreset(o) {
+    const opt = o || {};
+    const fmt = EXPORT_FORMATS.find((f) => f.id === opt.format) || EXPORT_FORMATS[0];
+    const maxSide = Math.max(0, Math.min(16384, Math.round(num(opt.maxSide, 0))));
+    return {
+      id: 'custom',
+      label: '自定义',
+      desc: '自己指定格式与长边像素',
+      // explicit=true：这个预设自己带齐了格式与质量，
+      // 调用方必须直接用，不能再去读设置页的 S.cfg.format / S.cfg.quality。
+      // （设置页那个「自定义」预设的格式/质量存在 S.cfg 里，两者不能混为一谈）
+      explicit: true,
+      maxSide,
+      format: fmt.id,
+      // PNG 无损，质量参数无意义；JPEG 夹在 60~100
+      quality: fmt.id === 'png' ? 1 : Math.max(0.6, Math.min(1, num(opt.quality, 0.95))),
+      keepExif: opt.keepExif !== false,
+      keepGps: opt.keepGps !== false,
+      keepIcc: opt.keepIcc !== false
+    };
+  }
+
+  /**
+   * 规划导出的最终尺寸，并把「会不会被放大」这件事说清楚。
+   *
+   * 与 planExportSize 的区别：多返回一个 hint 文案。
+   * 小图不该被放大（会糊），所以 maxSide 大于原图时按原图输出，
+   * 但要告诉用户「你要的 4000px 做不到，已按原图 1200px 输出」——
+   * 否则用户以为设置没生效。
+   *
+   * @returns {{w:number, h:number, scaled:boolean, upscaled:boolean, hint:string}}
+   */
+  function planExportWithHint(w, h, preset) {
+    const W = Math.max(1, Math.round(num(w, 1)));
+    const H = Math.max(1, Math.round(num(h, 1)));
+    const maxSide = num(preset && preset.maxSide, 0);
+    const cur = Math.max(W, H);
+    if (maxSide <= 0) {
+      return { w: W, h: H, scaled: false, upscaled: false, hint: '原始尺寸 ' + W + ' × ' + H };
+    }
+    if (cur <= maxSide) {
+      const hint = cur < maxSide
+        ? '原图长边 ' + cur + ' px，小于设定的 ' + maxSide + ' px —— 不放大（避免模糊），按原图输出'
+        : '原图长边正好 ' + cur + ' px';
+      return { w: W, h: H, scaled: false, upscaled: false, hint };
+    }
+    const k = maxSide / cur;
+    const nw = Math.max(1, Math.round(W * k)), nh = Math.max(1, Math.round(H * k));
+    return {
+      w: nw, h: nh, scaled: true, upscaled: false,
+      hint: '缩放到 ' + nw + ' × ' + nh + '（长边 ' + maxSide + ' px）'
+    };
+  }
+
+  /**
+   * 预估导出体积（粗略）。
+   *
+   * 为什么需要：用户在「格式/尺寸」之间权衡时最关心体积 ——
+   * PNG 可能比 JPEG 大十倍，选之前应该心里有数。
+   * 用「像素数 × 每像素经验字节数」估算，数量级正确即可。
+   *
+   * @param {object} o { w, h, format, quality }
+   * @returns {{bytes:number, text:string}}
+   */
+  function estimateExportSize(o) {
+    const opt = o || {};
+    const px = Math.max(1, num(opt.w, 1)) * Math.max(1, num(opt.h, 1));
+    let perPx;
+    if (opt.format === 'png') {
+      // PNG 取决于内容复杂度，照片类通常 1.2~2.5 字节/像素，取中值
+      perPx = 1.8;
+    } else {
+      // JPEG：质量越高每像素字节越多（0.95 → 约 0.55 B/px）
+      const q = Math.max(0.6, Math.min(1, num(opt.quality, 0.95)));
+      perPx = 0.12 + (q - 0.6) * 1.05;
+    }
+    const bytes = Math.max(1024, Math.round(px * perPx));
+    return { bytes, text: formatBytes(bytes) };
+  }
+
+  /**
    * 从 EXIF 里移除 GPS 信息（社交平台分享前建议去掉，避免暴露拍摄位置）。
    *
    * 做法：找到 GPS IFD 指针（tag 0x8825）并清零，这样 GPS 数据就成了不可达的
@@ -2864,6 +2973,216 @@
     return list.map((x) => x.e);
   }
 
+  /* ====================== 7.03b 引导线（让模型按你的意图构图） ====================== */
+
+  /**
+   * 引导线的类型。
+   *
+   * 为什么需要这个功能：
+   *   文字描述构图很吃力 —— 「把地平线放在画面下方三分之一处」这种要求，
+   *   模型只能猜。而画一条线直接告诉它「地平线在这里」，准确率高得多。
+   *   这是把「构图意图」从模糊的文字变成精确的几何约束。
+   */
+  const GUIDE_KINDS = [
+    { id: 'horizon', zh: '地平线', en: 'horizon line', desc: '水平参考：地平线 / 水平面' },
+    { id: 'vertical', zh: '垂直线', en: 'vertical line', desc: '垂直参考：墙角 / 立柱 / 树干' },
+    { id: 'diagonal', zh: '对角线', en: 'diagonal line', desc: '视线引导：道路 / 河流 / 栏杆' },
+    { id: 'subject', zh: '主体位置', en: 'subject placement', desc: '标出主体应出现的位置' }
+  ];
+
+  /** 取引导线类型定义（未知类型退化为第一条） */
+  function getGuideKind(id) {
+    return GUIDE_KINDS.find((k) => k.id === id) || GUIDE_KINDS[0];
+  }
+
+  /** 归一化一条引导线：夹取端点、补齐字段 */
+  function normalizeGuide(g) {
+    const G = g || {};
+    return {
+      kind: getGuideKind(G.kind).id,
+      x1: clamp01(num(G.x1, 0)),
+      y1: clamp01(num(G.y1, 0)),
+      x2: clamp01(num(G.x2, 0)),
+      y2: clamp01(num(G.y2, 0))
+    };
+  }
+
+  /**
+   * 把手画的线吸附到常见方向。
+   *
+   * 为什么需要：手指拖出来的线必然带抖动 —— 想画地平线却拖出 3~8 度的斜角。
+   * 直接把这个斜角写进提示词，模型会以为「地平线是斜的」，比不画还糟。
+   * 所以与水平/垂直偏差在 12 度以内时拉直，超出则保留原角度
+   * （透视下的地平线确实可能倾斜，不能强行掰直）。
+   *
+   * 吸附后同步更新 kind：用户选的是「地平线」，但画出来明显是竖线时，
+   * 以实际画的为准 —— 手上的动作比选中的按钮更可信。
+   *
+   * @param {object} g 引导线
+   * @returns {object} 吸附后的引导线
+   */
+  const GUIDE_SNAP_DEG = 12;
+
+  function snapGuide(g) {
+    const G = normalizeGuide(g);
+    const dx = G.x2 - G.x1, dy = G.y2 - G.y1;
+    if (Math.abs(dx) < 1e-6 && Math.abs(dy) < 1e-6) return G;
+    // 用屏幕上的角度判断（选区可能不是正方形，不能只看归一化坐标）
+    const ang = Math.atan2(dy, dx) * 180 / Math.PI;
+    const near = (target) => Math.abs(((ang - target + 540) % 180) - 90) > 90 - GUIDE_SNAP_DEG;
+    const out = { kind: G.kind, x1: G.x1, y1: G.y1, x2: G.x2, y2: G.y2 };
+
+    if (Math.abs(dy) < 1e-6 || near(0)) {
+      // 拉平到两端点平均高度
+      const y = (G.y1 + G.y2) / 2;
+      out.y1 = y; out.y2 = y;
+      // 竖着画的「地平线」其实是垂直线，以手上的动作为准
+      if (out.kind === 'horizon' || out.kind === 'vertical') out.kind = 'horizon';
+    } else if (Math.abs(dx) < 1e-6 || near(90)) {
+      const x = (G.x1 + G.x2) / 2;
+      out.x1 = x; out.x2 = x;
+      if (out.kind === 'horizon' || out.kind === 'vertical') out.kind = 'vertical';
+    }
+    return out;
+  }
+
+  /**
+   * 判断一条线接近水平还是垂直。
+   * 不是硬性限制（透视下地平线也可能倾斜），只用于给出提示。
+   */
+  function guideOrientation(g) {
+    const G = normalizeGuide(g);
+    const dx = Math.abs(G.x2 - G.x1), dy = Math.abs(G.y2 - G.y1);
+    if (dx < 1e-6 && dy < 1e-6) return 'point';
+    if (dy < dx * 0.25) return 'horizontal';
+    if (dx < dy * 0.25) return 'vertical';
+    return 'diagonal';
+  }
+
+  /**
+   * 把引导线翻译成**模型能理解的构图说明**。
+   *
+   * 关键设计：不用像素坐标（模型看不到我们的坐标系），而是用
+   * 「画面位置 + 相对比例」描述 —— 例如「地平线在画面高度 62% 处」。
+   * 同时给出三分法参考（33%/66%），因为这是摄影构图的通用语言。
+   *
+   * @param {object} o { guides, isZh }
+   * @returns {string} 可直接拼进提示词的说明
+   */
+  function describeGuides(o) {
+    const opt = o || {};
+    const isZh = opt.isZh !== false;
+    const list = (opt.guides || []).map(normalizeGuide);
+    if (!list.length) return '';
+
+    /** 把 0~1 的位置说成人话：百分比 + 三分法参考 */
+    const posWord = (v) => {
+      const pct = Math.round(v * 100);
+      let ref = '';
+      // 与三分法/中心线的偏差小于阈值时就点名，帮模型对齐构图
+      if (Math.abs(v - 1 / 3) < 0.06) ref = isZh ? '（约三分之一处）' : ' (about one third)';
+      else if (Math.abs(v - 2 / 3) < 0.06) ref = isZh ? '（约三分之二处）' : ' (about two thirds)';
+      else if (Math.abs(v - 0.5) < 0.05) ref = isZh ? '（居中）' : ' (centered)';
+      return pct + '%' + ref;
+    };
+
+    const lines = [];
+    for (const g of list) {
+      const mx = (g.x1 + g.x2) / 2, my = (g.y1 + g.y2) / 2;
+      if (isZh) {
+        if (g.kind === 'horizon') {
+          lines.push('水平参考线（地平线/水平面）位于画面高度 ' + posWord(my) +
+            '，左右贯穿 —— 生成画面里的地平线必须落在这条线上');
+        } else if (g.kind === 'vertical') {
+          lines.push('垂直参考线位于画面宽度 ' + posWord(mx) +
+            '，上下贯穿 —— 竖直结构（墙面/立柱/树干）必须沿它保持竖直');
+        } else if (g.kind === 'diagonal') {
+          lines.push('斜向引导线从画面横向 ' + posWord(g.x1) + ' 延伸到 ' + posWord(g.x2) +
+            '，纵向从 ' + posWord(g.y1) + ' 到 ' + posWord(g.y2) +
+            ' —— 让道路/河流/栏杆等线性元素沿这个方向延伸，形成纵深');
+        } else {
+          lines.push('主体应出现在：横向 ' + posWord(mx) + '、纵向 ' + posWord(my) +
+            ' —— 把这个位置留给画面主体');
+        }
+      } else {
+        if (g.kind === 'horizon') {
+          lines.push('A horizontal reference line (horizon/waterline) sits at ' + posWord(my) +
+            ' of the frame height, spanning the full width — the generated horizon must land on it');
+        } else if (g.kind === 'vertical') {
+          lines.push('A vertical reference line sits at ' + posWord(mx) +
+            ' of the frame width, spanning top to bottom — vertical structures must stay vertical along it');
+        } else if (g.kind === 'diagonal') {
+          lines.push('A diagonal leading line runs from ' + posWord(g.x1) + ' to ' + posWord(g.x2) +
+            ' horizontally and ' + posWord(g.y1) + ' to ' + posWord(g.y2) +
+            ' vertically — let linear elements follow it to create depth');
+        } else {
+          lines.push('The main subject should be placed at ' + posWord(mx) +
+            ' horizontally and ' + posWord(my) + ' vertically');
+        }
+      }
+    }
+
+    if (isZh) {
+      return '【构图引导】我画了 ' + list.length + ' 条引导线，请严格按它们构图：' +
+        lines.join('；') +
+        '。这些线只用于说明构图位置，不要在画面里画出任何线条、标记或辅助线。';
+    }
+    return '[Composition guides] I drew ' + list.length +
+      ' guide line(s); compose strictly according to them: ' + lines.join('; ') +
+      '. These lines only indicate composition — do not draw any lines, marks or overlays.';
+  }
+
+  /**
+   * 把引导线从「相对选区的归一化坐标」换算到「请求图坐标」。
+   *
+   * 请求图带上下文外扩（contextPct），所以必须换算，
+   * 否则引导线位置会偏移，模型会按错误位置构图。
+   *
+   * @param {object} o { guides, rect, ctxRect }
+   */
+  function mapGuidesToRequest(o) {
+    const opt = o || {};
+    const rect = opt.rect || { x: 0, y: 0, w: 1, h: 1 };
+    const ctx = opt.ctxRect || rect;
+    const w = Math.max(1, num(ctx.w, 1)), h = Math.max(1, num(ctx.h, 1));
+    // clip=true：分块生成时，落在本块之外的引导线直接丢掉。
+    // 若不丢，clamp01 会把它压到边缘，模型会以为「地平线就在图片最上边」。
+    if (opt.clip) {
+      const mid = (g) => ({
+        x: rect.x + ((g.x1 + g.x2) / 2) * rect.w,
+        y: rect.y + ((g.y1 + g.y2) / 2) * rect.h
+      });
+      const pad = 0.02;
+      return (opt.guides || [])
+        .map(normalizeGuide)
+        .filter((g) => {
+          const m = mid(g);
+          return m.x >= ctx.x - ctx.w * pad && m.x <= ctx.x + ctx.w * (1 + pad) &&
+            m.y >= ctx.y - ctx.h * pad && m.y <= ctx.y + ctx.h * (1 + pad);
+        })
+        .map((g) => ({
+          kind: g.kind,
+          x1: clamp01((rect.x + g.x1 * rect.w - ctx.x) / w),
+          y1: clamp01((rect.y + g.y1 * rect.h - ctx.y) / h),
+          x2: clamp01((rect.x + g.x2 * rect.w - ctx.x) / w),
+          y2: clamp01((rect.y + g.y2 * rect.h - ctx.y) / h)
+        }));
+    }
+    return (opt.guides || []).map((raw) => {
+      const g = normalizeGuide(raw);
+      // 引导线存的是「相对选区」的归一化坐标：先还原成文档坐标，再换算到请求图
+      const dx1 = rect.x + g.x1 * rect.w, dy1 = rect.y + g.y1 * rect.h;
+      const dx2 = rect.x + g.x2 * rect.w, dy2 = rect.y + g.y2 * rect.h;
+      return {
+        kind: g.kind,
+        x1: clamp01((dx1 - ctx.x) / w),
+        y1: clamp01((dy1 - ctx.y) / h),
+        x2: clamp01((dx2 - ctx.x) / w),
+        y2: clamp01((dy2 - ctx.y) / h)
+      };
+    });
+  }
+
   /* ====================== 7.04 无缝融合（模型输出对齐原图） ====================== */
 
   /**
@@ -3623,6 +3942,227 @@
     return null;
   }
 
+  /* ====================== 7.1b EXIF 字段解析（给「照片信息」用） ====================== */
+
+  /** EXIF 里我们关心的字段 → 标签 */
+  const EXIF_TAGS = {
+    0x010F: 'make',           // 厂商
+    0x0110: 'model',          // 机型
+    0x0112: 'orientation',
+    0x011A: 'xResolution',
+    0x011B: 'yResolution',
+    0x0131: 'software',       // 软件
+    0x0132: 'dateTime',       // 修改时间
+    0x829A: 'exposureTime',   // 快门
+    0x829D: 'fNumber',        // 光圈
+    0x8827: 'iso',            // ISO
+    0x9003: 'dateTimeOriginal',  // 拍摄时间
+    0x920A: 'focalLength',    // 焦距
+    0x9291: 'subSecOriginal',
+    0xA002: 'pixelX',
+    0xA003: 'pixelY',
+    0xA405: 'focalLength35',  // 等效焦距
+    0xA434: 'lensModel'       // 镜头
+  };
+  const EXIF_GPS_IFD = 0x8825;
+
+  /**
+   * 解析 EXIF，取出常用字段。
+   *
+   * 为什么需要：摄影师常要确认「这张是什么机器、什么参数拍的」，
+   * 而修图台导出时会保留这些信息 —— 用户需要一个地方能看到它们，
+   * 否则「保留了元数据」是看不见摸不着的。
+   *
+   * 实现上只解析 IFD0 与 ExifIFD（够用），遇到不认识的字段直接跳过，
+   * 任何异常都退化成「读不到」而不是抛错。
+   *
+   * @param {Uint8Array} tiff EXIF 的 TIFF 段（extractExif 的返回值）
+   * @returns {object} 字段名 → 值；读不到返回 {}
+   */
+  function parseExifFields(tiff) {
+    const out = {};
+    if (!tiff || tiff.length < 8) return out;
+    try {
+      const le = tiff[0] === 0x49 && tiff[1] === 0x49;
+      const be = tiff[0] === 0x4d && tiff[1] === 0x4d;
+      if (!le && !be) return out;
+      const u16 = (o) => (o + 2 <= tiff.length
+        ? (le ? (tiff[o] | (tiff[o + 1] << 8)) : ((tiff[o] << 8) | tiff[o + 1])) : 0);
+      const u32 = (o) => (o + 4 <= tiff.length
+        ? (le
+          ? ((tiff[o] | (tiff[o + 1] << 8) | (tiff[o + 2] << 16) | (tiff[o + 3] << 24)) >>> 0)
+          : (((tiff[o] << 24) | (tiff[o + 1] << 16) | (tiff[o + 2] << 8) | tiff[o + 3]) >>> 0))
+        : 0);
+      const i32 = (o) => {
+        const v = u32(o);
+        return v > 0x7fffffff ? v - 0x100000000 : v;
+      };
+      if (u16(2) !== 0x002a) return out;
+
+      /** 读一条 IFD 条目指向的实际值 */
+      const readValue = (entry) => {
+        const type = u16(entry + 2);
+        const count = u32(entry + 4);
+        const sizes = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1, 9: 4, 10: 8 };
+        const sz = sizes[type] || 1;
+        const total = count * sz;
+        // 值不超过 4 字节时内联存放，否则存偏移
+        const off = total <= 4 ? entry + 8 : u32(entry + 8);
+        if (off < 0 || off + total > tiff.length) return null;
+
+        if (type === 2) {                       // ASCII 字符串
+          let s = '';
+          for (let i = 0; i < count; i++) {
+            const ch = tiff[off + i];
+            if (ch === 0) break;
+            s += String.fromCharCode(ch);
+          }
+          return s.trim();
+        }
+        if (type === 3) return u16(off);        // SHORT
+        if (type === 4) return u32(off);        // LONG
+        if (type === 9) return i32(off);        // SLONG
+        if (type === 5 || type === 10) {        // RATIONAL / SRATIONAL
+          const num = type === 5 ? u32(off) : i32(off);
+          const den = type === 5 ? u32(off + 4) : i32(off + 4);
+          return den === 0 ? null : num / den;
+        }
+        return null;
+      };
+
+      let gpsFound = false;
+      const walk = (ifdOff, depth) => {
+        if (depth > 2 || ifdOff <= 0 || ifdOff + 2 > tiff.length) return;
+        const count = u16(ifdOff);
+        // 防御：IFD 条目数异常大说明数据损坏，直接放弃
+        if (count > 512) return;
+        for (let k = 0; k < count; k++) {
+          const e = ifdOff + 2 + k * 12;
+          if (e + 12 > tiff.length) break;
+          const tag = u16(e);
+          if (tag === EXIF_GPS_IFD) { gpsFound = true; continue; }
+          if (tag === 0x8769) {               // ExifIFD 指针，递归进去
+            walk(u32(e + 8), depth + 1);
+            continue;
+          }
+          const key = EXIF_TAGS[tag];
+          if (!key) continue;
+          const v = readValue(e);
+          if (v !== null && v !== '' && out[key] === undefined) out[key] = v;
+        }
+      };
+      walk(u32(4), 0);
+      if (gpsFound) out.hasGps = true;
+      return out;
+    } catch (e) {
+      return out;    // 元数据损坏不该影响看图
+    }
+  }
+
+  /**
+   * 把解析出来的 EXIF 字段整理成「给人看的信息列表」。
+   *
+   * 分成几组，每组若干条 —— 界面按组展示，用户一眼看到关心的项。
+   *
+   * @param {object} o { exif, width, height, sizeBytes, fileName, mime, icc, iccIsSrgb, metaSource }
+   * @returns {Array<{group:string, items:Array<{label:string, value:string}>}>}
+   */
+  function describePhotoInfo(o) {
+    const opt = o || {};
+    const ex = opt.exif || {};
+    const groups = [];
+    const push = (group, items) => {
+      const list = items.filter((x) => x && x.value !== '' && x.value != null);
+      if (list.length) groups.push({ group, items: list });
+    };
+    const fmtNum = (v, digits) => {
+      const n = num(v, NaN);
+      if (!Number.isFinite(n)) return '';
+      return digits == null ? String(Math.round(n)) : n.toFixed(digits);
+    };
+
+    // ---- 文件 ----
+    push('文件', [
+      { label: '文件名', value: String(opt.fileName || '') },
+      { label: '格式', value: String(opt.mime || '').replace('image/', '').toUpperCase() },
+      {
+        label: '尺寸',
+        value: opt.width && opt.height ? opt.width + ' × ' + opt.height + ' 像素' : ''
+      },
+      {
+        label: '像素数',
+        value: opt.width && opt.height
+          ? ((opt.width * opt.height) / 1e6).toFixed(1) + ' MP' : ''
+      },
+      { label: '文件大小', value: opt.sizeBytes ? formatBytes(opt.sizeBytes) : '' }
+    ]);
+
+    // ---- 拍摄设备 ----
+    const make = String(ex.make || '').trim();
+    const model = String(ex.model || '').trim();
+    // 机型里常已含厂商名（如 "Canon EOS R5"），避免重复显示
+    const device = model && make && model.toLowerCase().indexOf(make.toLowerCase()) === 0
+      ? model : [make, model].filter(Boolean).join(' ');
+    push('拍摄设备', [
+      { label: '相机 / 手机', value: device },
+      { label: '镜头', value: String(ex.lensModel || '').trim() },
+      { label: '软件', value: String(ex.software || '').trim() }
+    ]);
+
+    // ---- 拍摄参数 ----
+    const shot = [];
+    if (ex.exposureTime != null) {
+      const t = num(ex.exposureTime, 0);
+      // 快门速度：小于 1 秒用分数表示（摄影惯例）
+      shot.push({
+        label: '快门',
+        value: t >= 1 ? t.toFixed(1) + ' 秒' : '1/' + Math.round(1 / t) + ' 秒'
+      });
+    }
+    if (ex.fNumber != null) shot.push({ label: '光圈', value: 'f/' + num(ex.fNumber, 0).toFixed(1) });
+    if (ex.iso != null) shot.push({ label: 'ISO', value: 'ISO ' + fmtNum(ex.iso) });
+    if (ex.focalLength != null) {
+      const f = num(ex.focalLength, 0);
+      const f35 = ex.focalLength35 != null ? num(ex.focalLength35, 0) : null;
+      shot.push({
+        label: '焦距',
+        value: f.toFixed(0) + ' mm' + (f35 && Math.abs(f35 - f) > 1 ? '（等效 ' + f35.toFixed(0) + ' mm）' : '')
+      });
+    }
+    push('拍摄参数', shot);
+
+    // ---- 时间 ----
+    const dt = String(ex.dateTimeOriginal || ex.dateTime || '').trim();
+    push('时间', [{ label: '拍摄时间', value: formatExifDate(dt) }]);
+
+    // ---- 色彩与方向 ----
+    push('色彩与方向', [
+      { label: '色彩配置', value: opt.icc ? (opt.iccIsSrgb ? 'sRGB（标准）' : '广色域（导出时转 sRGB）') : '' },
+      { label: '方向标记', value: ex.orientation != null && ex.orientation !== 1 ? '已校正（原图带旋转标记）' : '' }
+    ]);
+
+    // ---- 隐私 ----
+    if (ex.hasGps) {
+      groups.push({
+        group: '隐私',
+        items: [{ label: '定位信息', value: '照片含 GPS 定位（导出到社交平台时会自动移除）' }]
+      });
+    }
+    return groups;
+  }
+
+  /**
+   * EXIF 的日期格式是 `YYYY:MM:DD HH:MM:SS`（用冒号分隔日期），
+   * 转成 `YYYY-MM-DD HH:MM:SS` 更符合阅读习惯。无法识别时原样返回。
+   */
+  function formatExifDate(s) {
+    const str = String(s || '').trim();
+    if (!str) return '';
+    const m = /^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(str);
+    if (!m) return str;
+    return m[1] + '-' + m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5] + ':' + m[6];
+  }
+
   /** 把 EXIF 里的 Orientation 改写为 1（像素已被浏览器旋转，写回时不能再转） */
   function normalizeExifOrientation(tiff) {
     if (!tiff || tiff.length < 8) return tiff;
@@ -3999,6 +4539,9 @@
     // 之前靠「把选区涂成蓝色」来告诉模型改哪里，结果蓝色被当成画面内容，
     // 生成结果整体偏蓝。现在改成用文字描述区域范围，图片保持原样。
     const center = Math.round(Math.min(100, Math.max(10, num(o.centerPct, 80))));
+    // 构图引导线：用户亲手画的位置比任何文字描述都准。
+    // 放在环境契合约束之后、收尾约束之前 —— 越靠近结尾，模型越当回事。
+    const guideSeg = String(o.guideDesc || '').trim();
 
     if (isZh) {
       if (o.scope === 'global') {
@@ -4016,6 +4559,7 @@
       }
       if (extra) parts.push(extra);
       if (envSeg) parts.push(envSeg);
+      if (guideSeg) parts.push(guideSeg);
       parts.push('只改动上面描述的内容，其余部分不要改动');
       parts.push('输出必须是一张完整的真实照片，不要出现拼接痕迹、边框、水印或多余元素');
     } else {
@@ -4034,6 +4578,7 @@
       }
       if (extra) parts.push(extra);
       if (envSeg) parts.push(envSeg);
+      if (guideSeg) parts.push(guideSeg);
       parts.push('Change only what is described above and leave everything else untouched');
       parts.push('Output a single complete photorealistic photo, no seams, frames, watermarks or extra elements');
     }
@@ -4119,8 +4664,13 @@
     describeEnvironment, environmentClause,
     textureEnergy, planGrain, grainNoise, assessSeam,
     EXPORT_PRESETS, getExportPreset, planExportSize, stripGpsFromExif, planExportMetadata,
+    EXPORT_SIZES, EXPORT_FORMATS, makeCustomPreset, planExportWithHint, estimateExportSize,
     MODEL_PRICES, DEFAULT_USD_CNY, modelPrice, estimateCost, accumulateSpend, formatUsd, formatCny,
     parseJpegSegments, extractExif, extractICC, readExifOrientation,
+    parseExifFields, describePhotoInfo, formatExifDate, EXIF_TAGS,
+    // 引导线
+    GUIDE_KINDS, getGuideKind, normalizeGuide, snapGuide, guideOrientation,
+    describeGuides, mapGuidesToRequest,
     normalizeExifOrientation, buildExifPayload, injectMetadata, isSrgbProfile,
     // 模型
     PROVIDERS, getProvider, findModel, joinUrl, buildImageRequest, parseImageResponse, extractError,

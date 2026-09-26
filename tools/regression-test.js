@@ -2044,5 +2044,144 @@ console.log('\n【更新】应用内检测新版本（不能依赖 /releases/lat
 /* ---------- 检查更新 ---------- */
 /* ---------- 检查更新 ---------- */
 /* ---------- 检查更新 ---------- */
+// ===== 照片信息 · 引导线 · 导出设置（回归块） =====
+console.log('\n【照片信息】修图前必须先看清这张照片是什么');
+(() => {
+  // 真实相机照片的 EXIF 里机型/镜头/参数必须能读出来，
+  // 否则「导出保留拍摄信息」对用户就是不可验证的承诺。
+  const fs3 = require('fs');
+  const appSrc = fs3.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html = fs3.readFileSync(__dirname + '/../app/index.html', 'utf8');
+
+  // 1) 解析器对真实字节流的鲁棒性：任何畸形输入都不能抛错
+  const bad = [
+    new Uint8Array(0), new Uint8Array([1]), new Uint8Array([0x49, 0x49]),
+    new Uint8Array([0x49, 0x49, 0x2a, 0x00, 0xff, 0xff, 0xff, 0xff]),
+    new Uint8Array([0x4d, 0x4d, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x08]),
+    new Uint8Array(64).fill(0xff)
+  ];
+  let threw = false;
+  for (const b of bad) {
+    try { C.parseExifFields(b); } catch (e) { threw = true; }
+  }
+  t('畸形 EXIF 一律不抛错', !threw);
+
+  // IFD 条目数异常大（损坏）时必须放弃而不是死循环
+  const huge = new Uint8Array(32);
+  huge[0] = 0x49; huge[1] = 0x49; huge[2] = 0x2a; huge[3] = 0x00;
+  new DataView(huge.buffer).setUint32(4, 8, true);
+  new DataView(huge.buffer).setUint16(8, 0xffff, true);
+  t('损坏的 IFD 条目数不导致崩溃', (() => {
+    try { C.parseExifFields(huge); return true; } catch (e) { return false; }
+  })());
+
+  // 2) 界面接线
+  t('顶栏按钮打开照片信息', /\$\('btn-photoinfo'\)\.onclick = openPhotoInfo/.test(appSrc));
+  t('打开面板时无需重新读文件（用导入时缓存的 meta）',
+    /function openPhotoInfo[\s\S]{0,900}S\.meta/.test(appSrc));
+  t('信息面板分「文件」组', /push\('文件'/.test(fs3.readFileSync(__dirname + '/../app/core.js', 'utf8')));
+  t('没照片时按钮置灰', /piBtn\.disabled = !S\.img/.test(appSrc));
+  t('信息面板有滚动容器', /id="photoinfo-body"/.test(html));
+
+  // 3) 隐私：只提示「含 GPS」，不把坐标显示出来
+  const g = C.describePhotoInfo({ exif: { hasGps: true }, width: 100, height: 100 });
+  const flat = JSON.stringify(g);
+  t('不显示具体经纬度', !/\d+\.\d{4,}/.test(flat), flat.slice(0, 120));
+  t('提示导出时会移除定位', /导出.*移除/.test(flat));
+})();
+/* ---------- 照片信息 ---------- */
+
+// ===== 引导线（回归块） =====
+console.log('\n【引导线】位置必须精确传到模型，且不能把线画进画面');
+(() => {
+  const fs3 = require('fs');
+  const appSrc = fs3.readFileSync(__dirname + '/../app/app.js', 'utf8');
+
+  // 1) 提示词里必须明确「线只是说明位置，不要画出来」
+  //    不写这句的话，模型有相当概率把引导线当成画面内容画进去（实测过）
+  const d = C.describeGuides({ guides: [{ kind: 'horizon', x1: 0, y1: .6, x2: 1, y2: .6 }], isZh: true });
+  t('要求不要画出线条', /不要.*画出任何线条/.test(d), d);
+  t('英文版也有对应约束',
+    /do not draw any lines/i.test(C.describeGuides({
+      guides: [{ kind: 'horizon', x1: 0, y1: .6, x2: 1, y2: .6 }], isZh: false
+    })));
+
+  // 2) 坐标换算：外扩上下左右各 12% 时，位置误差必须为 0
+  //    这是本功能最容易错的地方 —— 不补偿的话引导线会整体偏移，模型按错误位置构图
+  for (const pct of [0, 12, 30]) {
+    const rect = { x: 400, y: 300, w: 200, h: 100 };
+    const padX = Math.round(rect.w * pct / 100), padY = Math.round(rect.h * pct / 100);
+    const ctxRect = { x: rect.x - padX, y: rect.y - padY, w: rect.w + padX * 2, h: rect.h + padY * 2 };
+    const r = C.mapGuidesToRequest({
+      guides: [{ kind: 'horizon', x1: 0, y1: .4, x2: 1, y2: .4 }],
+      rect, ctxRect
+    });
+    // 期望：文档坐标 y = rect.y + 0.4*rect.h → 请求图归一化
+    const want = (rect.y + 0.4 * rect.h - ctxRect.y) / ctxRect.h;
+    t(`contextPct=${pct}% 引导线位置无偏移`, Math.abs(r[0].y1 - want) < 1e-9,
+      { got: r[0].y1, want });
+  }
+
+  // 3) 引导线不进图片：请求图必须原样发送，绝不能把线画上去
+  //    （和当初「蓝色掩膜被当成画面内容」是同一类坑）
+  const imgBuild = appSrc.slice(appSrc.indexOf('function buildRequestImage'), appSrc.indexOf('function canvasToDataUrl'));
+  t('请求图构建里不画引导线', !/drawGuides|guide/.test(imgBuild), imgBuild.length);
+  t('引导线只画在屏幕预览上', /if \(S\.guides\.length && S\.rect\) drawGuides\(/.test(appSrc));
+
+  // 4) 引导线相对选区存储 → 换选区/换图必须清空，否则位置全错
+  t('换选区清空引导线', /S\.guides = \[\];\s*\n\s*updateGuideBadge\(\);/.test(appSrc));
+  t('换图清空引导线', /S\.guides = \[\];\s*\/\/ 引导线跟着选区走/.test(appSrc));
+
+  // 5) 分块：块外的线要丢掉，不能 clamp 到边缘
+  const clipped = C.mapGuidesToRequest({
+    guides: [{ kind: 'horizon', x1: 0, y1: .02, x2: 1, y2: .02 }],
+    rect: { x: 0, y: 0, w: 100, h: 100 },
+    ctxRect: { x: 0, y: 50, w: 100, h: 50 }, clip: true
+  });
+  t('分块时块外引导线被丢弃', clipped.length === 0);
+})();
+/* ---------- 引导线 ---------- */
+
+// ===== 导出设置（回归块） =====
+console.log('\n【导出】格式与大小可选，且不能把小图放大');
+(() => {
+  const fs3 = require('fs');
+  const appSrc = fs3.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const css = fs3.readFileSync(__dirname + '/../app/style.css', 'utf8');
+
+  // 1) 只缩不放：小图放大只会变糊，必须拒绝并说明
+  const p = C.makeCustomPreset({ format: 'jpeg', maxSide: 8000, quality: 0.92 });
+  const plan = C.planExportWithHint(1600, 1200, p);
+  t('小图不放大', plan.w === 1600 && plan.h === 1200, plan);
+  t('说明为什么没放大', plan.hint.length > 0, plan.hint);
+  t('大图按长边缩', (() => {
+    const q = C.planExportWithHint(6000, 4000, C.makeCustomPreset({ maxSide: 3000 }));
+    return q.w === 3000 && Math.abs(q.h - 2000) < 1;
+  })());
+
+  // 2) 竖图按长边（高）算，不能按宽
+  t('竖图按高度缩', (() => {
+    const q = C.planExportWithHint(3000, 6000, C.makeCustomPreset({ maxSide: 2000 }));
+    return q.h === 2000 && Math.abs(q.w - 1000) < 1;
+  })());
+
+  // 3) 导出必须真的用面板里的设置，而不是设置页的预设
+  t('导出接受外部预设', /async function exportImage\(overridePreset\)/.test(appSrc));
+  t('面板预设优先', /overridePreset \|\| C\.getExportPreset/.test(appSrc));
+  t('导出按钮传面板预设', /exportImage\(currentExportPreset\(\)\)/.test(appSrc));
+
+  // 4) PNG 下质量参数无意义，界面要隐藏（避免用户以为调了有用）
+  t('选 PNG 时隐藏质量滑块', /qRow\.hidden = expFormat === 'png';/.test(appSrc));
+
+  // 5) 自定义长边输入要有边界，避免 0 或天文数字把 canvas 搞崩
+  t('自定义长边有上限', /Math\.min\(16384, Number\(cInput\.value\)/.test(appSrc));
+  t('自定义长边不接受负数', /Math\.max\(0, Math\.min\(16384/.test(appSrc));
+
+  // 6) 导出面板的样式必须真的存在（否则面板会散架）
+  t('CSS 有导出面板样式', /#exportpanel/.test(css));
+  t('CSS 有格式选中态', /\.exp-check/.test(css));
+})();
+/* ---------- 导出设置 ---------- */
+
 console.log(`\n合计 ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
