@@ -110,6 +110,9 @@
     // 无缝融合：把模型输出对齐到周围环境（光照梯度/对比度/颗粒）。
     // 这是解决「生成结果和周围不契合」的关键手段，且不重新调用模型。
     fusion: 0.7,               // 总强度（0 = 关闭）
+    // 环境契合提示词：把测出来的周围特征（亮度/冷暖/反差/光向）写进每次请求，
+    // 让模型有可对照的目标。与像素级融合互补：提示词让模型尽量做对，融合兜底。
+    envFit: true,
     fusionCenter: 0.35,        // 中心区域保留多少校正（0 = 中心完全不干预）
     fusionGrain: 0.6,          // 颗粒补偿强度（模型输出比真照片平滑）
     keepAliveAlways: false,    // 一直保活（长时间连续修图时有用，代价是常驻通知）
@@ -145,7 +148,7 @@
     'priceOverride', 'usdCny',
     'historyBudgetMB', 'autoSaveSession',
     'keepAlive', 'keepAliveAlways',
-    'fusion', 'fusionCenter', 'fusionGrain'
+    'fusion', 'fusionCenter', 'fusionGrain', 'envFit'
   ];
 
   /**
@@ -1275,6 +1278,42 @@
     return c;
   }
 
+  /**
+   * 统计选区**周围环境**的客观特征，用于写进提示词。
+   *
+   * 为什么要测：只说「请保持一致」模型不知道该一致成什么样 ——
+   * 它看不到像素统计。把测出来的结果（多亮、冷暖、反差、光向）写进去，
+   * 模型就有了可对照的目标，配合贴回时的无缝融合，效果明显更贴合。
+   *
+   * 测的是「环带」（选区外一圈），那才是要融入的环境。
+   */
+  function measureSurroundings(rect) {
+    if (!S.docCanvas || !S.docCtx) return null;
+    try {
+      const ring = Math.max(8, Math.round(Math.min(rect.w, rect.h) * 0.25));
+      // 往外扩一圈，读出来当环带样本
+      const x0 = Math.max(0, rect.x - ring), y0 = Math.max(0, rect.y - ring);
+      const x1 = Math.min(S.docW, rect.x + rect.w + ring);
+      const y1 = Math.min(S.docH, rect.y + rect.h + ring);
+      const w = Math.max(1, x1 - x0), h = Math.max(1, y1 - y0);
+      const pix = S.docCtx.getImageData(x0, y0, w, h);
+      const stats = C.ringMoments({
+        pixels: pix,
+        rect: { x: rect.x - x0, y: rect.y - y0, w: rect.w, h: rect.h },
+        ring
+      });
+      const plane = C.fitLightPlane({
+        pixels: pix,
+        rect: { x: rect.x - x0, y: rect.y - y0, w: rect.w, h: rect.h },
+        ring: ring + 4
+      });
+      if (!stats || stats.n < 20) return null;
+      return { stats, plane };
+    } catch (e) {
+      return null;      // 取不到就退化成「不描述环境」，不影响生成
+    }
+  }
+
   /** 组装要发给模型的图（含上下文外扩 + 掩膜提示 + 隐私打码） */
   function buildRequestImage(rect, mask) {
     const pct = Number(S.cfg.contextPct) || 0;
@@ -1603,13 +1642,21 @@
         const areaPct = built.canvas.width > 0
           ? Math.round(Math.sqrt((tile.w * tile.h) / (built.canvas.width * built.canvas.height)) * 100)
           : 80;
+        // 测出周围环境的客观特征，写进提示词 —— 让模型有可对照的目标
+        const envFitOn = S.cfg.envFit !== false;
+        const envMeas = envFitOn ? measureSurroundings(rect) : null;
+        const envDesc = envMeas
+          ? C.describeEnvironment({ stats: envMeas.stats, plane: envMeas.plane, isZh: lang === 'zh' })
+          : '';
         let promptText = C.buildPrompt({
           instruction: $('prompt').value,
           style: $('style-select').value,
           scope: $('scope-select').value,
           hasMask: !!mask,
           centerPct: areaPct,
-          language: lang
+          language: lang,
+          envDesc,                       // 周围环境的客观特征（测出来的，不是编的）
+          envFit: envFitOn
         });
         if (tiles.length > 1) promptText += '。' + C.tileHint(i, tiles.length, lang === 'zh');
 
@@ -3390,6 +3437,7 @@
     $('set-fusion').value = Math.round((S.cfg.fusion != null ? S.cfg.fusion : 0.7) * 100);
     $('set-fusionc').value = Math.round((S.cfg.fusionCenter != null ? S.cfg.fusionCenter : 0.35) * 100);
     $('set-fusiong').value = Math.round((S.cfg.fusionGrain != null ? S.cfg.fusionGrain : 0.6) * 100);
+    $('set-envfit').checked = S.cfg.envFit !== false;
     $('set-maxres').value = String(S.cfg.maxRes);
     $('set-tile').value = S.cfg.tile;
     $('set-lang').value = S.cfg.lang;
@@ -3875,6 +3923,8 @@
       if (S.edits.length) { rebuildViewCanvas(); draw(); }
       renderLayers();
     });
+    // 环境契合提示词：只影响下一次请求，不需要重绘
+    bindField('set-envfit', 'envFit', (el) => el.checked);
     bindField('set-tile', 'tile', (el) => Number(el.value));
     bindField('set-lang', 'lang');
     bindField('set-seed', 'seed');

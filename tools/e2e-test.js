@@ -2328,6 +2328,98 @@ async function run() {
     /position:\s*absolute;\s*top:\s*0;\s*right:\s*0;\s*bottom:\s*0;\s*left:\s*0/.test(cssText));
   t('min() 有固定值兜底', /max-width:\s*92%;[\s\S]{0,60}max-width:\s*min\(/.test(cssText));
 
+  /* ---------- 环境契合提示词 ---------- */
+  console.log('\n【24】环境契合：每次请求都带上周围环境特征');
+
+  // 造一张有明显光照梯度和暖色调的照片，这样「测出的环境特征」有确定内容
+  const envW = 600, envH = 400;
+  const envCanvas = napi.createCanvas(envW, envH);
+  const envCtx = envCanvas.getContext('2d');
+  for (let y = 0; y < envH; y++) {
+    for (let x = 0; x < envW; x++) {
+      const t = x / envW;
+      const v = 170 - t * 80;                      // 左亮右暗
+      const n = ((x * 7 + y * 11) % 13) / 13 * 18; // 一点纹理，抬高反差
+      envCtx.fillStyle = `rgb(${Math.round((v + n) * 1.08)},${Math.round((v + n) * 0.94)},${Math.round((v + n) * 0.76)})`;
+      envCtx.fillRect(x, y, 1, 1);
+    }
+  }
+  const envPng = envCanvas.toBuffer('image/png');
+  const envInput = doc.getElementById('file-input');
+  Object.defineProperty(envInput, 'files', {
+    value: [new window.File([new Uint8Array(envPng)], 'env.png', { type: 'image/png' })],
+    configurable: true
+  });
+  envInput.dispatchEvent(new window.Event('change'));
+  await sleep(400);
+  // 工作分辨率会把大图缩小，所以按**实际**文档尺寸取选区，不能写死像素坐标
+  t('环境测试图已载入', S.docW > 0 && S.docH > 0, [S.docW, S.docH]);
+
+  // 确保用中文（便于断言中文特征词）
+  S.cfg.lang = 'zh';
+  S.cfg.envFit = true;
+  fake.setColor([200, 120, 90]);
+  // 选中间偏左的一块：右侧和下方留出足够环带供光照拟合
+  S.rect = {
+    x: Math.round(S.docW * 0.30), y: Math.round(S.docH * 0.25),
+    w: Math.round(S.docW * 0.34), h: Math.round(S.docH * 0.34)
+  };
+  doc.getElementById('prompt').value = '把这块换成花丛';
+  const envSeenBefore = fake.seen.length;
+  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+  await waitGen(S);
+  await sleep(120);
+
+  const envReq = fake.seen[fake.seen.length - 1] || {};
+  const envPrompt = (envReq.body && envReq.body.prompt) || '';
+  t('确实发生了一次调用', fake.seen.length === envSeenBefore + 1, fake.seen.length - envSeenBefore);
+  t('提示词非空', envPrompt.length > 0, envPrompt.length);
+
+  // 核心：提示词里必须带「测量出来的」环境特征，而不只是一句「请保持一致」
+  t('提示词含环境特征段', /周边环境的客观特征/.test(envPrompt), envPrompt.slice(0, 120));
+  t('描述了亮度', /整体偏暗|中等偏暗|中等亮度|整体明亮|高亮/.test(envPrompt));
+  t('描述了冷暖色调', /色调偏暖|色调略暖|色调中性|色调略冷|色调偏冷/.test(envPrompt));
+  t('描述了反差', /低反差|中低反差|中等反差|高反差/.test(envPrompt));
+  // 这张图左亮右暗 → 光来自左侧（方向写反会让模型往反方向打光）
+  t('描述了光照方向', /主光来自/.test(envPrompt), (/主光来自[^。]*/.exec(envPrompt) || [])[0]);
+  t('光照方向正确（左亮右暗 → 左侧）', /主光来自左侧/.test(envPrompt),
+    (/主光来自[^。]*/.exec(envPrompt) || [])[0]);
+
+  // 行为约束也要在
+  t('要求不要出现可见边界', /边缘出现可见边界/.test(envPrompt));
+  t('要求不要加边框/暗角', /边框、暗角/.test(envPrompt));
+  t('要求像一次拍摄而非拼贴', /一次拍摄完成|后期拼贴/.test(envPrompt));
+
+  // 用户的原始指令必须保留（不能被环境描述挤掉）
+  t('保留了用户指令', /换成花丛/.test(envPrompt));
+
+  // 环境描述不能喧宾夺主：长度要克制
+  const envSegLen = ((/周边环境的客观特征[^。]*。/.exec(envPrompt) || [''])[0]).length;
+  t('环境描述段长度克制（< 200 字）', envSegLen > 0 && envSegLen < 200, envSegLen);
+
+  // 关掉开关后不应再附带
+  S.cfg.envFit = false;
+  fake.setColor([200, 120, 90]);
+  S.rect = {
+    x: Math.round(S.docW * 0.30), y: Math.round(S.docH * 0.25),
+    w: Math.round(S.docW * 0.34), h: Math.round(S.docH * 0.34)
+  };
+  doc.getElementById('prompt').value = '把这块换成花丛';
+  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+  await waitGen(S);
+  await sleep(120);
+  const offReq = fake.seen[fake.seen.length - 1] || {};
+  const offPrompt = (offReq.body && offReq.body.prompt) || '';
+  t('关闭开关后不再附带环境特征', !/周边环境的客观特征/.test(offPrompt), offPrompt.slice(0, 100));
+  t('关闭后用户指令仍在', /换成花丛/.test(offPrompt));
+
+  // 恢复
+  S.cfg.envFit = true;
+  if (S.pending) {
+    doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
+    await sleep(120);
+  }
+
   /* ---------- 无 JS 错误 ---------- */
   console.log('\n【15】运行健康度');
   const errs = logs.filter((l) => /JSDOM_ERROR|Uncaught/.test(l));

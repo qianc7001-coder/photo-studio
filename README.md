@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-1378%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-1500%20passed-brightgreen.svg)](#测试)
 
 给摄影师用的**局部修图**工具：在照片上框选任意区域，交给生图模型修改，结果自动贴回原位置。
 
 **核心特点**：结果无缝融合，非破坏性可调，保留拍摄信息。
 
-> 最新版本 **v2.8.0** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
+> 最新版本 **v2.8.1** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
 
 ---
 
@@ -62,6 +62,13 @@
 - 可选「一直保活」开关，连续修图时不用每次等系统调度
 - 设置里可一键跳转到系统的「电池优化白名单」—— 各家 OEM 后台策略不同，这是唯一通用入口
 - **兼容 Android 5.0 ~ 14**：所有系统接口按版本分流（通知渠道 / 前台服务类型 / 运行时权限），老设备走降级分支而不是崩溃
+
+### 环境契合提示词（与融合互补）
+- 每次请求前先**测量选区周围**：亮度档位、冷暖色调、反差强弱、主光方向
+- 把测出来的结果**写进提示词**，模型就有了可对照的目标（而不是只收到「请保持一致」）
+- 附带行为约束：不改周边、边缘不出现可见边界、不加边框暗角、要像一次拍摄
+- 与无缝融合分工：**提示词让模型尽量做对，融合兜住剩下的残差**
+- 可在设置里关闭；不额外调用模型（免费）
 
 ### 无缝融合（解决「生成块和周围不契合」）
 - 提示词只能**请求**一致，模型看不到你照片的像素统计 —— 所以总差一点
@@ -181,7 +188,7 @@ node tools/migrate-test.js     # 配置迁移（模拟老用户升级路径）
 node tools/e2e-test.js         # 端到端（jsdom + 真实 canvas，逐像素校验）
 ```
 
-当前规模：**1378 项**（412 单元 + 570 回归 + 14 配置迁移 + 382 端到端）。
+当前规模：**1500 项**（459 单元 + 629 回归 + 14 配置迁移 + 398 端到端）。
 
 端到端测试会：
 - 启动一个假生图模型服务器

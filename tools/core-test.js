@@ -971,5 +971,147 @@ t('estimateCalls', C.estimateCalls({x:0,y:0,w:3000,h:3000},{maxSide:1400,overlap
 
 
 /* ---------- 无缝融合 ---------- */
+// ===== 环境契合提示词（测试块） =====
+(() => {
+  // 1) 环境特征描述：必须把测出来的统计翻译成可读文字
+  const darkWarm = C.describeEnvironment({
+    stats: { mean: [92, 84, 66], std: [38, 36, 32] },
+    plane: { a: [0, 0, 0], b: [0, 0, 0], ok: false },
+    isZh: true
+  });
+  t('描述了亮度档位', /偏暗|中等亮度|整体明亮|高亮/.test(darkWarm), darkWarm);
+  t('描述了冷暖', /色调偏暖|色调略暖|色调中性|色调略冷|色调偏冷/.test(darkWarm), darkWarm);
+  t('描述了反差', /反差/.test(darkWarm), darkWarm);
+  t('给出「必须融入」的要求', /必须自然融入/.test(darkWarm), darkWarm);
+  // 偏暗 + 红>蓝 → 应该判成「偏暗 + 偏暖」
+  t('暗调判断正确', /偏暗/.test(darkWarm), darkWarm);
+  t('暖调判断正确', /暖/.test(darkWarm), darkWarm);
+
+  const brightCool = C.describeEnvironment({
+    stats: { mean: [180, 195, 215], std: [70, 70, 70] }, isZh: true
+  });
+  t('亮调判断正确', /明亮|高亮/.test(brightCool), brightCool);
+  t('冷调判断正确', /冷/.test(brightCool), brightCool);
+  t('高反差判断正确', /高反差/.test(brightCool), brightCool);
+
+  const neutral = C.describeEnvironment({
+    stats: { mean: [140, 140, 140], std: [30, 30, 30] }, isZh: true
+  });
+  t('中性调判断正确', /色调中性/.test(neutral), neutral);
+
+  // 2) 光照方向：这是最容易写反的地方
+  //    符号约定：像素值 = a·u + b·v + c，u/v 是归一化坐标（0→1）
+  //      a > 0 → 越往右越亮 → 光来自右侧
+  //      a < 0 → 越往右越暗 → 光来自左侧
+  function mk(w, h, fn) {
+    const p = { width: w, height: h, data: new Uint8ClampedArray(w * h * 4) };
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const c = fn(x, y);
+        const i = (y * w + x) * 4;
+        p.data[i] = c[0]; p.data[i + 1] = c[1]; p.data[i + 2] = c[2]; p.data[i + 3] = 255;
+      }
+    }
+    return p;
+  }
+  const stat = { mean: [150, 150, 150], std: [40, 40, 40] };
+  const dirOf = (fn) => {
+    const img = mk(300, 300, fn);
+    const pl = C.fitLightPlane({ pixels: img, rect: { x: 100, y: 100, w: 100, h: 100 }, ring: 14 });
+    const d = C.describeEnvironment({ stats: stat, plane: pl, isZh: true });
+    const m = /主光来自(\S+?)。/.exec(d);
+    return m ? m[1] : '';
+  };
+  t('左亮右暗 → 主光来自左侧', dirOf((x) => { const v = 200 - x * 0.4; return [v, v, v]; }) === '左侧');
+  t('右亮左暗 → 主光来自右侧', dirOf((x) => { const v = 80 + x * 0.4; return [v, v, v]; }) === '右侧');
+  t('上亮下暗 → 主光来自上方', dirOf((x, y) => { const v = 200 - y * 0.4; return [v, v, v]; }) === '上方');
+  t('下亮上暗 → 主光来自下方', dirOf((x, y) => { const v = 80 + y * 0.4; return [v, v, v]; }) === '下方');
+  // 均匀光照不应硬编方向（没有方向时不说，比说错强）
+  t('均匀光照不编造方向',
+    dirOf(() => [150, 150, 150]) === '', dirOf(() => [150, 150, 150]));
+
+  // 3) 英文版也要完整
+  const en = C.describeEnvironment({
+    stats: { mean: [92, 84, 66], std: [38, 36, 32] },
+    plane: { a: [40, 40, 40], b: [0, 0, 0], ok: true },
+    isZh: false
+  });
+  t('英文版含特征描述', /Measured characteristics/.test(en), en);
+  t('英文版含光向', /key light from/.test(en), en);
+  t('英文版不含中文', !/[\u4e00-\u9fa5]/.test(en), en);
+
+  // 4) 退化输入不能崩
+  t('describeEnvironment 对 null 安全', C.describeEnvironment(null) === '');
+  t('无 stats 时返回空串', C.describeEnvironment({ plane: null }) === '');
+  t('stats 缺 mean 时返回空串', C.describeEnvironment({ stats: {} }) === '');
+
+  // 5) environmentClause：特征 + 行为要求
+  const clause = C.environmentClause({ isZh: true, envDesc: darkWarm, scope: 'region' });
+  t('约束段含环境特征', clause.indexOf(darkWarm) === 0, clause.slice(0, 40));
+  t('约束段要求不改周边', /不要改变周边参考区域/.test(clause), clause);
+  t('约束段要求无可见边界', /可见边界/.test(clause), clause);
+  t('约束段禁止边框暗角', /边框、暗角/.test(clause), clause);
+  t('约束段要求像一次拍摄', /一次拍摄完成/.test(clause), clause);
+  // 全局修改时不该说「别改周边」（整个画面都是要改的）
+  const gClause = C.environmentClause({ isZh: true, envDesc: '', scope: 'global' });
+  t('全局模式不提「周边参考区域」', !/不要改变周边参考区域/.test(gClause), gClause);
+  t('environmentClause 对 null 安全', typeof C.environmentClause(null) === 'string');
+
+  // 6) buildPrompt 集成：每次调用都要带上
+  const withEnv = C.buildPrompt({
+    instruction: '把这块换成花丛', style: 'natural', scope: 'region',
+    centerPct: 80, language: 'zh', envDesc: darkWarm, envFit: true
+  });
+  t('提示词含环境特征', /周边环境的客观特征/.test(withEnv), withEnv.slice(0, 100));
+  t('提示词保留用户指令', /换成花丛/.test(withEnv));
+  t('提示词含行为约束', /不要改变周边参考区域/.test(withEnv));
+  t('提示词仍要求只改描述内容', /只改动上面描述的内容/.test(withEnv));
+
+  const withoutEnv = C.buildPrompt({
+    instruction: '把这块换成花丛', style: 'natural', scope: 'region',
+    centerPct: 80, language: 'zh', envFit: false
+  });
+  t('envFit=false 时不带环境特征', !/周边环境的客观特征/.test(withoutEnv), withoutEnv.slice(0, 80));
+  t('envFit=false 时其它约束仍在', /只改动上面描述的内容/.test(withoutEnv));
+
+  const noDesc = C.buildPrompt({
+    instruction: '把这块换成花丛', style: 'natural', scope: 'region',
+    centerPct: 80, language: 'zh', envFit: true, envDesc: ''
+  });
+  t('没有环境数据时优雅降级（不报错、不留空句）',
+    noDesc.length > 0 && !/。。/.test(noDesc) && !/周边环境的客观特征/.test(noDesc), noDesc.slice(0, 80));
+
+  // 英文提示词也要带上
+  const enPrompt = C.buildPrompt({
+    instruction: 'turn this into a flower bed', style: 'natural', scope: 'region',
+    centerPct: 80, language: 'en', envDesc: en, envFit: true
+  });
+  t('英文提示词含环境特征', /Measured characteristics/.test(enPrompt), enPrompt.slice(0, 100));
+
+  // 7) 提示词长度要克制（太长会稀释用户的指令）
+  const len = withEnv.length;
+  t('提示词长度可控（< 500 字）', len < 500, len);
+  const envSeg = (/周边环境的客观特征[^。]*。/.exec(withEnv) || [''])[0];
+  t('环境特征段不超过 150 字', envSeg.length < 150, envSeg.length);
+
+  // 8) 接线检查
+  const fs5 = require('fs');
+  const appSrc5 = fs5.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html5 = fs5.readFileSync(__dirname + '/../app/index.html', 'utf8');
+  t('生成时测量周围环境', /measureSurroundings\(rect\)/.test(appSrc5));
+  t('环境描述传给 buildPrompt', /envDesc,/.test(appSrc5));
+  t('有环境契合开关', /envFit/.test(appSrc5));
+  t('默认开启', /envFit: true,/.test(appSrc5));
+  t('设置界面有开关', /id="set-envfit"/.test(html5));
+  t('开关会持久化', /'envFit'/.test(appSrc5));
+  t('测量失败时不影响生成',
+    /function measureSurroundings[\s\S]{0,1200}catch \(e\)[\s\S]{0,200}return null/.test(appSrc5));
+  t('测量前先检查画布存在', /function measureSurroundings[\s\S]{0,120}if \(!S\.docCanvas/.test(appSrc5));
+  t('环带样本不足时放弃描述', /stats\.n < 20\) return null/.test(appSrc5));
+})();
+// ===== 环境契合块结束 =====
+
+
+/* ---------- 环境契合提示词 ---------- */
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

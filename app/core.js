@@ -3126,6 +3126,123 @@
     };
   }
 
+  /**
+   * 把周围环境的客观特征**量化成文字**，写进提示词。
+   *
+   * 为什么这样做：
+   *   只说「请保持光线、色彩、质感一致」，模型并不知道「一致」具体是什么 ——
+   *   它看不到你照片的像素统计，只能猜，所以总差一点。
+   *   但如果把测出来的客观特征写清楚（多亮、偏暖还是偏冷、反差大不大、
+   *   主光来自哪个方向），模型就有了可对照的目标。
+   *
+   * 注意：这些描述是**从像素统计推出来的**，不是编的 —— 所以模型照着做，
+   * 结果自然就贴近真实环境。贴回时的「无缝融合」再做最后的像素级对齐，
+   * 两者配合：提示词让模型尽量做对，融合兜住剩下的残差。
+   *
+   * @param {object} o { stats, plane, isZh }
+   * @returns {string} 一句可直接拼进提示词的描述
+   */
+  function describeEnvironment(o) {
+    const opt = o || {};
+    const isZh = opt.isZh !== false;
+    const st = opt.stats || null;
+    const plane = opt.plane || null;
+    if (!st || !st.mean) return '';
+
+    const lum = (c) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+    const L = lum(st.mean);
+    // 亮度分档（按人眼感受分档，不按线性刻度）
+    const bright = L < 60 ? (isZh ? '整体偏暗' : 'fairly dark')
+      : L < 110 ? (isZh ? '中等偏暗' : 'medium-dark')
+        : L < 165 ? (isZh ? '中等亮度' : 'medium brightness')
+          : L < 215 ? (isZh ? '整体明亮' : 'fairly bright')
+            : (isZh ? '高亮（接近过曝）' : 'very bright');
+
+    // 色温：比较红与蓝的相对强弱
+    const warm = st.mean[0] - st.mean[2];
+    const tone = warm > 18 ? (isZh ? '色调偏暖（偏黄橙）' : 'warm tone (yellow-orange)')
+      : warm > 6 ? (isZh ? '色调略暖' : 'slightly warm')
+        : warm < -18 ? (isZh ? '色调偏冷（偏蓝青）' : 'cool tone (blue-cyan)')
+          : warm < -6 ? (isZh ? '色调略冷' : 'slightly cool')
+            : (isZh ? '色调中性' : 'neutral tone');
+
+    // 反差：三通道标准差的平均
+    const sd = (st.std[0] + st.std[1] + st.std[2]) / 3;
+    const contrast = sd < 18 ? (isZh ? '低反差（画面柔和、灰阶集中）' : 'low contrast (soft, narrow tonal range)')
+      : sd < 42 ? (isZh ? '中低反差' : 'medium-low contrast')
+        : sd < 68 ? (isZh ? '中等反差' : 'medium contrast')
+          : (isZh ? '高反差（明暗对比强烈）' : 'high contrast (strong light-dark separation)');
+
+    // 光照方向：从梯度平面推（只在大到能看出来时才说）
+    let dirZh = '', dirEn = '';
+    if (plane && plane.ok) {
+      const ax = plane.a[0] + plane.a[1] + plane.a[2];   // 水平方向总斜率
+      const by = plane.b[0] + plane.b[1] + plane.b[2];   // 垂直方向总斜率
+      if (Math.hypot(ax, by) > 12) {
+        // 符号约定：像素值 = a·u + b·v + c（u/v 是归一化坐标，0→1）。
+        //   a > 0 表示「越往右越亮」→ 光来自右侧
+        //   a < 0 表示「越往右越暗」→ 光来自左侧
+        // 早期版本写反了，导致「左亮右暗」被描述成「主光来自右侧」——
+        // 那会让模型往完全相反的方向打光，比不说更糟。
+        const horiz = ax > 0 ? (isZh ? '右' : 'right') : (isZh ? '左' : 'left');
+        const vert = by > 0 ? (isZh ? '下' : 'bottom') : (isZh ? '上' : 'top');
+        if (Math.abs(ax) > Math.abs(by) * 1.6) {
+          dirZh = '主光来自' + horiz + '侧'; dirEn = 'key light from the ' + horiz;
+        } else if (Math.abs(by) > Math.abs(ax) * 1.6) {
+          dirZh = '主光来自' + vert + '方'; dirEn = 'key light from the ' + vert;
+        } else {
+          dirZh = '主光来自' + horiz + vert + '方向';
+          dirEn = 'key light from the ' + vert + '-' + horiz;
+        }
+      }
+    }
+
+    if (isZh) {
+      let s = '周边环境的客观特征：' + bright + '、' + tone + '、' + contrast;
+      if (dirZh) s += '、' + dirZh;
+      s += '。你改动后的区域必须自然融入这些特征 —— 明暗走向、色调冷暖、反差强弱都要与周边连成一片';
+      return s;
+    }
+    let s = 'Measured characteristics of the surrounding area: ' + bright + ', ' + tone + ', ' + contrast;
+    if (dirEn) s += ', ' + dirEn;
+    s += '. The area you modify must blend into these characteristics seamlessly — matching the light gradient, color temperature and contrast of its surroundings';
+    return s;
+  }
+
+  /**
+   * 组装「环境契合」约束段。
+   *
+   * 与 describeEnvironment 的分工：
+   *   describeEnvironment —— 把**测出来的客观特征**说给模型听（有数据支撑）
+   *   environmentClause  —— 补上**行为要求**（别改选区外、别加边框、别像拼贴）
+   *
+   * 两者合起来才完整：只讲特征模型不知道怎么用，只讲要求模型不知道目标长什么样。
+   */
+  function environmentClause(o) {
+    const opt = o || {};
+    const isZh = opt.isZh !== false;
+    const env = opt.envDesc || '';
+    const scope = opt.scope || 'region';
+    if (isZh) {
+      const parts = [];
+      if (env) parts.push(env);
+      if (scope !== 'global') {
+        parts.push('不要改变周边参考区域的内容，也不要让改动区域的边缘出现可见边界');
+        parts.push('不要给画面添加任何边框、暗角、光晕或装饰元素');
+      }
+      parts.push('输出必须是同一张照片的自然延续，看起来像一次拍摄完成的，而不是后期拼贴');
+      return parts.join('。');
+    }
+    const parts = [];
+    if (env) parts.push(env);
+    if (scope !== 'global') {
+      parts.push('Do not alter the surrounding reference area, and do not let any visible boundary appear at the edge of the edited region');
+      parts.push('Do not add frames, vignettes, glows or decorative elements');
+    }
+    parts.push('The output must look like a natural continuation of the same photograph, as if captured in one shot, not a composite');
+    return parts.join('. ');
+  }
+
   /* ====================== 7.05 编辑历史内存管理 ====================== */
 
   /**
@@ -3732,6 +3849,13 @@
     const isZh = o.language ? o.language === 'zh' : (HAS_CJK.test(userText) || !userText.trim());
     const parts = [];
     const core = [instruction, style[isZh ? 'zh' : 'en']].filter(Boolean).join('；');
+    // 环境契合约束：每次调用都带上（默认开启，可关）
+    // 这是「让模型主动贴合周围环境」的手段，与贴回时的像素级融合互补：
+    //   提示词 → 让模型尽量做对；融合 → 兜住剩下的残差
+    const envOn = o.envFit !== false;
+    const envSeg = envOn
+      ? environmentClause({ isZh, envDesc: o.envDesc || '', scope: o.scope || 'region' })
+      : '';
     // 选区在请求图里的大致占比：四周留白是给模型看的周边环境。
     // 之前靠「把选区涂成蓝色」来告诉模型改哪里，结果蓝色被当成画面内容，
     // 生成结果整体偏蓝。现在改成用文字描述区域范围，图片保持原样。
@@ -3752,6 +3876,7 @@
         parts.push('四周留出的部分是用于参考的周边环境，请保持构图、背景、光线方向、色彩基调、清晰度与颗粒感一致');
       }
       if (extra) parts.push(extra);
+      if (envSeg) parts.push(envSeg);
       parts.push('只改动上面描述的内容，其余部分不要改动');
       parts.push('输出必须是一张完整的真实照片，不要出现拼接痕迹、边框、水印或多余元素');
     } else {
@@ -3769,6 +3894,7 @@
         parts.push('The surrounding margin is reference context; keep composition, background, light direction, color grading, sharpness and grain consistent');
       }
       if (extra) parts.push(extra);
+      if (envSeg) parts.push(envSeg);
       parts.push('Change only what is described above and leave everything else untouched');
       parts.push('Output a single complete photorealistic photo, no seams, frames, watermarks or extra elements');
     }
@@ -3849,6 +3975,7 @@
     planCompareDrag, planCompareDoubleTap, describeCompareZoom, placeCompareSplit,
     // 无缝融合（模型输出对齐原图）
     ringMoments, rectMoments, fitLightPlane, planFusion, fuseColor,
+    describeEnvironment, environmentClause,
     textureEnergy, planGrain, grainNoise, assessSeam,
     EXPORT_PRESETS, getExportPreset, planExportSize, stripGpsFromExif, planExportMetadata,
     MODEL_PRICES, DEFAULT_USD_CNY, modelPrice, estimateCost, accumulateSpend, formatUsd, formatCny,
