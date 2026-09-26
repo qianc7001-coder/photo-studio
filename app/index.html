@@ -118,6 +118,14 @@
 
   <!-- ======================= 底栏 ======================= -->
   <footer id="bottombar">
+    <!-- 拖动手柄：轻点收起/展开，上下拖动自由调节高度 -->
+    <div id="bar-handle" title="轻点收起/展开，上下拖动调节高度">
+      <span class="grip"></span>
+      <button class="bar-chev" id="bar-toggle" aria-label="收起或展开工具栏">
+        <svg viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></svg>
+      </button>
+    </div>
+    <div id="bar-body">
     <!-- 工具行 -->
     <div id="tools">
       <button class="tool active" data-mode="select">
@@ -212,6 +220,7 @@
         </button>
       </div>
       <div class="row tiny" id="gen-hint">先框选一块区域，再点生成</div>
+    </div>
     </div>
   </footer>
 </div>
@@ -490,11 +499,6 @@
         <label class="st-row">
           <span class="st-label">小选区自动放大 <i class="st-desc-inline">应对接口最小尺寸限制</i></span>
           <input type="checkbox" class="st-switch" id="set-upscale" checked>
-        </label>
-        <label class="st-row st-row-col">
-          <span class="st-label">大选区自动分块 <b class="st-badge" id="v-tile">关闭</b></span>
-          <input type="range" class="st-range" id="set-tile" min="0" max="2000" step="100" value="0">
-          <span class="st-desc">默认关闭。分块后每块由模型独立生成，接缝可能出现重影或发糊</span>
         </label>
         <label class="st-row st-row-col">
           <span class="st-label">编辑历史内存上限 <b class="st-badge" id="v-mem">192 MB</b></span>

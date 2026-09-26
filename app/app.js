@@ -7,6 +7,49 @@
 
   const C = window.PSCore;
   const $ = (id) => document.getElementById(id);
+
+  /* ---------- 工具提示：只在第一次进这个工具时显示一次 ---------- */
+
+  let hintsSeen = null;
+
+  function loadHints() {
+    if (hintsSeen) return hintsSeen;
+    try {
+      const raw = localStorage.getItem(LS_KEY_HINTS);
+      const j = raw ? JSON.parse(raw) : null;
+      hintsSeen = (j && typeof j === 'object' && Array.isArray(j.seen)) ? j.seen : [];
+    } catch (e) {
+      hintsSeen = [];
+    }
+    return hintsSeen;
+  }
+
+  function saveHints() {
+    try { localStorage.setItem(LS_KEY_HINTS, JSON.stringify({ v: 1, seen: hintsSeen || [] })); }
+    catch (e) { /* 空间不足不影响使用 */ }
+  }
+
+  /** 这个工具的提示是否已经显示过 */
+  function hintSeen(name) {
+    return loadHints().indexOf(name) >= 0;
+  }
+
+  /** 标记这个工具的提示已显示（此后不再弹） */
+  function markHintSeen(name) {
+    const list = loadHints();
+    if (list.indexOf(name) < 0) { list.push(name); saveHints(); }
+  }
+
+  /**
+   * 提示是否应该显示：第一次进这个工具才显示。
+   *
+   * 为什么不做成「显示几秒自动消失」：用户可能正忙着看别处，
+   * 提示自己消失了他根本没读到；下次进来又要等一遍，反而更烦。
+   * 「只显示一次，看到就永远不再出现」对老用户最省事。
+   */
+  function shouldShowHint(name) {
+    return !hintSeen(name);
+  }
   const DPR = () => Math.min(window.devicePixelRatio || 1, 2.5);
 
   /* ============================ 状态 ============================ */
@@ -59,6 +102,9 @@
     keepAliveState: null, // { on, reason, note }
     updateRelease: null,  // 检测到的新版本（release 对象）
     toolbarVisible: false, // 工具栏是否展开（首页收起，编辑页展开）
+    tips: {},              // 本次进入工具时是否显示提示（见 tipDecision）
+    toolbarHeight: 0,      // 当前露出高度（px），用户可拖动调节
+    toolbarFull: 0,        // 完全展开时的高度（px）
     // 引导线：把「构图意图」画给模型看（比文字描述准确得多）
     // 坐标是「相对选区的归一化值」0~1，这样选区移动/缩放时不用重算
     guides: [],
@@ -104,11 +150,6 @@
     feather: 10,
     colorMatch: 50,
     maxRes: 3072,
-    // 大选区分块：默认关闭。
-    // 原因：每块是模型**独立生成**的，重叠区的内容必然不完全一致，
-    // 加权平均后会出现重影/发糊 —— 这是分块方案本身的固有问题，调参数治不好。
-    // 需要时可以手动打开（0 = 关闭）。
-    tile: 0,
     upscaleSmall: true,
     historyBudgetMB: 192,      // 编辑历史内存上限（超过则降采样/丢弃最老的）
     autoSaveSession: true,     // 自动保存编辑会话，进程被杀后可恢复
@@ -137,6 +178,9 @@
     // 不应该把设置页里选的「交付预设」也改掉。
     // expPresetChosen=false 表示「还没在面板里选过」→ 首次打开跟随设置页预设。
     // 引导线：自由笔迹是否画进请求图（默认开），以及笔迹颜色
+    // 工具栏高度（px）。0 = 用默认完全展开。
+    // 存下来是为了「用户调好的高度不该被换图/重启重置」。
+    barHeight: 0,
     guideStrokeOverlay: true,
     guideStrokeColor: 'red',
     expPresetChosen: false,
@@ -153,6 +197,10 @@
   const LS_KEY = 'photoStudio.cfg.v1';
   const LS_KEY_PHOTO = 'photoStudio.photo.v1';
   const LS_KEY_VER = 'photoStudio.lastVersion';
+  // 工具提示「已读过」的记录。工具提示（画笔怎么用、引导线怎么用）只在
+  // 第一次进这个工具时显示一次 —— 第二次打开还弹一遍，是纯打扰。
+  // 用「工具名集合」而不是单个布尔值：将来加新工具时，新工具的提示照样会显示一次。
+  const LS_KEY_HINTS = 'photoStudio.hintsSeen.v1';
   const LS_KEY_SESSION = 'photoStudio.session.v1';
   // 作品库：历史上修过的每一张照片（跨天保留）。
   // 与 SESSION 的区别：SESSION 只存「当前这张图未完成的编辑」，换图即被覆盖；
@@ -165,10 +213,10 @@
   /** 用户数据字段：升级时必须原样保留，绝不因版本变化被重置 */
   const PERSIST_KEYS = [
     'provider', 'baseUrl', 'apiKey', 'model', 'netMode',
-    'contextPct', 'feather', 'colorMatch', 'maxRes', 'tile',
+    'contextPct', 'feather', 'colorMatch', 'maxRes',
     'lang', 'seed', 'format', 'quality', 'mosaic', 'upscaleSmall', 'exportPreset',
     'expPresetChosen', 'expFormat', 'expMaxSide', 'expQuality', 'expKeepExif', 'expKeepGps', 'expKeepIcc',
-    'guideStrokeOverlay', 'guideStrokeColor',
+    'guideStrokeOverlay', 'guideStrokeColor', 'barHeight',
     'priceOverride', 'usdCny',
     'historyBudgetMB', 'autoSaveSession',
     'keepAlive', 'keepAliveAlways',
@@ -210,7 +258,6 @@
       c.feather = clampNum(c.feather, 0, 60, DEFAULT_CFG.feather);
       c.colorMatch = clampNum(c.colorMatch, 0, 100, DEFAULT_CFG.colorMatch);
       c.maxRes = clampNum(c.maxRes, 0, 8192, DEFAULT_CFG.maxRes);
-      c.tile = clampNum(c.tile, 0, 2000, DEFAULT_CFG.tile);
       c.quality = clampNum(c.quality, 70, 100, DEFAULT_CFG.quality);
       // 导出面板的记忆字段：历史脏数据（比如手改 localStorage）不能把导出搞崩
       c.expMaxSide = clampNum(c.expMaxSide, 0, 16384, 0);
@@ -219,6 +266,7 @@
       // 笔迹颜色：历史脏数据/手改 localStorage 不能让取色失败（退化成红色）
       c.guideStrokeColor = C.getStrokeColor(c.guideStrokeColor).id;
       c.guideStrokeOverlay = c.guideStrokeOverlay !== false;
+      c.barHeight = clampNum(c.barHeight, 0, 2000, 0);
       c.expPresetChosen = c.expPresetChosen === true;
       if (!c.baseUrl && c.provider) {
         const p = C.getProvider(c.provider);
@@ -271,8 +319,7 @@
         // 迁移动过设置就要说出来 —— 悄悄改用户配置是很糟糕的体验
         const migNote = lastCfgMigration.length
           ? '<div class="ub-sub" style="color:#ffd591">' +
-            '已关闭「大选区自动分块」：分块后各块由模型独立生成，接缝可能出现重影或发糊。' +
-            '如果确实需要，可在「设置」里重新打开。</div>'
+            '设置已按新版本自动调整（旧版本的分块功能已移除，现在整块一次生成）。</div>'
           : '';
         bar.innerHTML =
           '<div class="ub-main">' +
@@ -1346,16 +1393,43 @@
     updateGuideBarVisibility();
   }
 
-  /** 引导线模式下：只有自由笔迹才需要选颜色，构图线不需要 */
+  /**
+   * 提示的「本次是否显示」状态。
+   *
+   * 为什么不能每次渲染都去查 shouldShowHint：
+   *   进入工具的那一次点击里，renderGuideKinds() 和 updateUI() 都会调用本函数。
+   *   如果第一次调用就把记录写成「已读」，第二次调用立刻判定为「不该显示」，
+   *   提示在同一帧内出现又消失 —— 用户根本没看到，记录却已经写了。
+   *   所以进入工具时**决定一次**并缓存，本次停留期间一直显示。
+   */
+  function tipDecision(key) {
+    if (S.tips[key] === undefined) {
+      S.tips[key] = shouldShowHint(key);
+      if (S.tips[key]) markHintSeen(key);   // 决定显示的那一刻就记下
+    }
+    return S.tips[key];
+  }
+
+  /** 离开工具时清掉决定，下次进来重新判断 */
+  function resetTipDecision(key) {
+    if (key) delete S.tips[key];
+    else S.tips = {};
+  }
+
+  /**
+   * 引导线模式下：只有自由笔迹才需要选颜色，构图线不需要。
+   *
+   * 提示只显示一次（见 tipDecision）：用过一次的人不需要再被教一遍。
+   */
   function updateGuideBarVisibility() {
     const inGuide = S.mode === 'guide';
     const free = C.getGuideKind(S.guideKind).freehand === true;
     const cb = $('guide-color-bar');
     if (cb) cb.hidden = !(inGuide && free);
     const tf = $('guide-tip-free');
-    if (tf) tf.hidden = !(inGuide && free);
     const tg = $('guide-tip');
-    if (tg) tg.hidden = !(inGuide && !free);
+    if (tf) tf.hidden = !(inGuide && free && tipDecision('guide-free'));
+    if (tg) tg.hidden = !(inGuide && !free && tipDecision('guide'));
   }
 
   function drawMaskOverlay() {
@@ -1963,9 +2037,7 @@
       strokeNote = '笔迹未画进图片（已关闭）';
     }
     if (S.cfg.guideStrokeOverlay !== false && S.guides.length) {
-      // 笔迹的坐标是相对**整个选区**存的（S.selRect），不是相对当前瓦片。
-      // 分块时必须用选区做基准换算，否则第二块之后的笔迹会整体偏移 ——
-      // 而且 clip 会把偏移后的线当成「越界」整条丢掉，表现为「分块后笔迹全没了」。
+      // 笔迹的坐标是相对**整个选区**存的，换算时必须以选区为基准
       const baseRect = lastSelRect || rect;
       const sp = C.planStrokeOverlay({
         guides: S.guides,
@@ -2186,24 +2258,25 @@
     const { size, aspect } = pickOutputSize(rect);
     const lang = S.cfg.lang === 'auto' ? (C.HAS_CJK.test($('prompt').value) ? 'zh' : 'en') : S.cfg.lang;
 
-    const tiles = (Number(S.cfg.tile) > 0) ? C.planTileCrop(rect, { maxSide: Number(S.cfg.tile), overlap: 80 }) : [rect];
-    // 笔迹坐标相对整个选区存储；分块时每块都要用它做换算基准
+    // 整块选区一次性发送给模型。早期版本会把大选区切成多块分别生成，
+    // 但每块是模型独立生成的，重叠区内容必然不一致，加权平均后接缝出现重影/发糊 ——
+    // 这是分块方案的固有缺陷，调参数治不好，所以彻底移除了。
+    // 笔迹坐标相对整个选区存储
     lastSelRect = rect;
 
     S.aborter = new AbortController();
     const token = ++S.genToken;
     const docVer = S.docVersion;
-    S.busyTotal = tiles.length;      // 保活通知据此显示「共 N 块」
-    setBusy(true, '正在生成…', tiles.length > 1 ? `共 ${tiles.length} 块，第 1 块` : '正在请求生图模型');
-    // 分块会跑很久，明确告诉用户「可以切走，但别划掉」—— 划掉应用保活也救不了
-    if (tiles.length > 1) {
+    S.busyTotal = 1;
+    setBusy(true, '正在生成…', '正在请求生图模型');
+    {
       const notice = C.planGenForegroundNotice({
-        tiles: tiles.length,
         supported: S.keepAliveSupported,
         enabled: S.cfg.keepAlive !== false,
-        keepAlive: S.keepAliveState
+        keepAlive: S.keepAliveState,
+        seen: hintSeen('gen-keepalive')       // 只提醒一次
       });
-      if (notice.show) toast(notice.text, 6000);
+      if (notice.show) { markHintSeen('gen-keepalive'); toast(notice.text, 6000); }
     }
     $('btn-generate').disabled = true;
     clearErrorPanel();
@@ -2213,18 +2286,7 @@
     try {
       const patchCanvas = makeCanvas(rect.w, rect.h);
       const pctx = patchCanvas.getContext('2d', { willReadFrequently: true });
-      // 分块模式下的加权累加缓冲。
-      // 小选区上采样时按放大尺寸累加，保留模型输出的分辨率。
-      const preUp = (S.cfg.upscaleSmall === false)
-        ? { needed: false, scale: 1 }
-        : C.planUpscale(rect.w, rect.h, S.cfg.provider);
-      const accScale = (tiles.length > 1 && preUp.needed && preUp.scale > 1) ? preUp.scale : 1;
-      const accW = Math.round(rect.w * accScale), accH = Math.round(rect.h * accScale);
-      const acc = { data: new Float32Array(accW * accH * 3), w: accW, h: accH };
-      const wacc = { data: new Float32Array(accW * accH), w: accW, h: accH };
-      const tileOverlap = 80;
-
-      for (let i = 0; i < tiles.length; i++) {
+      {
         // 生成过程中用户换了图 / 点了取消 / 又发起了一次生成 → 直接放弃这次结果
         if (token !== S.genToken || docVer !== S.docVersion) {
           const e = new Error('stale');
@@ -2232,26 +2294,23 @@
           e.stale = true;
           throw e;
         }
-        const tile = tiles[i];
-        if (tiles.length > 1) setBusy(true, '正在生成…', `第 ${i + 1}/${tiles.length} 块`);
+        const sel = rect;
 
-        const tileMask = mask ? cropMask(mask, rect, tile) : null;
-        const built = buildRequestImage(tile, tileMask);
+        const selMask = mask;
+        const built = buildRequestImage(sel, selMask);
         const dataUrl = canvasToDataUrl(built.canvas, 'image/jpeg', 0.94);
 
-        // 出图尺寸按「当前这一块」的比例来挑，而不是整块选区的比例。
-        // 否则一块接近正方形的瓦片会被要求出 16:9 的图，贴回时被压缩变形。
-        // 注意：小选区上采样后，模型看到的图更大，出图尺寸也应相应提高，
+        // 小选区上采样后模型看到的图更大，出图尺寸也要相应提高，
         // 否则「输入 832x832、输出 1024x1024」这种组合在某些接口上会被拒。
         const sizeRef = (built.up && built.up.scale > 1)
           ? { w: built.up.upW, h: built.up.upH }
-          : tile;
-        const tileSize = pickOutputSize(sizeRef);
+          : sel;
+        const selSize = pickOutputSize(sizeRef);
 
         // 选区在「发给模型的图」里占多大比例，用文字告诉模型该改哪一块。
         // 这是替代「涂蓝色标记」的做法 —— 标记会被模型当成画面内容，导致生成结果偏色。
         const areaPct = built.canvas.width > 0
-          ? Math.round(Math.sqrt((tile.w * tile.h) / (built.canvas.width * built.canvas.height)) * 100)
+          ? Math.round(Math.sqrt((sel.w * sel.h) / (built.canvas.width * built.canvas.height)) * 100)
           : 80;
         // 测出周围环境的客观特征，写进提示词 —— 让模型有可对照的目标
         const envFitOn = S.cfg.envFit !== false;
@@ -2259,15 +2318,14 @@
         const envDesc = envMeas
           ? C.describeEnvironment({ stats: envMeas.stats, plane: envMeas.plane, isZh: lang === 'zh' })
           : '';
-        // 引导线：把用户画在选区里的线换算到「这一块请求图」的坐标，
-        // 再翻译成构图说明写进提示词。分块时丢掉落在块外的线（见 mapGuidesToRequest）。
-        const tileGuides = S.guides.length
-          ? C.mapGuidesToRequest({ guides: S.guides, rect, ctxRect: built.rect, clip: tiles.length > 1 })
+        // 引导线：把用户画在选区里的线换算到请求图坐标，再翻译成构图说明写进提示词
+        const selGuides = S.guides.length
+          ? C.mapGuidesToRequest({ guides: S.guides, rect, ctxRect: built.rect })
           : [];
         const sc = C.getStrokeColor(S.cfg.guideStrokeColor);
-        const guideDesc = tileGuides.length
+        const guideDesc = selGuides.length
           ? C.describeGuides({
-            guides: tileGuides, isZh: lang === 'zh',
+            guides: selGuides, isZh: lang === 'zh',
             // 颜色名必须和实际画进图的颜色一致：画品红却说「红色线条」，
             // 模型会去找一条根本不存在的红线
             strokeColorZh: sc.zh, strokeColorEn: sc.en
@@ -2284,15 +2342,13 @@
           envFit: envFitOn,
           guideDesc                      // 用户画的构图引导线（位置精确，比文字描述准）
         });
-        if (tiles.length > 1) promptText += '。' + C.tileHint(i, tiles.length, lang === 'zh');
-
         const req = C.buildImageRequest({
           baseUrl: S.cfg.baseUrl,
           apiKey: S.cfg.apiKey,
           model: S.cfg.model,
           prompt: promptText,
           imageDataUrl: kind === 't2i' ? null : dataUrl,
-          size: tileSize.size, aspectRatio: tileSize.aspect,
+          size: selSize.size, aspectRatio: selSize.aspect,
           seed: S.cfg.seed === '' ? null : Number(S.cfg.seed),
           batch: 1,
           kind,
@@ -2343,8 +2399,7 @@
           const sv = C.validateSize(sentSize, S.cfg.provider);
           if (!sv.ok) {
             const e = new Error('出图尺寸 ' + sentSize + ' 不符合该接口要求：' + sv.reasons.join('；') +
-              (Number(S.cfg.tile) > 0 ? '' :
-                '\n\n可以试试：框选小一点的区域；或在「设置 → 大选区自动分块」里打开分块（注意分块可能让接缝出现重影）。'));
+              '\n\n可以试试：框选小一点的区域，或换一个支持更大出图尺寸的模型。');
             e.local = true;
             e.status = 0;
             throw e;
@@ -2406,7 +2461,7 @@
           blob = await urlToBlob(items[0].url);
         }
         const gen = await blobToCanvas(blob);
-        const tr = { x: tile.x - rect.x, y: tile.y - rect.y, w: tile.w, h: tile.h };
+        const tr = { x: sel.x - rect.x, y: sel.y - rect.y, w: sel.w, h: sel.h };
         // 关键一步：从模型返回图里取出「选区」对应的内容。
         // 请求图带上下文外扩（built.off 记录选区在请求图里的位置），
         // 且模型返回尺寸与请求尺寸往往不同 —— 必须两步换算，否则内容会整体偏移。
@@ -2418,55 +2473,31 @@
           reqW: built.canvas.width, reqH: built.canvas.height,
           offX: up ? up.off.x : built.off.x,
           offY: up ? up.off.y : built.off.y,
-          selW: up ? up.upW : tile.w,
-          selH: up ? up.upH : tile.h
+          selW: up ? up.upW : sel.w,
+          selH: up ? up.upH : sel.h
         });
 
-        // 把这一块绘制到临时画布（不变形），再按权重累加。
+        // 把结果绘制到临时画布（不变形）。
         // 若请求图被上采样过，这里刻意「多留分辨率」：按放大后的尺寸存 patch，
         // 贴回时再缩到选区大小。这样模型输出的高分辨率细节能保留到最后一步，
         // 而不是先缩到 100x100 再放大贴回（那样会糊两次）。
-        const storeW = (up && up.scale > 1) ? Math.max(tile.w, Math.round(tile.w * up.scale)) : tile.w;
-        const storeH = (up && up.scale > 1) ? Math.max(tile.h, Math.round(tile.h * up.scale)) : tile.h;
-        const tileCv = makeCanvas(storeW, storeH);
-        const tctx2 = tileCv.getContext('2d', { willReadFrequently: true });
+        const storeW = (up && up.scale > 1) ? Math.max(sel.w, Math.round(sel.w * up.scale)) : sel.w;
+        const storeH = (up && up.scale > 1) ? Math.max(sel.h, Math.round(sel.h * up.scale)) : sel.h;
+        if (storeW !== patchCanvas.width || storeH !== patchCanvas.height) {
+          patchCanvas.width = storeW; patchCanvas.height = storeH;
+        }
+        const tctx2 = patchCanvas.getContext('2d', { willReadFrequently: true });
         tctx2.imageSmoothingEnabled = true;
         tctx2.imageSmoothingQuality = 'high';
         tctx2.drawImage(gen, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, storeW, storeH);
-        const tilePix = tctx2.getImageData(0, 0, storeW, storeH);
 
-        if (tiles.length > 1) {
-          // 多块：重叠区按权重加权平均，避免块边界出现色差断层
-          // 权重按「存下来的分辨率」生成，才能与 tilePix 一一对应
-          const wts = C.tileBlendWeights(
-            { x: Math.round(tr.x * accScale), y: Math.round(tr.y * accScale), w: storeW, h: storeH },
-            { x: 0, y: 0, w: accW, h: accH },
-            Math.round(tileOverlap * accScale));
-          C.accumulateTile(acc, wacc, tilePix,
-            Math.round(tr.x * accScale), Math.round(tr.y * accScale), wts);
-        } else {
-          // 单块：直接写入（此时 patchCanvas 就是 store 尺寸）
-          if (storeW !== patchCanvas.width) {
-            patchCanvas.width = storeW; patchCanvas.height = storeH;
-          }
-          pctx.putImageData(tilePix, 0, 0);
-        }
-
-        // 偏差太大时提醒一次，让用户知道这块结果是被裁过/重采样过的
-        const mm = C.aspectMismatch(gen.width, gen.height, tile.w, tile.h);
+        // 偏差太大时提醒一次，让用户知道结果是被裁过/重采样过的
+        const mm = C.aspectMismatch(gen.width, gen.height, sel.w, sel.h);
         if (mm > 1.25 && !aspectWarned) {
           aspectWarned = true;
           const pct = Math.round((mm - 1) * 100);
           toast(`选区比例和模型出图比例差 ${pct}%，已按比例裁切贴合，不会变形`, 3600);
         }
-      }
-
-      // 多块结果：归一化后写入 patch（尺寸与累加缓冲一致）
-      if (tiles.length > 1) {
-        if (patchCanvas.width !== accW) { patchCanvas.width = accW; patchCanvas.height = accH; }
-        const merged = pctx.createImageData(accW, accH);
-        C.resolveAccumulated(acc, wacc, merged);
-        pctx.putImageData(merged, 0, 0);
       }
 
       // 构造预览（不立即写入历史）；再次确认文档没被换掉
@@ -2494,9 +2525,7 @@
       setBusy(false);
       // 用户可能已经切走了（去看别的应用/锁屏），发条通知告诉他「好了」
       if (document.hidden) {
-        notifyGenDone(tiles.length > 1
-          ? `生成完成（共 ${tiles.length} 块），点开对比效果`
-          : '生成完成，点开对比效果');
+        notifyGenDone('生成完成，点开对比效果');
       }
       if (lastUpscale && lastUpscale.scale > 1.05) {
         toast('生成完成（选区较小，已放大 ' + lastUpscale.scale.toFixed(1) + ' 倍发送，贴回时按原分辨率还原）', 3600);
@@ -2519,31 +2548,17 @@
     }
   }
 
-  function cropMask(mask, fullRect, tile) {
-    const w = tile.w, h = tile.h;
-    const out = new Float32Array(w * h);
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const sx = tile.x - fullRect.x + x, sy = tile.y - fullRect.y + y;
-        out[y * w + x] = (sx >= 0 && sy >= 0 && sx < fullRect.w && sy < fullRect.h) ? mask[sy * fullRect.w + sx] : 0;
-      }
-    }
-    return out;
-  }
-
   /* ====================== 成本预估 ====================== */
 
   /**
    * 算当前选区的预估成本。
-   * 注意分块：选区过大时会切成多块，每块各调用一次模型 —— 成本随块数翻倍。
+   * 一次点击 = 一次调用（整块选区一次生成，不再分块）。
    */
   function currentEstimate() {
     if (!S.rect) return null;
     const m = currentModelParams();
     return C.estimateCost({
       rect: S.rect,
-      tileMaxSide: Number(S.cfg.tile) || 0,
-      overlap: 80,
       model: S.cfg.model,
       priceOverride: S.cfg.priceOverride === '' ? null : Number(S.cfg.priceOverride),
       usdCny: S.cfg.usdCny
@@ -2557,8 +2572,7 @@
     if (est.totalUsd < 0.2) return true;
     const msg = '这次生成预计花费 ' + C.formatUsd(est.totalUsd) +
       '（' + C.formatCny(est.totalCny) + '）\n\n' +
-      '原因：选区较大，需要分 ' + est.tiles + ' 块分别处理，共 ' + est.calls + ' 次模型调用。\n\n' +
-      '要继续吗？\n（缩小选区可以减少调用次数）';
+      '共 1 次模型调用（整块选区一次生成）。\n\n要继续吗？';
     return window.confirm(msg);
   }
 
@@ -3234,22 +3248,101 @@
     }
   }
 
-  /** 工具栏展开 / 收起 */
-  function setToolbarVisible(visible) {
+  /* ---------- 工具栏高度：轻点收起/展开，上下拖动自由调节 ---------- */
+
+  /** 测量失败时的兜底高度（例如祖先 display:none、或内核不做布局） */
+  const BAR_FALLBACK_FULL = 240;
+
+  /**
+   * 工具栏完全展开时的高度（px）。
+   *
+   * 测量失败（得到 0）时返回兜底值而不是 0 —— 返回 0 会让「收起/展开」
+   * 的判定全部失效（0 < 0*0.5 恒为假 → 永远判成展开）。
+   * 宁可给一个偏大的兜底值，也不要让状态机坏掉。
+   */
+  function barFullHeight() {
+    const bar = $('bottombar');
+    if (!bar) return BAR_FALLBACK_FULL;
+    const body = $('bar-body');
+    const h = (body ? body.scrollHeight : 0) || bar.scrollHeight || 0;
+    return h > C.BAR_MIN ? Math.round(h) : BAR_FALLBACK_FULL;
+  }
+
+  /**
+   * 应用工具栏高度。
+   *
+   * 用 maxHeight 而不是 height：内容高度会随「画笔参数条显示/隐藏」变化，
+   * 写死 height 会让参数条被裁掉；maxHeight 在内容变矮时自然收缩。
+   *
+   * @param {number} h 期望高度（px）
+   * @param {object|boolean} opt { animate, collapsed, save }
+   *   collapsed 显式给出时以它为准，不从高度推导 ——
+   *   「收起」是一个明确意图（首页不该有工具栏），不该依赖一次可能失败的测量。
+   *   save=true 时把高度写进配置（拖动结束、轻点切换时用；
+   *   拖动过程中不写，否则每个 pointermove 都写一次 localStorage）。
+   */
+  function applyBarHeight(h, opt) {
     const bar = $('bottombar');
     if (!bar) return;
-    // 收起时用 class 而不是 hidden：要保留过渡动画
-    bar.classList.toggle('collapsed', !visible);
-    S.toolbarVisible = !!visible;
+    const o = (typeof opt === 'object' && opt) ? opt : { animate: opt };
+    const full = barFullHeight();
+    const plan = C.planToolbar({ height: h, full, viewH: window.innerHeight });
+    const collapsed = o.collapsed !== undefined ? !!o.collapsed : plan.collapsed;
+    if (o.animate === false) bar.classList.add('no-anim');
+    bar.style.maxHeight = plan.height + 'px';
+    bar.classList.toggle('collapsed', collapsed);
+    S.toolbarHeight = plan.height;
+    S.toolbarFull = plan.full;
+    S.toolbarVisible = !collapsed;
+    if (o.animate === false) {
+      // 强制回流后再移除，避免「禁用动画」被合并到同一帧而不生效
+      void bar.offsetHeight;
+      bar.classList.remove('no-anim');
+    }
+    // 高度变了画布可用空间也变了，重算视图（否则图片位置会偏）
+    if (typeof resizeCanvas === 'function') resizeCanvas();
+    if (o.save) saveBarHeight();
+    return Object.assign({}, plan, { collapsed });
+  }
+
+  /** 把当前工具栏高度写进配置（下次进编辑页、下次启动都沿用） */
+  function saveBarHeight() {
+    S.cfg.barHeight = S.toolbarVisible ? S.toolbarHeight : 0;
+    saveCfg();
+  }
+
+  /** 展开到完全高度（save=true 时记住这个高度） */
+  function expandToolbar(animate, save) {
+    return applyBarHeight(barFullHeight(), { animate, collapsed: false, save });
+  }
+
+  /** 收起到最矮（只留手柄 + 工具行） */
+  function collapseToolbar(animate, save) {
+    return applyBarHeight(C.BAR_MIN, { animate, collapsed: true, save });
+  }
+
+  /** 工具栏展开 / 收起（供外部与旧代码调用） */
+  function setToolbarVisible(visible) {
+    if (visible) expandToolbar();
+    else collapseToolbar();
   }
 
   /**
    * 同步「是否显示工具栏」。
    * 打开照片后进入编辑页 → 展开；回到首页 → 收起。
+   *
+   * 注意：编辑页展开时用的是**用户上次调好的高度**（S.cfg.barHeight），
+   * 不是写死的完全展开 —— 用户辛苦调出来的高度不该被一次换图重置。
    */
   function syncToolbar() {
     const editing = !!S.img;
-    setToolbarVisible(editing);
+    if (!editing) { collapseToolbar(); return; }
+    const saved = Number(S.cfg.barHeight);
+    if (Number.isFinite(saved) && saved > 0) {
+      applyBarHeight(saved, { collapsed: C.isBarCollapsed(saved, barFullHeight()) });
+    } else {
+      expandToolbar();
+    }
   }
 
   function openLibrary() {
@@ -3605,7 +3698,7 @@
   let lastRequest = null;   // 最近一次实际发出的请求（用于自查）
   let lastUpscale = null;
   let lastStrokeNote = '';   // 本次请求有没有把笔迹画进图（用于请求自检显示）
-  // 本次生成用的选区。笔迹坐标相对它存储，分块换算时必须用它做基准。
+  // 本次生成用的选区。笔迹坐标相对它存储，换算时必须用它做基准。
   let lastSelRect = null;   // 最近一次的上采样信息
 
   function clearErrorPanel() {
@@ -4318,12 +4411,11 @@
     const canGen = !!S.img && rectOk && !S.busy;
     $('btn-generate').disabled = !canGen;
     const m = C.findModel(S.cfg.provider, S.cfg.model);
-    const nTiles = (S.rect && Number(S.cfg.tile) > 0) ? C.planTileCrop(S.rect, { maxSide: Number(S.cfg.tile), overlap: 80 }).length : 1;
     const dev = aspectDevPct();
     const devNote = dev >= 6 ? `（出图比例与选区差 ${dev}%，会自动按比例裁切，不会变形）` : '';
     const outSize = (S.rect && S.img) ? pickOutputSize(S.rect) : null;
     const sizeNote = (outSize && outSize.size) ? `出图 ${outSize.size}；` : '';
-    // 成本预估：让用户在点之前就知道要花多少（含分块导致的多次调用）
+    // 成本预估：让用户在点之前就知道要花多少
     const est = (S.rect && S.img) ? currentEstimate() : null;
     let costNote = '';
     if (est) {
@@ -4336,9 +4428,8 @@
     }
     $('gen-hint').textContent = !S.img ? '先打开一张照片'
       : !S.rect ? '在照片上拖动框选要修改的位置'
-        : nTiles > 1 ? `选区较大，将分 ${nTiles} 块生成；${sizeNote}${costNote}${devNote}`
-          : (m && m.kind === 't2i' ? '当前模型不支持参考图，将按提示词重新生成该区域；' + costNote
-            : sizeNote + costNote + '就绪' + devNote);
+        : (m && m.kind === 't2i' ? '当前模型不支持参考图，将按提示词重新生成该区域；' + costNote
+          : sizeNote + costNote + '就绪' + devNote);
 
     // 模型按钮
     const dot = $('model-dot');
@@ -4356,7 +4447,8 @@
     });
     const inBrush = S.mode === 'brush';
     $('brush-bar').hidden = !inBrush;
-    $('brush-tip').hidden = !inBrush;
+    const btip = $('brush-tip');
+    btip.hidden = !(inBrush && tipDecision('brush'));
     const inGuide = S.mode === 'guide';
     $('guide-bar').hidden = !inGuide;
     $('btn-guide').classList.toggle('active', inGuide);
@@ -4396,7 +4488,6 @@
     if ($('set-strokecolor')) $('set-strokecolor').value = C.getStrokeColor(S.cfg.guideStrokeColor).id;
     refreshUpdateStateText();
     $('set-maxres').value = String(S.cfg.maxRes);
-    $('set-tile').value = S.cfg.tile;
     $('set-lang').value = S.cfg.lang;
     $('set-seed').value = S.cfg.seed;
     $('set-preset').value = S.cfg.exportPreset || 'full';
@@ -4446,7 +4537,6 @@
     $('v-fusion').textContent = Math.round((S.cfg.fusion != null ? S.cfg.fusion : 0.7) * 100) + '%';
     $('v-fusionc').textContent = Math.round((S.cfg.fusionCenter != null ? S.cfg.fusionCenter : 0.35) * 100) + '%';
     $('v-fusiong').textContent = Math.round((S.cfg.fusionGrain != null ? S.cfg.fusionGrain : 0.6) * 100) + '%';
-    $('v-tile').textContent = S.cfg.tile > 0 ? S.cfg.tile + ' px' : '关闭';
     $('v-quality').textContent = S.cfg.quality + '%';
     $('v-mem').textContent = (S.cfg.historyBudgetMB || 192) + ' MB';
   }
@@ -4516,7 +4606,6 @@
         t = '这个模型没有内置单价，预估会显示「未知」。你可以手动填写单价。';
       }
       t += '\n价格来自各服务商官方页面，可能随时间变化，仅作量级参考。';
-      t += '\n注意：选区过大时会自动分块，每块各调用一次，成本按块数增加。';
       tip.textContent = t;
     }
     if (st) {
@@ -4694,6 +4783,95 @@
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
+  /**
+   * 工具栏手柄：轻点收起/展开，上下拖动自由调节高度。
+   *
+   * 为什么用「拖动」而不是给几个档位：
+   *   每台手机屏幕高度不同、每个人想要的露出量也不同 ——
+   *   有人只要一个生成按钮，有人要工具行 + 参数条。
+   *   给一个连续可调的高度，比猜几个档位更省事。
+   *
+   * 轻点与拖动要能共存：按下后移动超过阈值才算拖动，
+   * 否则抬起时当作「轻点」切换收起/展开。
+   */
+  function bindBarHandle() {
+    const handle = $('bar-handle');
+    if (!handle) return;
+    let drag = null;
+
+    const pointY = (ev) => (ev.touches && ev.touches[0] ? ev.touches[0].clientY : ev.clientY);
+
+    const down = (ev) => {
+      const full = barFullHeight();
+      drag = {
+        y0: pointY(ev),
+        h0: S.toolbarHeight || full,
+        full,
+        moved: false,
+        id: ev.pointerId != null ? ev.pointerId : null
+      };
+      if (handle.setPointerCapture && drag.id != null) {
+        try { handle.setPointerCapture(drag.id); } catch (e) { /* 老内核没有 */ }
+      }
+      handle.classList.add('dragging');
+    };
+
+    const move = (ev) => {
+      if (!drag) return;
+      // 手指向上拖 → 工具栏变高（露出更多）；向下拖 → 变矮
+      const dy = drag.y0 - pointY(ev);
+      if (!drag.moved && Math.abs(dy) > 6) drag.moved = true;
+      if (!drag.moved) return;
+      if (ev.cancelable) ev.preventDefault();
+      applyBarHeight(drag.h0 + dy, false);
+    };
+
+    const up = () => {
+      if (!drag) return;
+      const wasDrag = drag.moved;
+      const h = S.toolbarHeight;
+      const full = drag.full || barFullHeight();
+      drag = null;
+      handle.classList.remove('dragging');
+      if (!wasDrag) {
+        // 轻点：收起 ⇄ 展开
+        if (C.isBarCollapsed(h, full)) expandToolbar(undefined, true);
+        else collapseToolbar(undefined, true);
+      } else {
+        // 拖动结束：吸附到「收起」或「展开」，避免停在不上不下的位置
+        const collapsed = C.isBarCollapsed(h, full);
+        const target = collapsed ? C.BAR_MIN : full;
+        applyBarHeight(target, { collapsed, save: true });
+      }
+      draw();
+    };
+
+    handle.addEventListener('pointerdown', down);
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', up);
+    handle.addEventListener('pointercancel', up);
+    // 老内核没有 Pointer Events 时退化到 touch/mouse
+    if (!window.PointerEvent) {
+      handle.addEventListener('touchstart', down, { passive: true });
+      handle.addEventListener('touchmove', move, { passive: false });
+      handle.addEventListener('touchend', up);
+      handle.addEventListener('mousedown', down);
+      window.addEventListener('mousemove', move);
+      window.addEventListener('mouseup', up);
+    }
+    // 点箭头按钮也算轻点（手柄区域较大，手指不一定正好点中）
+    const tg = $('bar-toggle');
+    if (tg) {
+      tg.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const full = barFullHeight();
+        if (C.isBarCollapsed(S.toolbarHeight, full)) expandToolbar(undefined, true);
+        else collapseToolbar(undefined, true);
+        draw();
+      });
+    }
+  }
+
   /* ---------- 事件绑定 ---------- */
 
   function bind() {
@@ -4743,13 +4921,19 @@
       b.onclick = () => {
         S.mode = b.dataset.mode;
         if (S.mode !== 'brush') { S.strokes = []; invalidateMask(); }
+        // 换工具 = 重新判断「这个工具的提示要不要显示」，
+        // 否则上一次的缓存会让新工具的提示永远不出现
+        resetTipDecision();
         updateUI(); draw();
       };
     });
+    // 工具栏：轻点手柄收起/展开；上下拖动自由调节高度
+    bindBarHandle();
     $('btn-guide').onclick = () => {
       // 引导线按钮不走通用逻辑：它要保证进入模式后类型选择器是渲染好的
       S.mode = 'guide';
       S.strokes = []; invalidateMask();
+      resetTipDecision();
       renderGuideKinds();
       if (!S.rect) toast('先框选一块区域，再画引导线');
       else toast('在选区内拖一条线，告诉模型构图位置');
@@ -4928,7 +5112,6 @@
       refreshUpdateStateText('检查中…');
       checkUpdate(true).then(() => refreshUpdateStateText());
     };
-    bindField('set-tile', 'tile', (el) => Number(el.value));
     bindField('set-lang', 'lang');
     bindField('set-seed', 'seed');
     bindField('set-preset', 'exportPreset', null, updatePresetUI);
@@ -5581,7 +5764,14 @@
     isHomeVisible,
     setToolbarVisible,
     syncToolbar,
+    expandToolbar,
+    collapseToolbar,
+    applyBarHeight,
+    saveBarHeight,
+    barFullHeight,
     toolbarVisible: () => S.toolbarVisible,
+    toolbarHeight: () => S.toolbarHeight,
+    toolbarFull: () => S.toolbarFull,
     openPhotoInfo,
     closePhotoInfo,
     openExportPanel,
@@ -5599,6 +5789,17 @@
     updateGuideBarVisibility,
     drawGuides,
     hitGuide,
+    hintsSeen: () => loadHints().slice(),
+    resetHints: () => {
+      hintsSeen = [];
+      saveHints();
+      // 内存里的「本次是否显示」缓存也必须清掉：
+      // 只清 localStorage 的话，重置后提示依然不出现 —— 与承诺的行为不符
+      resetTipDecision();
+      updateUI();
+      toast('工具提示已重置，下次进入会再显示一次');
+    },
+    hintSeen,
     strokeColor: () => C.getStrokeColor(S.cfg.guideStrokeColor),
     strokeOverlayEnabled: () => S.cfg.guideStrokeOverlay !== false,
     strokeNote: () => lastStrokeNote,

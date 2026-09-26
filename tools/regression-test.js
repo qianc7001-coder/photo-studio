@@ -103,31 +103,29 @@ console.log('\n【S3】合成结果可重复（撤销/重做保真）');
   t('羽化产生过渡（非硬边）', edge !== mid, { edge, mid });
 })();
 
-console.log('\n【M3】分块拼接无硬断层');
+// 早期版本会把大选区切成多块分别生成，重叠区内容不一致 → 接缝重影/发糊。
+// 这套「加权拼接」逻辑已连同分块功能一起删除，这里改为守住「不会再回来」。
+console.log('\n【M3】分块已彻底移除（整块一次生成）');
 (() => {
-  const full = { x: 0, y: 0, w: 600, h: 300 };
-  const tiles = C.planTileCrop(full, { maxSide: 300, overlap: 80 });
-  t('产生多块', tiles.length >= 3, tiles.length);
-  const acc = { data: new Float32Array(600 * 300 * 3), w: 600, h: 300 };
-  const wacc = { data: new Float32Array(600 * 300), w: 600, h: 300 };
-  const colors = [[220, 40, 40], [40, 220, 40], [40, 40, 220], [220, 220, 40], [220, 40, 220]];
-  tiles.forEach((tile, i) => {
-    const p = solid(tile.w, tile.h, colors[i % colors.length]);
-    const w = C.tileBlendWeights(tile, full, 80);
-    C.accumulateTile(acc, wacc, p, tile.x - full.x, tile.y - full.y, w);
-  });
-  const out = C.makePixels(600, 300);
-  C.resolveAccumulated(acc, wacc, out);
-  let maxJump = 0;
-  for (let x = 1; x < 600; x++) {
-    const a = (150 * 600 + x) * 4, b = (150 * 600 + x - 1) * 4;
-    maxJump = Math.max(maxJump, Math.abs(out.data[a] - out.data[b]) + Math.abs(out.data[a + 1] - out.data[b + 1]) + Math.abs(out.data[a + 2] - out.data[b + 2]));
-  }
-  t('块边界无硬断层（跳变 < 60）', maxJump < 60, maxJump);
-  // 全覆盖：不能有未写入的像素
-  let zero = 0;
-  for (let i = 0; i < wacc.data.length; i++) if (wacc.data[i] <= 0) zero++;
-  t('所有像素都被覆盖（无空洞）', zero === 0, zero);
+  t('分块裁剪已移除', typeof C.planTileCrop === 'undefined');
+  t('分块权重已移除', typeof C.tileBlendWeights === 'undefined');
+  t('分块累加已移除', typeof C.accumulateTile === 'undefined');
+  t('分块归一化已移除', typeof C.resolveAccumulated === 'undefined');
+  t('分块提示词已移除', typeof C.tileHint === 'undefined');
+
+  const appSrc = require('fs').readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html = require('fs').readFileSync(__dirname + '/../app/index.html', 'utf8');
+  // 生成路径里不该再有任何按块循环的痕迹
+  t('生成路径没有按块循环', !/tiles\[i\]|for \(let i = 0; i < tiles\.length/.test(appSrc));
+  t('生成路径不再按块挑尺寸', !/pickOutputSize\(sizeRef\)[\s\S]{0,200}tiles\.length/.test(appSrc));
+  t('设置里没有分块开关', !/set-tile|自动分块/.test(html));
+  t('成本预估恒为 1 次调用', (() => {
+    const e = C.estimateCost({ rect: { w: 4000, h: 3000 }, model: 'Qwen/Qwen-Image-Edit' });
+    return e.calls === 1 && e.tiles === 1;
+  })());
+  // 一次生成只发一个请求：这是分块删干净的核心证据
+  t('一次生成只调用一次模型', !/await callModel\(req\)[\s\S]{0,200}for \(/.test(
+    appSrc.slice(appSrc.indexOf('async function runGenerate'), appSrc.indexOf('function cropMask'))));
 })();
 
 console.log('\n【L1】小选区可整体移动');
@@ -229,21 +227,23 @@ console.log('\n【成本预估】价格准确、分块会翻倍');
   t('容错匹配（忽略大小写/分隔符）', !!C.modelPrice('qwen/qwenimageedit'));
 
   // 2) 单次成本
-  const e1 = C.estimateCost({ rect: { w: 800, h: 600 }, model: 'Qwen/Qwen-Image-Edit', tileMaxSide: 1400 });
+  const e1 = C.estimateCost({ rect: { w: 800, h: 600 }, model: 'Qwen/Qwen-Image-Edit' });
   t('小选区 1 次调用', e1.calls === 1, e1.calls);
   t('金额正确', Math.abs(e1.totalUsd - 0.04) < 1e-9, e1.totalUsd);
   t('人民币换算正确', Math.abs(e1.totalCny - 0.04 * 7.1) < 1e-9, e1.totalCny);
 
-  // 3) 关键：分块使成本翻倍
-  const e2 = C.estimateCost({ rect: { w: 3000, h: 2000 }, model: 'Qwen/Qwen-Image-Edit', tileMaxSide: 1400 });
-  t('大选区多次调用', e2.calls > 1, e2.calls);
-  t('成本随调用次数线性增长', Math.abs(e2.totalUsd - 0.04 * e2.calls) < 1e-9, e2.totalUsd);
-  const e3 = C.estimateCost({ rect: { w: 4000, h: 3000 }, model: 'Qwen/Qwen-Image-Edit', tileMaxSide: 1400 });
-  t('4000x3000 调用 9 次', e3.calls === 9, e3.calls);
-  t('4000x3000 成本约 $0.36', Math.abs(e3.totalUsd - 0.36) < 1e-9, e3.totalUsd);
-  // 关闭分块 → 只调用 1 次（成本不涨）
-  const e4 = C.estimateCost({ rect: { w: 4000, h: 3000 }, model: 'Qwen/Qwen-Image-Edit', tileMaxSide: 0 });
-  t('关闭分块只调用 1 次', e4.calls === 1, e4.calls);
+  // 3) 关键：不再有分块，选区再大也只调用一次。
+  //    早期版本会按 1400px 切块，4000x3000 要调 9 次、成本翻 9 倍 ——
+  //    用户以为改一处只要几分钱，实际被扣了 9 倍。这是必须守住的回归点。
+  const e2 = C.estimateCost({ rect: { w: 3000, h: 2000 }, model: 'Qwen/Qwen-Image-Edit' });
+  t('大选区也只调用 1 次', e2.calls === 1, e2.calls);
+  t('大选区成本不翻倍', Math.abs(e2.totalUsd - 0.04) < 1e-9, e2.totalUsd);
+  const e3 = C.estimateCost({ rect: { w: 4000, h: 3000 }, model: 'Qwen/Qwen-Image-Edit' });
+  t('4000x3000 也只调用 1 次', e3.calls === 1, e3.calls);
+  t('4000x3000 成本仍是 $0.04', Math.abs(e3.totalUsd - 0.04) < 1e-9, e3.totalUsd);
+  // 老配置里残留的 tileMaxSide 不该再影响估算（用户覆盖安装后配置里还留着这个值）
+  const e4 = C.estimateCost({ rect: { w: 4000, h: 3000 }, model: 'Qwen/Qwen-Image-Edit', tileMaxSide: 1400 });
+  t('残留的 tileMaxSide 不再影响估算', e4.calls === 1 && Math.abs(e4.totalUsd - 0.04) < 1e-9, e4);
 
   // 4) 自定义单价优先于内置
   const e5 = C.estimateCost({ rect: { w: 800, h: 600 }, model: 'Qwen/Qwen-Image-Edit', priceOverride: 0.1 });
@@ -1808,7 +1808,7 @@ console.log('\n【提示词】每次请求都要带上「测出来的」周围�
     'detect-list', 'provider-tip', 'set-netmode', 'net-tip',
     'v-ctx', 'set-ctx', 'v-feather', 'set-feather', 'v-cm', 'set-cm',
     'v-fusion', 'set-fusion', 'v-fusionc', 'set-fusionc', 'v-fusiong', 'set-fusiong', 'set-envfit',
-    'set-maxres', 'v-tile', 'set-tile', 'set-upscale', 'v-mem', 'set-mem', 'set-autosave',
+    'set-maxres', 'set-upscale', 'v-mem', 'set-mem', 'set-autosave',
     'set-keepalive', 'ka-always-row', 'set-keepalive-always', 'ka-state', 'ka-battery',
     'set-price', 'set-usdcny', 'btn-reset-spend', 'spend-status', 'price-tip',
     'set-lang', 'set-seed', 'set-preset', 'preset-desc', 'custom-export', 'set-format',
@@ -2298,7 +2298,23 @@ console.log('\n【笔迹】手绘走向必须真的送到模型，且不能被�
   t('有颜色选择条', /id="guide-colors"/.test(html));
   t('有自由绘制专用提示', /id="guide-tip-free"/.test(html));
   t('切到自由绘制才显示颜色条', /cb\.hidden = !\(inGuide && free\)/.test(appSrc));
-  t('提示文案随类型切换', /tf\.hidden = !\(inGuide && free\)/.test(appSrc) && /tg\.hidden = !\(inGuide && !free\)/.test(appSrc));
+  // 提示文案随类型切换，且只在第一次进这个工具时显示。
+  // 用 tipDecision 而不是直接查 shouldShowHint：进入工具的那一次点击里
+  // 本函数会被调用两次，直接查会让提示出现又立刻消失（用户看不到，记录却已写）。
+  t('提示文案随类型切换',
+    /tf\.hidden = !\(inGuide && free && tipDecision\('guide-free'\)\)/.test(appSrc) &&
+    /tg\.hidden = !\(inGuide && !free && tipDecision\('guide'\)\)/.test(appSrc));
+  t('提示显示过就记下（第二次不再弹）',
+    /function tipDecision/.test(appSrc) &&
+    /if \(S\.tips\[key\]\) markHintSeen\(key\)/.test(appSrc));
+  // 函数体里不能再出现 shouldShowHint —— 否则同一帧内第二次调用会把它隐藏掉。
+  // 只截到函数体结束（下一个 function 声明），别越界到别的函数里去误判。
+  t('同一帧内不会自己把自己隐藏掉', (() => {
+    const i = appSrc.indexOf('function updateGuideBarVisibility');
+    if (i < 0) return false;
+    const body = appSrc.slice(i, appSrc.indexOf('\n  function ', i + 10));
+    return body.length > 0 && !/shouldShowHint/.test(body);
+  })());
   t('CSS 有色块样式', /\.chip-color \.swatch/.test(css));
   t('CSS 有颜色条布局', /#guide-color-bar/.test(css));
   t('CSS 有无 flex-gap 兜底', /\.ps-no-flex-gap #guide-color-bar/.test(css));

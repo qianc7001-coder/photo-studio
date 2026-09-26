@@ -345,7 +345,6 @@ async function run() {
   S.cfg.feather = 0;
   S.cfg.colorMatch = 0;
   S.cfg.contextPct = 0;
-  S.cfg.tile = 0;
   S.cfg.maxRes = 0;
 
   const input = doc.getElementById('file-input');
@@ -595,8 +594,7 @@ async function run() {
   S.cfg.model = 'gpt-image-1';           // 有 0.66MP 最小限制的模型
   S.cfg.provider = 'openai';
   S.cfg.baseUrl = 'https://api.openai.com/v1';
-  S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.tile = 0;
-  S.cfg.upscaleSmall = true;
+  S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.upscaleSmall = true;
   // 造一个 100x100 的小选区（摄影师常改的小区域）
   S.rect = { x: 150, y: 100, w: 100, h: 100 };
   doc.getElementById('prompt').value = 'small area test';
@@ -661,8 +659,7 @@ async function run() {
   /* ---------- 细长选区：不得变形 ---------- */
   console.log('\n【8.2】细长选区不变形（关键正确性）');
   S.cfg.model = 'Qwen/Qwen-Image-Edit';
-  S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.tile = 0;
-  // 8:1 的细长选区，模型会返回 16:9 → 必须裁切而不是拉伸
+  S.cfg.feather = 0; S.cfg.colorMatch = 0; // 8:1 的细长选区，模型会返回 16:9 → 必须裁切而不是拉伸
   S.rect = { x: 20, y: 20, w: 320, h: 40 };
   doc.getElementById('prompt').value = 'band test';
   doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
@@ -693,8 +690,7 @@ async function run() {
   /* ---------- 并发与竞态 ---------- */
   console.log('\n【8.5】并发 / 竞态保护');
   S.cfg.model = 'Qwen/Qwen-Image-Edit';
-  S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.tile = 0;
-  S.rect = { x: 30, y: 30, w: 120, h: 120 };
+  S.cfg.feather = 0; S.cfg.colorMatch = 0; S.rect = { x: 30, y: 30, w: 120, h: 120 };
   doc.getElementById('prompt').value = 'race test';
   const seenBeforeRace = fake.seen.length;
   // 连点两次生成
@@ -744,7 +740,7 @@ async function run() {
   S.cfg.provider = 'openai';
   S.cfg.baseUrl = 'https://api.openai.com/v1';
   S.cfg.model = 'gpt-image-1';
-  S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.tile = 0; S.cfg.upscaleSmall = false;
+  S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.upscaleSmall = false;
   S.rect = { x: 30, y: 30, w: 200, h: 200 };
   doc.getElementById('prompt').value = 'remove the trash bin';
   doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
@@ -783,7 +779,7 @@ async function run() {
   S.cfg.provider = 'siliconflow';
   S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
   S.cfg.model = 'Qwen/Qwen-Image-Edit';
-  S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.tile = 0; S.cfg.upscaleSmall = false;
+  S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.upscaleSmall = false;
   S.cfg.contextPct = 0;   // 外扩设为 0，便于精确比对像素
   // 用画笔涂抹一块（模拟用户操作）
   S.rect = { x: 50, y: 50, w: 120, h: 120 };
@@ -862,7 +858,7 @@ async function run() {
   S.cfg.provider = 'siliconflow';
   S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
   S.cfg.model = 'Qwen/Qwen-Image-Edit';
-  S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.tile = 0; S.cfg.upscaleSmall = false;
+  S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.upscaleSmall = false;
   S.cfg.historyBudgetMB = 192;
   S.cfg.autoSaveSession = true;
 
@@ -976,7 +972,7 @@ async function run() {
   S.cfg.provider = 'siliconflow';
   S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
   S.cfg.model = 'Qwen/Qwen-Image-Edit';
-  S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.tile = 0; S.cfg.upscaleSmall = false;
+  S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.upscaleSmall = false;
   // 换回 400x300 便于精确取样
   const ndInput = doc.getElementById('file-input');
   Object.defineProperty(ndInput, 'files', {
@@ -1083,7 +1079,7 @@ async function run() {
   S.cfg.provider = 'siliconflow';
   S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
   S.cfg.model = 'Qwen/Qwen-Image-Edit';
-  S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.tile = 0; S.cfg.upscaleSmall = false;
+  S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.upscaleSmall = false;
   const uzInput = doc.getElementById('file-input');
   Object.defineProperty(uzInput, 'files', {
     value: [new window.File([new Uint8Array(srcPng)], 'uz.png', { type: 'image/png' })],
@@ -1203,7 +1199,7 @@ async function run() {
   S.cfg.provider = 'siliconflow';
   S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
   S.cfg.model = 'Qwen/Qwen-Image-Edit';
-  S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.tile = 0; S.cfg.upscaleSmall = false;
+  S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.upscaleSmall = false;
   // 造一张大图 + 带 EXIF（含 GPS）的文件
   const epC = napi.createCanvas(3000, 2000);
   const epX = epC.getContext('2d');
@@ -1305,7 +1301,7 @@ async function run() {
   S.cfg.provider = 'siliconflow';
   S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
   S.cfg.model = 'Qwen/Qwen-Image-Edit';
-  S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.tile = 1400; S.cfg.upscaleSmall = false;
+  S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.upscaleSmall = false;
   S.cfg.priceOverride = '';
   S.spend = { calls: 0, usd: 0, unknownCalls: 0 };
   const csInput = doc.getElementById('file-input');
@@ -1325,23 +1321,18 @@ async function run() {
   t('预估里含人民币参考价', /¥/.test(csHint), csHint);
   t('单块时不显示「多次调用」', !/次调用/.test(csHint), csHint);
 
-  // 触发分块：底图只有 400x300，必须把分块阈值调小才会分块
-  const csTileEarly = doc.getElementById('set-tile');
-  csTileEarly.value = '200';
-  csTileEarly.dispatchEvent(new window.Event('change'));
+  // 分块已彻底删除：选区再大也只调 1 次，金额不随选区面积增长。
+  // （早期版本按 1400px 切块，大选区会调 4~9 次，用户以为只花几分钱实际被扣好几倍）
   S.rect = { x: 10, y: 10, w: 380, h: 280 };
   window.__PS_API.updateUI();
   await sleep(80);
   const csHintBig = doc.getElementById('gen-hint').textContent;
-  t('分块时提示多次调用', /次调用/.test(csHintBig), csHintBig);
+  t('大选区也不提「多次调用」', !/次调用/.test(csHintBig), csHintBig);
   const csEstBig = window.__PS_API.currentEstimate();
-  t('分块时调用次数 > 1', csEstBig && csEstBig.calls > 1, csEstBig && csEstBig.calls);
-  t('分块时金额按次数累加', csEstBig && Math.abs(csEstBig.totalUsd - 0.04 * csEstBig.calls) < 1e-9,
+  t('大选区调用次数仍为 1', csEstBig && csEstBig.calls === 1, csEstBig && csEstBig.calls);
+  t('大选区金额不翻倍', csEstBig && Math.abs(csEstBig.totalUsd - 0.04) < 1e-9,
     csEstBig && csEstBig.totalUsd);
-  // 恢复分块阈值
-  csTileEarly.value = '1400';
-  csTileEarly.dispatchEvent(new window.Event('change'));
-  await sleep(60);
+  t('界面已无分块开关', doc.getElementById('set-tile') === null);
 
   // 实际生成一次，验证累计花费
   S.rect = { x: 60, y: 60, w: 160, h: 120 };
@@ -1401,9 +1392,8 @@ async function run() {
   const csOrigConfirm = window.confirm;
   window.confirm = (msg) => { csConfirmCalled = true; csConfirmMsg = String(msg); return false; };
   S.rect = { x: 10, y: 10, w: 1580, h: 1180 };
-  const csTile = doc.getElementById('set-tile');
-  csTile.value = '300';            // 强制多块，抬高预估金额
-  csTile.dispatchEvent(new window.Event('change'));
+  // 不再有分块可以抬高金额，改用「自定义单价」走真实路径触发大额确认
+  S.cfg.priceOverride = '0.5';
   window.__PS_API.updateUI();
   await sleep(100);
   const csEstConfirm = window.__PS_API.currentEstimate();
@@ -1411,11 +1401,13 @@ async function run() {
   doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await sleep(200);
   t('大额生成前弹出确认', csConfirmCalled);
-  t('确认信息含金额与块数', /\$/.test(csConfirmMsg) && /块/.test(csConfirmMsg), csConfirmMsg.slice(0, 80));
+  t('确认信息含金额', /\$/.test(csConfirmMsg), csConfirmMsg.slice(0, 80));
+  t('确认信息说明是 1 次调用', /1 次模型调用/.test(csConfirmMsg), csConfirmMsg.slice(0, 80));
+  // 「整块选区」这个词是刻意保留的：它说明为什么只有 1 次调用
+  t('确认信息不再提分块', !/分 \d+ 块|块分别处理/.test(csConfirmMsg), csConfirmMsg.slice(0, 80));
   t('取消确认则不生成', S.pending === null);
   window.confirm = csOrigConfirm;
-  csTile.value = '1400';
-  csTile.dispatchEvent(new window.Event('change'));
+  S.cfg.priceOverride = '';
   S.spend = { calls: 0, usd: 0, unknownCalls: 0 };
   // 换回小图，避免影响后续用例
   const csBack = doc.getElementById('file-input');
@@ -2781,7 +2773,7 @@ async function run() {
     S.cfg.provider = 'siliconflow';
     S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
     S.cfg.model = 'Qwen/Qwen-Image-Edit';
-    S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.tile = 0; S.cfg.upscaleSmall = false;
+    S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.upscaleSmall = false;
     S.cfg.contextPct = 12;      // 关键：有上下文外扩，引导线必须补偿偏移
     S.cfg.fusion = 0; S.cfg.envFit = false; S.cfg.mosaic = false;
 
@@ -3051,8 +3043,7 @@ async function run() {
     S.cfg.provider = 'siliconflow';
     S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
     S.cfg.model = 'Qwen/Qwen-Image-Edit';
-    S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.tile = 0;
-    S.cfg.upscaleSmall = false; S.cfg.contextPct = 0;
+    S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.upscaleSmall = false; S.cfg.contextPct = 0;
     S.cfg.fusion = 0; S.cfg.envFit = false; S.cfg.mosaic = false;
     S.cfg.guideStrokeOverlay = true;
     S.cfg.guideStrokeColor = 'red';
@@ -3311,6 +3302,333 @@ async function run() {
     doc.querySelector('.tool[data-mode="select"]').dispatchEvent(new window.Event('click'));
     await sleep(60);
     S.cfg.guideStrokeColor = 'red';
+  }
+
+
+  console.log('\n【31】大选区分块已彻底删除（整块一次生成）');
+  {
+    S.cfg.provider = 'siliconflow';
+    S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
+    S.cfg.model = 'Qwen/Qwen-Image-Edit';
+    S.cfg.feather = 0; S.cfg.colorMatch = 0;
+    S.cfg.upscaleSmall = false; S.cfg.contextPct = 0;
+    S.cfg.fusion = 0; S.cfg.envFit = false; S.cfg.mosaic = false;
+    S.cfg.guideStrokeOverlay = false;   // 这一段不测笔迹
+    S.cfg.maxRes = 0;
+
+    // 造一张大图，框一个远超旧阈值（1400px）的选区
+    const bgC = napi.createCanvas(2000, 1500);
+    const bgX = bgC.getContext('2d');
+    bgX.fillStyle = 'rgb(50,70,90)'; bgX.fillRect(0, 0, 2000, 1500);
+    const bgIn = doc.getElementById('file-input');
+    Object.defineProperty(bgIn, 'files', {
+      value: [new window.File([new Uint8Array(bgC.toBuffer('image/jpeg', 0.9))], 'big.jpg', { type: 'image/jpeg' })],
+      configurable: true
+    });
+    bgIn.dispatchEvent(new window.Event('change'));
+    await sleep(400);
+    t('大图已载入', S.docW === 2000 && S.docH === 1500, [S.docW, S.docH]);
+
+    // 整张画面作为选区（1800x1300，旧逻辑会切成 4 块以上）
+    S.rect = { x: 100, y: 100, w: 1800, h: 1300 };
+    window.__PS_API.updateUI();
+    await sleep(80);
+
+    // 设置里不该再有分块开关
+    doc.getElementById('btn-settings').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('设置里没有分块滑块', doc.getElementById('set-tile') === null);
+    t('设置里没有分块标签', doc.getElementById('v-tile') === null);
+    t('设置里不再提「自动分块」',
+      !/自动分块/.test(doc.getElementById('settings').textContent));
+    doc.querySelector('#settings [data-close]').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+
+    // 成本预估：无论选区多大都是 1 次调用
+    const est31 = window.__PS_API.currentEstimate();
+    t('成本预估为 1 次调用', est31 && est31.calls === 1, est31 && est31.calls);
+    t('成本预估不含分块字段', est31 && est31.tiles === 1, est31 && est31.tiles);
+    t('界面提示里不再提「分 N 块」',
+      !/分 \d+ 块/.test(doc.getElementById('gen-hint').textContent),
+      doc.getElementById('gen-hint').textContent);
+
+    // 生成：必须只发一个请求
+    const before31 = fake.seen.length;
+    fake.setColor([200, 120, 60]);
+    doc.getElementById('prompt').value = '整体调成暖色调';
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 10000);
+    const sent31 = fake.seen.slice(before31).filter((x) => x.body && x.body.prompt);
+    t('大选区只发了 1 个请求（不再分块）', sent31.length === 1, sent31.length);
+    if (sent31.length) {
+      const pr31 = sent31[0].body.prompt;
+      t('提示词里没有分块位置说明', !/第 \d+\/\d+ 块|tile \d+ of/.test(pr31), pr31.slice(-80));
+      t('提示词没有「左上/右下区域」这类分块定位', !/左上区域|右下区域/.test(pr31));
+      // 请求图的尺寸应覆盖整个选区（含外扩），而不是某个瓦片
+      const m31 = /^data:image\/(jpeg|png);base64,(.*)$/.exec(String(sent31[0].body.image || ''));
+      if (m31) {
+        const im31 = await napi.loadImage(Buffer.from(m31[2], 'base64'));
+        t('请求图是整块选区（不是瓦片）',
+          Math.max(im31.width, im31.height) >= 1500,
+          [im31.width, im31.height]);
+      } else {
+        t('请求图是整块选区（跳过）', true);
+      }
+    }
+    if (S.pending) {
+      doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
+      await sleep(150);
+    }
+    t('大选区生成成功（一次调用就够）', S.edits.length > 0, S.edits.length);
+
+    // 结果必须真的贴回（不是空白）
+    const px31 = (() => {
+      const d = S.viewCanvas.getContext('2d').getImageData(
+        Math.round(S.edits[0].rect.x + S.edits[0].rect.w / 2),
+        Math.round(S.edits[0].rect.y + S.edits[0].rect.h / 2), 1, 1).data;
+      return [d[0], d[1], d[2]];
+    })();
+    t('大选区结果已贴回（颜色接近模型返回）',
+      px31[0] > 150 && px31[2] < 120, px31);
+
+    // 代码层面确认分块函数确实不存在了
+    t('core 里没有分块函数',
+      typeof window.PSCore.planTileCrop === 'undefined' &&
+      typeof window.PSCore.tileBlendWeights === 'undefined' &&
+      typeof window.PSCore.tileHint === 'undefined');
+  }
+
+  console.log('\n【32】工具提示只显示一次');
+  {
+    // 清掉提示记录，从干净状态开始
+    window.localStorage.removeItem('photoStudio.hintsSeen.v1');
+    window.__PS_API.resetHints();
+    await sleep(60);
+    t('提示记录已清空', window.__PS_API.hintsSeen().length === 0,
+      window.__PS_API.hintsSeen());
+
+    // 第一次进画笔 → 显示
+    doc.querySelector('.tool[data-mode="brush"]').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('第一次进画笔：提示显示', doc.getElementById('brush-tip').hidden === false);
+    t('提示显示后已记录', window.__PS_API.hintSeen('brush') === true,
+      window.__PS_API.hintsSeen());
+
+    // 切走再切回 → 不再显示
+    doc.querySelector('.tool[data-mode="select"]').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    doc.querySelector('.tool[data-mode="brush"]').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('第二次进画笔：提示不再显示', doc.getElementById('brush-tip').hidden === true);
+
+    // 引导线：两种类型各有各的提示，分别只显示一次。
+    // 注意要显式选类型 —— guideKind 是「上次用的那个」，不一定是构图类型。
+    doc.getElementById('btn-guide').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    doc.querySelector('#guide-kinds [data-gk="horizon"]').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('第一次选构图类型：构图提示显示', doc.getElementById('guide-tip').hidden === false);
+    t('构图类型下不显示笔迹提示', doc.getElementById('guide-tip-free').hidden === true);
+    doc.querySelector('#guide-kinds [data-gk="freehand"]').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('第一次切自由绘制：专用提示显示',
+      doc.getElementById('guide-tip-free').hidden === false);
+    t('自由绘制下不显示构图提示', doc.getElementById('guide-tip').hidden === true);
+
+    // 切走再回来 → 两种提示都不再出现
+    doc.querySelector('.tool[data-mode="select"]').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    doc.getElementById('btn-guide').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    doc.querySelector('#guide-kinds [data-gk="horizon"]').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('第二次进引导线：构图提示不再显示', doc.getElementById('guide-tip').hidden === true);
+    doc.querySelector('#guide-kinds [data-gk="freehand"]').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('第二次切自由绘制：提示不再显示',
+      doc.getElementById('guide-tip-free').hidden === true);
+    // 提示虽不再显示，参数条该有的还得有
+    t('提示消失后颜色条照常显示',
+      doc.getElementById('guide-color-bar').hidden === false);
+    t('提示消失后类型选择器照常显示',
+      doc.getElementById('guide-kinds').children.length === 5);
+
+    // 记录必须落盘（重启后不该又弹一遍）
+    const stored32 = JSON.parse(window.localStorage.getItem('photoStudio.hintsSeen.v1') || 'null');
+    t('提示记录已落盘', !!(stored32 && stored32.seen && stored32.seen.length >= 3),
+      stored32 && stored32.seen);
+    t('记录里含画笔', stored32.seen.indexOf('brush') >= 0);
+    t('记录里含构图提示', stored32.seen.indexOf('guide') >= 0);
+    t('记录里含自由笔迹', stored32.seen.indexOf('guide-free') >= 0);
+
+    // 加新工具时，新工具的提示仍会显示一次（按名字分别记，不是一票否决）
+    t('按工具名分别记录（加新工具仍会提示）',
+      window.__PS_API.hintSeen('某个新工具') === false);
+
+    // 参数条本身不受提示影响（该显示的还得显示）
+    doc.querySelector('.tool[data-mode="brush"]').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('画笔参数条照常显示（只隐藏提示）',
+      doc.getElementById('brush-bar').hidden === false &&
+      doc.getElementById('brush-tip').hidden === true);
+    doc.querySelector('.tool[data-mode="select"]').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+
+    // 生成中提醒也只弹一次
+    t('生成中提醒标记为空', window.__PS_API.hintSeen('gen-keepalive') === false);
+    const savedBridge32 = window.PSBridge;
+    window.PSBridge = {
+      supported: () => true,
+      setKeepAlive: () => true,
+      keepAliveRunning: () => true,
+      notifyDone: () => true,
+      deviceInfo: () => ({ sdk: 31, model: 'test' }),
+      batteryOptimized: () => false,
+      requestIgnoreBattery: () => true,
+      requestNotificationPermission: () => true
+    };
+    S.cfg.keepAlive = true;
+    S.cfg.maxRes = 400;
+    // 重新载入一张图（前面设了 maxRes=0，工作尺寸很大）
+    const s32 = napi.createCanvas(300, 200);
+    const s32x = s32.getContext('2d');
+    s32x.fillStyle = 'rgb(60,60,60)'; s32x.fillRect(0, 0, 300, 200);
+    const i32 = doc.getElementById('file-input');
+    Object.defineProperty(i32, 'files', {
+      value: [new window.File([new Uint8Array(s32.toBuffer('image/jpeg', 0.9))], 's32.jpg', { type: 'image/jpeg' })],
+      configurable: true
+    });
+    i32.dispatchEvent(new window.Event('change'));
+    await sleep(350);
+    S.rect = { x: 20, y: 20, w: 200, h: 150 };
+    window.__PS_API.updateUI();
+    fake.setColor([180, 180, 60]);
+    doc.getElementById('prompt').value = '测试提醒';
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 8000);
+    t('第一次生成：提醒已记录', window.__PS_API.hintSeen('gen-keepalive') === true);
+    if (S.pending) {
+      doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
+      await sleep(120);
+    }
+    window.PSBridge = savedBridge32;
+    S.cfg.keepAlive = true;
+    S.cfg.maxRes = 0;
+  }
+
+  console.log('\n【33】工具栏高度可自由调节');
+  {
+    const bar = doc.getElementById('bottombar');
+    t('工具栏有拖动手柄', !!doc.getElementById('bar-handle'));
+    t('有箭头按钮', !!doc.getElementById('bar-toggle'));
+    t('内容包在 bar-body 里', !!doc.getElementById('bar-body'));
+
+    // 进入编辑页 → 工具栏展开
+    window.__PS_API.syncToolbar();
+    await sleep(80);
+    t('编辑页工具栏展开', window.__PS_API.toolbarVisible() === true);
+    t('展开时没有 collapsed 类', bar.classList.contains('collapsed') === false);
+    const hFull = window.__PS_API.toolbarHeight();
+    t('展开高度是合法值（>0）', hFull > 0, hFull);
+
+    // 收起
+    window.__PS_API.collapseToolbar();
+    await sleep(80);
+    t('收起后 toolbarVisible=false', window.__PS_API.toolbarVisible() === false);
+    t('收起后打了 collapsed 类', bar.classList.contains('collapsed') === true);
+    t('收起高度是下限', window.__PS_API.toolbarHeight() === window.PSCore.BAR_MIN,
+      window.__PS_API.toolbarHeight());
+    // 收起时工具行仍可用（不是 pointer-events:none）
+    t('收起时工具按钮仍可点', (() => {
+      const cs = window.getComputedStyle(bar);
+      return cs.pointerEvents !== 'none';
+    })());
+
+    // 展开
+    window.__PS_API.expandToolbar();
+    await sleep(80);
+    t('展开后恢复', window.__PS_API.toolbarVisible() === true);
+    t('展开高度大于收起高度',
+      window.__PS_API.toolbarHeight() > window.PSCore.BAR_MIN);
+
+    // 拖到中间高度
+    const midH = Math.round((window.__PS_API.toolbarFull() + window.PSCore.BAR_MIN) / 2);
+    // save:true 走的是与「拖动结束/轻点切换」相同的路径
+    window.__PS_API.applyBarHeight(midH, { collapsed: false, save: true });
+    await sleep(60);
+    t('中间高度被接受', window.__PS_API.toolbarHeight() === midH,
+      [window.__PS_API.toolbarHeight(), midH]);
+    t('中间高度判为展开', window.__PS_API.toolbarVisible() === true);
+    t('maxHeight 已按高度设置',
+      Math.abs(parseFloat(bar.style.maxHeight) - midH) < 1,
+      bar.style.maxHeight);
+
+    // 高度会被记住
+    t('高度已写入配置', S.cfg.barHeight === midH, S.cfg.barHeight);
+    const cfgSaved32 = JSON.parse(window.localStorage.getItem('photoStudio.cfg.v1') || '{}');
+    t('高度已落盘', cfgSaved32.barHeight === midH, cfgSaved32.barHeight);
+
+    // 轻点手柄：收起 ⇄ 展开
+    const handle = doc.getElementById('bar-handle');
+    const tapAt = (x, y) => {
+      const ev = (type) => {
+        const e = new window.Event(type, { bubbles: true, cancelable: true });
+        e.clientX = x; e.clientY = y;
+        e.pointerId = 7; e.pointerType = 'touch';
+        return e;
+      };
+      handle.dispatchEvent(ev('pointerdown'));
+      handle.dispatchEvent(ev('pointerup'));
+    };
+    const hBefore = window.__PS_API.toolbarHeight();
+    tapAt(100, 300);
+    await sleep(100);
+    const hAfter = window.__PS_API.toolbarHeight();
+    t('轻点手柄切换了状态', hAfter !== hBefore, [hBefore, hAfter]);
+
+    // 拖动：向上拖变高、向下拖变矮
+    window.__PS_API.applyBarHeight(midH, { collapsed: false });
+    await sleep(60);
+    const dragEv = (type, y) => {
+      const e = new window.Event(type, { bubbles: true, cancelable: true });
+      e.clientX = 100; e.clientY = y;
+      e.pointerId = 8; e.pointerType = 'touch';
+      handle.dispatchEvent(e);
+    };
+    dragEv('pointerdown', 300);
+    dragEv('pointermove', 240);   // 向上拖 60px
+    dragEv('pointerup', 240);
+    await sleep(100);
+    t('向上拖动使工具栏变高',
+      window.__PS_API.toolbarHeight() > midH,
+      [midH, window.__PS_API.toolbarHeight()]);
+
+    // 向下拖到最矮 → 吸附为收起
+    window.__PS_API.expandToolbar();
+    await sleep(60);
+    const hFull2 = window.__PS_API.toolbarHeight();
+    dragEv('pointerdown', 200);
+    dragEv('pointermove', 200 + hFull2);   // 向下拖超过整个高度
+    dragEv('pointerup', 200 + hFull2);
+    await sleep(120);
+    t('向下拖到底吸附为收起',
+      window.__PS_API.toolbarVisible() === false,
+      [window.__PS_API.toolbarVisible(), window.__PS_API.toolbarHeight()]);
+
+    // 高度变化后画布要重算（否则图片位置会偏）
+    window.__PS_API.expandToolbar();
+    await sleep(120);
+    const cvRect = doc.getElementById('cv').getBoundingClientRect();
+    t('工具栏展开后画布仍可用', cvRect.width > 0 && cvRect.height > 0,
+      [cvRect.width, cvRect.height]);
+
+    // 回到首页 → 工具栏收起
+    S.img = null;
+    window.__PS_API.renderHome();
+    window.__PS_API.syncToolbar();
+    await sleep(80);
+    t('回首页工具栏收起', window.__PS_API.toolbarVisible() === false);
+    t('首页收起态有 collapsed 类', bar.classList.contains('collapsed') === true);
   }
 
 

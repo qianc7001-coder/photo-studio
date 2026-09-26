@@ -297,7 +297,57 @@ ul.whatsnew li { margin-bottom: 5px; }
   border-top: 1px solid var(--line);
   padding-bottom: var(--sab);
   z-index: 20;
+  /* 高度由 JS 按用户拖动结果设置（maxHeight）；内容变矮时自然收缩 */
+  overflow: hidden;
+  transition: max-height .22s ease;
 }
+#bottombar.no-anim { transition: none; }
+
+/* 拖动手柄：轻点收起/展开，上下拖动调节高度 */
+#bar-handle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  height: 22px;
+  cursor: grab;
+  touch-action: none;
+  /* 手柄本身要够大好点中，但不能太显眼 —— 它是辅助控件 */
+}
+#bar-handle.dragging { cursor: grabbing; }
+#bar-handle .grip {
+  width: 42px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+}
+#bar-handle:active .grip { background: var(--accent-dim); }
+.bar-chev {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 30px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-faint);
+  border-radius: var(--r-sm);
+}
+.bar-chev svg {
+  width: 16px; height: 16px;
+  fill: none; stroke: currentColor;
+  stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round;
+  /* 展开时箭头朝上（提示「点一下收起」） */
+  transition: transform .2s ease;
+}
+/* 收起后箭头翻转，提示「点一下展开」 */
+#bottombar.collapsed .bar-chev svg { transform: rotate(180deg); }
+.bar-chev:active { background: var(--panel-2); }
+
+/* 手柄区域要能盖住下面内容，避免拖动时误触工具按钮 */
+#bar-handle { z-index: 2; }
 
 #tools {
   display: flex; gap: 2px;
@@ -808,6 +858,7 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 .ps-no-flex-gap .hud-group > * + * { margin-left: 4px; }
 .ps-no-flex-gap #sel-info > * + * { margin-left: 5px; }
 .ps-no-flex-gap #tools > * + * { margin-left: 2px; }
+.ps-no-flex-gap #bar-handle > * + * { margin-left: 6px; }
 .ps-no-flex-gap .tool > * + * { margin-top: 2px; }
 .ps-no-flex-gap #brush-bar > * + *,
 .ps-no-flex-gap #guide-bar > * + *,
@@ -1306,17 +1357,12 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
  * 首页不需要工具栏（还没打开照片）；进入编辑页才显示，
  * 腾出竖向空间给画布 —— 手机屏幕高度是最稀缺的资源。
  * ========================================================================== */
-#bottombar {
-  transition: transform .22s ease, opacity .22s ease;
-}
+/* 收起态由 maxHeight 控制（见上）。这里只补一点视觉提示：
+   收起到最矮时工具行仍然可点，所以**不能**加 pointer-events:none。 */
 #bottombar.collapsed {
-  transform: translateY(100%);
-  opacity: 0;
-  pointer-events: none;
-  /* 收起时不能占位，否则画布下方留一条空白 */
-  position: absolute;
-  left: 0; right: 0; bottom: 0;
+  border-top-color: var(--line-soft);
 }
+#bottombar.collapsed #bar-handle .grip { background: var(--accent-dim); }
 
 /* =============================================================================
  * 照片信息面板

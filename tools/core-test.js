@@ -72,12 +72,13 @@ t('resolveAspectRatio wide', C.resolveAspectRatio(1920,1080)==='16:9');
 t('resolveAspectRatio tall', C.resolveAspectRatio(1080,1920)==='9:16');
 t('resolveAspectRatio square', C.resolveAspectRatio(1000,1000)==='1:1');
 
-// --- 分块 ---
-(()=>{const t1=C.planTileCrop({x:0,y:0,w:800,h:600},{maxSide:1400});t('tile single', t1.length===1);})();
-(()=>{const t2=C.planTileCrop({x:0,y:0,w:3000,h:2000},{maxSide:1400,overlap:100});t('tile grid >1', t2.length>=4, t2.length);
-  let coversAll=true; const cx=1500,cy=1000; let hit=0;
-  for(const q of t2){ if(q.w>1400||q.h>1400) coversAll=false; if(cx>=q.x&&cx<q.x+q.w&&cy>=q.y&&cy<q.y+q.h) hit++; }
-  t('tiles within maxSide', coversAll); t('tiles cover center', hit>=1, hit);})();
+// --- 分块已彻底移除（早期版本会把大选区切块分别生成，重叠区内容不一致 → 接缝重影） ---
+t('分块裁剪函数已移除', typeof C.planTileCrop === 'undefined');
+t('分块权重函数已移除', typeof C.tileBlendWeights === 'undefined');
+t('分块累加函数已移除', typeof C.accumulateTile === 'undefined');
+t('分块归一化函数已移除', typeof C.resolveAccumulated === 'undefined');
+t('分块提示词函数已移除', typeof C.tileHint === 'undefined');
+t('估算调用次数的旧接口已移除', typeof C.estimateCalls === 'undefined');
 
 // --- 模型 ---
 t('joinUrl', C.joinUrl('https://api.siliconflow.cn/v1/','images/generations')==='https://api.siliconflow.cn/v1/images/generations');
@@ -107,12 +108,9 @@ t('extractError', C.extractError({message:'bad'},400)==='bad');
  // 掩膜不再用蓝色标记表达（会被模型当成画面内容导致偏色），改为描述修改范围
  t('prompt mask note 用范围描述', /中央约 \d+%/.test(p));
  t('prompt mask note 不含蓝色', !/蓝色/.test(p));})();
-t('tileHint none', C.tileHint(0,1,true)==='');
-t('tileHint zh', C.tileHint(1,4,true).includes('2/4'), C.tileHint(1,4,true));
 
 t('formatBytes', C.formatBytes(1536)==='1.5 KB');
 t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','jpg')));
-t('estimateCalls', C.estimateCalls({x:0,y:0,w:3000,h:3000},{maxSide:1400,overlap:100})>1);
 
 
 // ===== 历史时间线（测试块） =====
@@ -223,54 +221,53 @@ t('estimateCalls', C.estimateCalls({x:0,y:0,w:3000,h:3000},{maxSide:1400,overlap
   // 迁移的核心目的：只改默认值对已安装的用户无效（localStorage 里存着旧值），
   // 必须显式改一次；而且只能改一次，否则用户手动改回来也白改。
 
-  // 1) 老配置（分块开着）→ 迁移后关闭
+  // 1) 老配置（分块开着）→ 迁移时把 tile 字段彻底删掉。
+  // 功能删了但配置里还留着字段，会让用户在设置里看到开关却不起作用 ——
+  // 比没有这个开关更让人困惑。
   const old1 = { tile: 1400, apiKey: 'sk-x', model: 'Qwen/Qwen-Image-Edit' };
   const r1 = C.migrateCfg(Object.assign({}, old1), old1);
-  t('老配置的分块被关闭', r1.cfg.tile === 0, r1.cfg.tile);
-  t('迁移有记录（便于提示用户）', r1.changed.includes('tile'), r1.changed);
+  t('老配置的 tile 字段被删除', r1.cfg.tile === undefined, r1.cfg.tile);
+  t('迁移有记录（便于提示用户）', r1.changed.includes('tile-removed'), r1.changed);
   t('迁移后打上版本标记', r1.cfg.__cfgRev === C.CFG_REV, r1.cfg.__cfgRev);
+  t('迁移不影响用户数据', r1.cfg.apiKey === 'sk-x' && r1.cfg.model === 'Qwen/Qwen-Image-Edit');
 
-  // 2) 最关键：用户手动重新打开后，不能再被覆盖
-  const reEnabled = { tile: 1400, __cfgRev: C.CFG_REV };
-  const r2 = C.migrateCfg(Object.assign({}, reEnabled), reEnabled);
-  t('用户手动打开后不再被覆盖', r2.cfg.tile === 1400, r2.cfg.tile);
-  t('无需改动时 changed 为空', r2.changed.length === 0, r2.changed);
+  // 2) 已经是当前版本的配置：不再改动，且用户的 tile 残留也保留（不再反复迁移）
+  const cur = { __cfgRev: C.CFG_REV, feather: 25, apiKey: 'sk-keep' };
+  const r2 = C.migrateCfg(Object.assign({}, cur), cur);
+  t('当前版本配置不被改动', r2.changed.length === 0 && r2.cfg.feather === 25, r2.changed);
+  t('用户数据完整保留', r2.cfg.apiKey === 'sk-keep');
 
-  // 3) 已经是新版本的配置：原样保留（含用户自定的其它值）
-  const cur = { tile: 0, __cfgRev: C.CFG_REV, feather: 25, apiKey: 'sk-keep' };
-  const r3 = C.migrateCfg(Object.assign({}, cur), cur);
-  t('当前版本配置不被改动', r3.changed.length === 0 && r3.cfg.feather === 25, r3.changed);
-  t('用户数据完整保留', r3.cfg.apiKey === 'sk-keep');
+  // 3) 首次安装（没有存档）：不该记迁移，也不该改任何东西
+  const fresh = {};
+  const r3 = C.migrateCfg(fresh, null);
+  t('首次安装不产生迁移记录', r3.changed.length === 0, r3.changed);
+  t('首次安装打上版本标记', r3.cfg.__cfgRev === C.CFG_REV);
 
-  // 4) 首次安装（没有存档）：不该记迁移，也不该改任何东西
-  const fresh = { tile: 0 };
-  const r4 = C.migrateCfg(fresh, null);
-  t('首次安装不产生迁移记录', r4.changed.length === 0, r4.changed);
-  t('首次安装打上版本标记', r4.cfg.__cfgRev === C.CFG_REV);
-
-  // 5) 脏数据不能崩
+  // 4) 脏数据不能崩
   t('saved 为 null 安全', C.migrateCfg({}, null).cfg.__cfgRev === C.CFG_REV);
   t('saved 为 undefined 安全', C.migrateCfg({}, undefined).cfg.__cfgRev === C.CFG_REV);
   t('cfg 为 null 安全', !!C.migrateCfg(null, {}).cfg);
-  t('cfgRev 是脏字符串也不崩', C.migrateCfg({ tile: 5 }, { __cfgRev: 'abc' }).cfg.tile === 0);
-  t('tile 是脏字符串也不崩', C.migrateCfg({ tile: 'x' }, {}).cfg.tile === 0);
+  t('cfgRev 是脏字符串也不崩', C.migrateCfg({ tile: 5 }, { __cfgRev: 'abc' }).cfg.tile === undefined);
+  t('tile 是脏字符串也照样删掉', C.migrateCfg({ tile: 'x' }, {}).cfg.tile === undefined);
   t('版本号比当前大时不动它', C.migrateCfg({ tile: 900 }, { __cfgRev: 99 }).cfg.tile === 900);
 
-  // 6) 默认值本身：分块必须是关的
+  // 5) 默认值与界面：分块相关的东西必须全部消失
   const appSrc = require('fs').readFileSync(__dirname + '/../app/app.js', 'utf8');
-  t('默认配置里分块是关闭的', /maxRes: 3072,\s*\n\s*\/\/[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*tile: 0,/.test(appSrc) ||
-    /tile: 0,/.test(appSrc.slice(appSrc.indexOf('DEFAULT_CFG'), appSrc.indexOf('DEFAULT_CFG') + 2000)),
-    'tile 默认值');
+  t('默认配置里没有 tile 字段', !/\btile:\s*\d/.test(appSrc.slice(
+    appSrc.indexOf('DEFAULT_CFG'), appSrc.indexOf('DEFAULT_CFG') + 2500)));
+  t('PERSIST_KEYS 里没有 tile', !/'tile'/.test(appSrc.slice(
+    appSrc.indexOf('PERSIST_KEYS'), appSrc.indexOf('PERSIST_KEYS') + 700)));
   t('保存配置时记录迁移版本（否则每次启动都重迁）', /__cfgRev/.test(appSrc));
   t('loadCfg 里调用了迁移', /migrateCfg\(c, saved\)/.test(appSrc));
   t('有配置存档时才迁移（首次安装不记）', /if \(saved && typeof saved === 'object'\)/.test(appSrc));
+  t('代码里不再引用 cfg.tile', !/cfg\.tile/.test(appSrc));
+  t('代码里不再调用分块函数', !/planTileCrop|tileBlendWeights|accumulateTile|resolveAccumulated|tileHint/.test(appSrc));
+  t('生成路径不再有分块循环', !/for \(let i = 0; i < tiles\.length/.test(appSrc));
 
-  // 7) 设置界面：滑块默认 0，且说明了风险
   const html = require('fs').readFileSync(__dirname + '/../app/index.html', 'utf8');
-  const tileInput = html.slice(html.indexOf('id="set-tile"') - 300, html.indexOf('id="set-tile"') + 100);
-  t('设置滑块默认值是 0', /id="set-tile"[^>]*value="0"/.test(html), tileInput.slice(-120));
-  t('设置界面说明了分块的风险', /重影|发糊/.test(html));
-  t('设置界面默认标签是「关闭」', /id="v-tile"[^>]*>关闭</.test(html));
+  t('设置界面已移除分块滑块', !/id="set-tile"/.test(html));
+  t('设置界面已移除分块标签', !/id="v-tile"/.test(html));
+  t('设置界面不再提「自动分块」', !/自动分块/.test(html));
 })();
 // ===== 配置迁移结束 =====
 
@@ -484,21 +481,22 @@ t('estimateCalls', C.estimateCalls({x:0,y:0,w:3000,h:3000},{maxSide:1400,overlap
   t('总开关关闭时显示「已关闭」', dDisabled.text === '已关闭', dDisabled.text);
   t('关闭时仍允许重新打开常驻', dDisabled.canAlways === true);
 
-  // 3) 分块提醒：跑很久时要说清「能切走，但别划掉」
-  const n1 = C.planGenForegroundNotice({ tiles: 1, keepAlive: { on: true } });
-  t('单块不打扰（不弹提醒）', n1.show === false);
-  const n3 = C.planGenForegroundNotice({ tiles: 3, keepAlive: { on: true } });
-  t('多块时提醒', n3.show === true);
-  t('提醒里说明已开保活', /已开启后台保活/.test(n3.text), n3.text);
-  t('提醒里说明「别从最近任务划掉」', /划掉/.test(n3.text), n3.text);
-  t('提醒里带上块数', /3 块/.test(n3.text), n3.text);
+  // 3) 生成中提醒：说清「能切走，但别划掉」。只提醒一次 —— 同一条提示
+  //    每次生成都弹一遍纯属打扰（与工具提示同一个原则）。
+  const n1 = C.planGenForegroundNotice({ keepAlive: { on: true } });
+  t('保活开着时提醒', n1.show === true);
+  t('提醒里说明已开保活', /已开启后台保活/.test(n1.text), n1.text);
+  t('提醒里说明「别从最近任务划掉」', /划掉/.test(n1.text), n1.text);
+  t('提醒里给出大致耗时', /30~60 秒/.test(n1.text), n1.text);
+  t('已提醒过就不再提醒（只弹一次）',
+    C.planGenForegroundNotice({ keepAlive: { on: true }, seen: true }).show === false);
   t('保活没开时不提醒（说了也没用）',
-    C.planGenForegroundNotice({ tiles: 3, keepAlive: { on: false } }).show === false);
+    C.planGenForegroundNotice({ keepAlive: { on: false } }).show === false);
   t('保活总开关关闭时不提醒',
-    C.planGenForegroundNotice({ tiles: 3, keepAlive: { on: true }, enabled: false }).show === false);
+    C.planGenForegroundNotice({ keepAlive: { on: true }, enabled: false }).show === false);
   t('非安卓环境不提醒',
-    C.planGenForegroundNotice({ tiles: 3, keepAlive: { on: true }, supported: false }).show === false);
-  t('块数非法时不崩', typeof C.planGenForegroundNotice({ tiles: 'x' }).show === 'boolean');
+    C.planGenForegroundNotice({ keepAlive: { on: true }, supported: false }).show === false);
+  t('空参数不崩', typeof C.planGenForegroundNotice().show === 'boolean');
 
   // 4) 环境兼容：各版本该打什么补丁
   //    这些数字不是随便定的，对应真实的 Chrome 版本：
@@ -566,7 +564,8 @@ t('estimateCalls', C.estimateCalls({x:0,y:0,w:3000,h:3000},{maxSide:1400,overlap
   t('浏览器里没有桥时不报错（bridge 判空）', /function bridge\(\)[\s\S]{0,200}PSBridge[\s\S]{0,200}null/.test(appSrc2));
   t('生成完成且用户切走时发通知', /document\.hidden[\s\S]{0,120}notifyGenDone/.test(appSrc2));
   t('生成失败且用户切走时也发通知', /生成失败，点开查看原因/.test(appSrc2));
-  t('分块时提醒「别划掉」', /planGenForegroundNotice\(/.test(appSrc2));
+  t('生成中提醒「别划掉」', /planGenForegroundNotice\(/.test(appSrc2));
+  t('生成中提醒只弹一次', /seen: hintSeen\('gen-keepalive'\)/.test(appSrc2));
   t('设置里有保活总开关', /id="set-keepalive"/.test(html2));
   t('设置里有常驻开关', /id="set-keepalive-always"/.test(html2));
   t('设置里有状态显示', /id="ka-state"/.test(html2));
@@ -1725,8 +1724,62 @@ t('estimateCalls', C.estimateCalls({x:0,y:0,w:3000,h:3000},{maxSide:1400,overlap
   t('启动时渲染首页', /bind\(\);[\s\S]{0,300}renderHome\(\)/.test(appSrc7));
   t('启动时同步工具栏', /bind\(\);[\s\S]{0,300}syncToolbar\(\)/.test(appSrc7));
   t('打开照片后展开工具栏', /renderHome\(\);\s*\n\s*syncToolbar\(\);/.test(appSrc7));
-  t('收起用 class 保留过渡动画', /classList\.toggle\('collapsed', !visible\)/.test(appSrc7));
+  // 收起/展开由高度驱动（用户可拖动调节），class 只用于视觉提示
+  // 收起意图可以显式传入（首页不该有工具栏），没传时才由高度推导 ——
+  // 避免依赖一次可能失败的测量（display:none / 内核不做布局时测不到高度）
+  t('收起状态可显式指定，否则按高度判定',
+    /const collapsed = o\.collapsed !== undefined \? !!o\.collapsed : plan\.collapsed;/.test(appSrc7));
+  t('首页收起是显式意图', /collapseToolbar\(animate, save\)[\s\S]{0,120}collapsed: true/.test(appSrc7));
+  t('测量失败有兜底高度（否则状态机全坏）', /BAR_FALLBACK_FULL/.test(appSrc7));
   t('CSS 有收起态', /#bottombar\.collapsed/.test(css7));
+  t('CSS 有高度过渡', /#bottombar \{[\s\S]{0,400}transition: max-height/.test(css7));
+
+  /* ---------- 工具栏自由调节高度 ---------- */
+
+  t('工具栏有拖动手柄', /id="bar-handle"/.test(html7));
+  t('手柄里有箭头按钮', /id="bar-toggle"/.test(html7));
+  t('手柄有抓握提示条', /class="grip"/.test(html7));
+  t('工具栏内容包在可测高度的容器里', /id="bar-body"/.test(html7));
+  t('轻点手柄可收起/展开', /function bindBarHandle/.test(appSrc7));
+  t('拖动改变高度', /applyBarHeight\(drag\.h0 \+ dy, false\)/.test(appSrc7));
+  t('拖动阈值避免误判（轻点与拖动共存）', /Math\.abs\(dy\) > 6/.test(appSrc7));
+  t('松手后吸附到收起或展开（不停在半路）',
+    /const target = collapsed \? C\.BAR_MIN : full;/.test(appSrc7));
+  t('高度会记住（换图不重置）', /function saveBarHeight/.test(appSrc7) &&
+    /S\.cfg\.barHeight = S\.toolbarVisible \? S\.toolbarHeight : 0;/.test(appSrc7));
+  t('拖动结束才保存（不在 pointermove 里写存储）', /applyBarHeight\(target, \{ collapsed, save: true \}\)/.test(appSrc7));
+  t('轻点切换也保存', /expandToolbar\(undefined, true\)/.test(appSrc7));
+  t('barHeight 纳入持久化', /'guideStrokeOverlay', 'guideStrokeColor', 'barHeight',/.test(appSrc7));
+  t('barHeight 有类型校正', /c\.barHeight = clampNum\(c\.barHeight, 0, 2000, 0\);/.test(appSrc7));
+  t('进编辑页沿用上次高度', /const saved = Number\(S\.cfg\.barHeight\)/.test(appSrc7));
+  t('高度用 maxHeight（内容变矮时自然收缩）', /bar\.style\.maxHeight = plan\.height/.test(appSrc7));
+  t('高度变化后重算画布', /resizeCanvas\(\);[\s\S]{0,120}return Object\.assign/.test(appSrc7));
+  t('CSS 有手柄样式', /#bar-handle/.test(css7));
+  t('收起时箭头翻转提示可展开', /#bottombar\.collapsed \.bar-chev svg \{ transform: rotate\(180deg\)/.test(css7));
+  t('收起态不再用 pointer-events:none（工具行仍可点）',
+    !/#bottombar\.collapsed \{[^}]*pointer-events: none/.test(css7));
+  t('手柄有 no-flex-gap 兜底', /\.ps-no-flex-gap #bar-handle/.test(css7));
+
+  /* ---------- 工具提示只显示一次 ---------- */
+
+  t('有「提示已读」存储键', /LS_KEY_HINTS/.test(appSrc7));
+  t('有 shouldShowHint 判断', /function shouldShowHint/.test(appSrc7));
+  t('有 markHintSeen 记录', /function markHintSeen/.test(appSrc7));
+  // 提示不能「每次渲染都查一遍 shouldShowHint」：
+  // 同一帧里 renderGuideKinds 与 updateUI 都会调用，第一次就把记录写成已读，
+  // 第二次立刻判定不该显示 —— 提示出现又消失，用户根本没看到。
+  // 正确做法是进入工具时决定一次并缓存（tipDecision）。
+  t('画笔提示只显示一次', /btip\.hidden = !\(inBrush && tipDecision\('brush'\)\)/.test(appSrc7));
+  t('引导线提示只显示一次', /tipDecision\('guide'\)/.test(appSrc7));
+  t('自由笔迹提示只显示一次', /tipDecision\('guide-free'\)/.test(appSrc7));
+  t('进入工具时决定一次并缓存', /function tipDecision/.test(appSrc7));
+  t('决定显示的那一刻才记录已读', /if \(S\.tips\[key\]\) markHintSeen\(key\)/.test(appSrc7));
+  t('切换工具时清掉决定（新工具重新判断）', /resetTipDecision\(\)/.test(appSrc7));
+  t('重置提示时内存缓存也要清', /resetTipDecision\(\);[\s\S]{0,120}toast\('工具提示已重置/.test(appSrc7));
+  t('生成中提醒只显示一次', /shouldShowHint|hintSeen\('gen-keepalive'\)/.test(appSrc7));
+  t('提示记录按工具名分别记（加新工具仍会显示一次）', /hintSeen\('guide-free'\)|indexOf\(name\) >= 0/.test(appSrc7));
+  t('提示状态可重置（便于换人用/调试）', /resetHints:/.test(appSrc7));
+  t('提示写入失败不影响使用', /空间不足不影响使用/.test(appSrc7));
 
   // 照片信息
   t('顶栏有照片信息按钮', /id="btn-photoinfo"/.test(html7));

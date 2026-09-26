@@ -103,7 +103,7 @@ async function boot(seedCfg) {
 }
 
 (async () => {
-  console.log('\n【配置迁移】老用户升级后，分块必须真的被关掉');
+  console.log('\n【配置迁移】老用户升级后，设置必须完整保留，已删功能的残留字段要被清掉');
 
   // 1) 模拟老版本用户：存着分块开启 + 自己的 API 设置
   const oldCfg = {
@@ -117,34 +117,38 @@ async function boot(seedCfg) {
   };
   const a = await boot(oldCfg);
   t('启动无 JS 异常', a.errs.length === 0, a.errs.slice(0, 2));
-  t('分块被关闭', a.S.cfg.tile === 0, a.S.cfg.tile);
+  // 分块功能已彻底删除，残留的 tile 字段要被清掉 ——
+  // 功能没了但配置里还留着，会让用户在设置里看到开关却不起作用
+  t('残留的 tile 字段被清掉', a.S.cfg.tile === undefined, a.S.cfg.tile);
   t('API Key 完整保留', a.S.cfg.apiKey === 'sk-old-user-key', a.S.cfg.apiKey);
   t('模型设置完整保留', a.S.cfg.model === 'Qwen/Qwen-Image-Edit');
   t('其它设置不受影响', a.S.cfg.feather === 18, a.S.cfg.feather);
   t('迁移版本已写入内存', a.S.cfg.__cfgRev === a.window.PSCore.CFG_REV);
 
-  // 2) 关键：迁移标记必须落盘，否则下次启动会再关一遍
+  // 2) 关键：迁移标记必须落盘，否则下次启动会重迁一遍
   const persisted = JSON.parse(a.window.localStorage.getItem('photoStudio.cfg.v1'));
   t('迁移标记已落盘', persisted.__cfgRev === a.window.PSCore.CFG_REV, persisted.__cfgRev);
-  t('落盘配置里分块是关的', persisted.tile === 0, persisted.tile);
+  t('落盘配置里没有 tile 字段', persisted.tile === undefined, persisted.tile);
+  t('落盘后 API Key 仍在', persisted.apiKey === 'sk-old-user-key');
 
-  // 3) 用户手动重新打开分块 → 重启后不能被覆盖
-  persisted.tile = 1600;
+  // 3) 再次启动：不应重复迁移（changed 为空）
   const b = await boot(persisted);
-  t('用户手动打开的分块不被覆盖', b.S.cfg.tile === 1600, b.S.cfg.tile);
+  t('再次启动不重复迁移', b.S.cfg.__cfgRev === b.window.PSCore.CFG_REV);
   t('再次启动仍保留 API Key', b.S.cfg.apiKey === 'sk-old-user-key');
 
-  // 4) 全新安装：默认就是关的
+  // 4) 全新安装：不该凭空报迁移
   const c = await boot(undefined);
-  t('全新安装默认关闭分块', c.S.cfg.tile === 0, c.S.cfg.tile);
   t('全新安装不误报迁移', c.S.cfg.__cfgRev === c.window.PSCore.CFG_REV);
+  t('全新安装也没有 tile 字段', c.S.cfg.tile === undefined, c.S.cfg.tile);
 
-  // 5) 界面：设置滑块与文案要跟默认值一致
+  // 5) 界面：分块开关必须彻底消失
   const d = await boot(undefined);
-  t('设置滑块值为 0', d.doc.getElementById('set-tile').value === '0',
-    d.doc.getElementById('set-tile').value);
-  t('设置标签显示「关闭」', d.doc.getElementById('v-tile').textContent === '关闭',
-    d.doc.getElementById('v-tile').textContent);
+  t('设置里已无分块滑块', d.doc.getElementById('set-tile') === null);
+  t('设置里已无分块标签', d.doc.getElementById('v-tile') === null);
+  t('工具栏有拖动手柄', d.doc.getElementById('bar-handle') !== null);
+  // 全新安装没有照片 → 停在首页，工具栏应是收起状态（首页不需要工具栏）
+  t('全新安装停在首页且工具栏收起',
+    d.doc.getElementById('bottombar').classList.contains('collapsed') === true);
 
   console.log(`\n  通过 ${pass} / ${pass + fail}`);
   if (fail) process.exit(1);

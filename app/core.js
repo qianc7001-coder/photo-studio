@@ -726,94 +726,6 @@
     return { sx: rx + inner.sx, sy: ry + inner.sy, sw: inner.sw, sh: inner.sh };
   }
 
-  /**
-   * 计算分块瓦片在「重叠区」的 alpha 权重，用于把多块结果平滑拼起来。
-   *
-   * 背景：相邻瓦片有 overlap 像素的重叠。若后写的块直接覆盖先写的块，
-   * 块边界会出现明显色差断层（每块的白平衡/曝光不可能完全一致）。
-   * 这里让重叠区做线性过渡：靠近本块中心权重 1，靠近本块边缘权重 0，
-   * 于是两块在重叠区自然各占一半，拼缝不可见。
-   *
-   * @param {object} tile 当前瓦片（选区坐标系）
-   * @param {object} full 整个选区
-   * @param {number} overlap 重叠像素
-   * @returns {Float32Array} 长度 tile.w*tile.h 的权重
-   */
-  function tileBlendWeights(tile, full, overlap) {
-    const w = Math.max(1, num(tile.w, 1)), h = Math.max(1, num(tile.h, 1));
-    const ov = Math.max(0, num(overlap, 0));
-    const W = new Float32Array(w * h);
-    if (ov <= 0) { W.fill(1); return W; }
-
-    // 本块相对整个选区的位置，决定哪条边需要渐隐（只有与邻块相接的边才渐隐）
-    const leftEdge = num(tile.x, 0) > num(full.x, 0) + 0.5;
-    const topEdge = num(tile.y, 0) > num(full.y, 0) + 0.5;
-    const rightEdge = num(tile.x, 0) + w < num(full.x, 0) + num(full.w, 0) - 0.5;
-    const bottomEdge = num(tile.y, 0) + h < num(full.y, 0) + num(full.h, 0) - 0.5;
-
-    const band = Math.max(1, Math.min(ov, Math.floor(Math.min(w, h) / 2)));
-    for (let y = 0; y < h; y++) {
-      let wy = 1;
-      if (topEdge) wy = Math.min(wy, smoothstep(0, band, y + 0.5));
-      if (bottomEdge) wy = Math.min(wy, smoothstep(0, band, h - 0.5 - y));
-      for (let x = 0; x < w; x++) {
-        let wx = 1;
-        if (leftEdge) wx = Math.min(wx, smoothstep(0, band, x + 0.5));
-        if (rightEdge) wx = Math.min(wx, smoothstep(0, band, w - 0.5 - x));
-        W[y * w + x] = Math.max(0, Math.min(1, wx * wy));
-      }
-    }
-    return W;
-  }
-
-  /**
-   * 把一块生成结果按权重累加进目标（加权平均），实现无缝拼接。
-   * @param {object} acc  { data: Float32Array(w*h*3), w, h } 累加缓冲
-   * @param {object} wacc { data: Float32Array(w*h), w, h } 权重累加缓冲
-   * @param {object} patch 该块的像素（ImageData 形状）
-   * @param {number} ox,oy 该块在选区里的偏移
-   * @param {Float32Array} weights 该块权重
-   */
-  function accumulateTile(acc, wacc, patch, ox, oy, weights) {
-    const W = acc.w, H = acc.h;
-    const pw = patch.width, ph = patch.height;
-    const d = patch.data;
-    for (let y = 0; y < ph; y++) {
-      const gy = oy + y;
-      if (gy < 0 || gy >= H) continue;
-      for (let x = 0; x < pw; x++) {
-        const gx = ox + x;
-        if (gx < 0 || gx >= W) continue;
-        const a = weights ? weights[y * pw + x] : 1;
-        if (a <= 0) continue;
-        const si = (y * pw + x) * 4;
-        const gi = (gy * W + gx);
-        acc.data[gi * 3] += d[si] * a;
-        acc.data[gi * 3 + 1] += d[si + 1] * a;
-        acc.data[gi * 3 + 2] += d[si + 2] * a;
-        wacc.data[gi] += a;
-      }
-    }
-  }
-
-  /** 把加权累加缓冲写回 ImageData */
-  function resolveAccumulated(acc, wacc, out) {
-    const n = acc.w * acc.h;
-    for (let i = 0; i < n; i++) {
-      const w = wacc.data[i];
-      const o = i * 4;
-      if (w > 1e-6) {
-        out.data[o] = acc.data[i * 3] / w;
-        out.data[o + 1] = acc.data[i * 3 + 1] / w;
-        out.data[o + 2] = acc.data[i * 3 + 2] / w;
-      } else {
-        out.data[o] = 0; out.data[o + 1] = 0; out.data[o + 2] = 0;
-      }
-      out.data[o + 3] = 255;
-    }
-    return out;
-  }
-
   /** 生图结果与选区的比例偏差程度：1 表示完全一致，>1.25 说明偏差明显 */
   function aspectMismatch(srcW, srcH, dstW, dstH) {
     const a = Math.max(1, num(srcW, 1)) / Math.max(1, num(srcH, 1));
@@ -930,35 +842,6 @@
     return best;
   }
 
-  /**
-   * 分块规划：把大选区切成若干带重叠的瓦片（图像坐标），每块单独送模型。
-   * @param {object} rect {x,y,w,h}
-   * @param {object} opts { maxSide, overlap }
-   */
-  function planTileCrop(rect, opts) {
-    opts = opts || {};
-    const maxSide = Math.max(256, num(opts.maxSide, 1400) || 1400);
-    const overlap = clamp(num(opts.overlap, 96), 0, maxSide / 3);
-    const R = rect || {};
-    const x = num(R.x, 0), y = num(R.y, 0);
-    const w = Math.max(0, num(R.w, 0)), h = Math.max(0, num(R.h, 0));
-    if (w <= 0 || h <= 0) return [];
-    const cols = Math.max(1, Math.ceil((w - overlap) / Math.max(1, maxSide - overlap)));
-    const rows = Math.max(1, Math.ceil((h - overlap) / Math.max(1, maxSide - overlap)));
-    if (cols === 1 && rows === 1) return [{ x, y, w, h }];
-    const spanW = Math.ceil((w + (cols - 1) * overlap) / cols);
-    const spanH = Math.ceil((h + (rows - 1) * overlap) / rows);
-    const tw = Math.min(maxSide, spanW), th = Math.min(maxSide, spanH);
-    const tiles = [];
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const tx = cols === 1 ? x : x + round(c * (w - tw) / (cols - 1));
-        const ty = rows === 1 ? y : y + round(r * (h - th) / (rows - 1));
-        tiles.push({ x: tx, y: ty, w: tw, h: th });
-      }
-    }
-    return tiles;
-  }
 
   /* ============================ 7. 模型接入层 ============================ */
 
@@ -1569,24 +1452,21 @@
   /**
    * 预估一次生成的成本。
    *
-   * 关键：一次点击可能产生**多次调用** ——
-   * 选区过大时会自动分块（最多 9 块），每块各调用一次。
-   * 所以不能简单按「1 次点击 = 1 张图」估算。
+   * 一次点击 = 一次调用（整块选区一次生成，不分块）。
+   * 早期版本会把大选区切成多块分别生成，但每块是模型**独立生成**的，
+   * 重叠区内容必然不一致，加权平均后接缝出现重影/发糊 ——
+   * 这是分块方案本身的固有缺陷，不是参数能调好的，所以已彻底移除。
    *
-   * @param {object} o { rect, tileMaxSide, overlap, model, preset, priceOverride, usdCny }
+   * 参数里仍保留 tiles/calls 字段（值恒为 1），避免调用方到处改。
+   *
+   * @param {object} o { rect, model, preset, priceOverride, usdCny }
    * @returns {{calls:number, tiles:number, unitUsd:number|null, totalUsd:number|null,
    *            totalCny:number|null, known:boolean, note:string}}
    */
   function estimateCost(o) {
     o = o || {};
-    const rect = o.rect || { w: 1, h: 1 };
-    const tileMaxSide = num(o.tileMaxSide, 1400);
-    // 分块数：与真实生成路径一致（超过上限才分块）
-    let tiles = 1;
-    if (tileMaxSide > 0) {
-      tiles = planTileCrop(rect, { maxSide: tileMaxSide, overlap: num(o.overlap, 80) }).length || 1;
-    }
-    const calls = Math.max(1, tiles);
+    const tiles = 1;
+    const calls = 1;
 
     const price = (o.priceOverride != null && num(o.priceOverride, -1) >= 0)
       ? { usd: num(o.priceOverride, 0), note: '自定义单价' }
@@ -2208,7 +2088,7 @@
    * 当前配置迁移版本。
    * 每次需要「强制修正老版本留下的配置」时 +1。
    */
-  const CFG_REV = 2;
+  const CFG_REV = 3;
 
   /**
    * 把老版本留下的配置迁移到当前版本。
@@ -2226,19 +2106,25 @@
    */
   function migrateCfg(cfg, saved) {
     const c = cfg || {};
-    const rev = num(saved && saved.__cfgRev, 0);
     const changed = [];
+    // 首次安装（没有存档）没有「旧值」需要迁移。
+    // 不早退的话，会在全新配置上凭空记录迁移项，用户一打开就看到
+    // 「设置已按新版本自动调整」—— 而他根本没调过任何设置。
+    if (!saved || typeof saved !== 'object') { c.__cfgRev = CFG_REV; return { cfg: c, changed }; }
+    const rev = num(saved.__cfgRev, 0);
     if (rev >= CFG_REV) { c.__cfgRev = rev; return { cfg: c, changed }; }
 
-    // rev 0/1 → 2：关闭「大选区分块」。
-    // 分块后每块由模型独立生成，重叠区内容必然不完全一致，
-    // 加权平均会出现重影/发糊 —— 这是分块方案本身的固有问题，调参数治不好。
-    // 需要的人可以在设置里手动打开（打开后 cfgRev 已是 2，不会再被关掉）。
-    if (rev < 2) {
-      // 注意：不能只判断 num(tile) > 0 —— 脏数据（如字符串 'x'）会被 num 解析成 0
-      // 而绕过这一支，结果非法值被原样留在配置里。这里统一改成合法数值。
-      const n = num(c.tile, 0);
-      if (!Number.isFinite(Number(c.tile)) || n > 0) { c.tile = 0; changed.push('tile'); }
+    // rev 2 → 3：分块功能已彻底移除，配置里的 tile 字段一并删掉。
+    // 留着它会让用户在设置里看到「大选区自动分块」而实际没有任何作用 ——
+    // 功能删了但开关还在，比没这个开关更让人困惑。
+    //
+    // 注意必须查 **saved**（原始存档）而不是只看 c：
+    // tile 已从 PERSIST_KEYS 移除，loadCfg 根本不会把它读进 cfg，
+    // 只看 c 的话这里永远认为「没有这个字段」→ 不触发迁移 → 不落盘，
+    // 于是 localStorage 里的残留字段永远清不掉。
+    if (rev < 3) {
+      if (c.tile !== undefined) { delete c.tile; changed.push('tile-removed'); }
+      if (saved.tile !== undefined) changed.push('tile-removed');
     }
 
     c.__cfgRev = CFG_REV;
@@ -2525,22 +2411,89 @@
   /**
    * 判断「这次生成值不值得提醒用户别切走」。
    *
-   * 单块请求通常 30~60 秒，多块会成倍增长。保活能挡住系统回收，
-   * 但挡不住用户主动杀应用（从最近任务划掉）—— 那种情况必须提前说明。
+   * 一次生成通常 30~60 秒。保活能挡住系统回收，但挡不住用户主动杀应用
+   * （从最近任务划掉）—— 那种情况必须提前说明。
+   *
+   * 只提醒**一次**（seen=true 后不再提醒）：这条提示的内容对同一个人永远一样，
+   * 每次生成都弹一遍纯属打扰 —— 与工具提示同一个原则。
+   *
+   * @param {object} o { supported, enabled, keepAlive, seconds, seen }
    */
   function planGenForegroundNotice(o) {
     const opt = o || {};
-    const tiles = Math.max(1, Math.round(num(opt.tiles, 1)));
     const supported = opt.supported !== false;
     const enabled = opt.enabled !== false;
     const keepOn = !!(opt.keepAlive && opt.keepAlive.on);
-    // 分块越多、越久，越值得提醒
-    const risky = tiles > 1;
+    const seen = opt.seen === true;
+    const sec = Math.max(0, Math.round(num(opt.seconds, 0)));
+    // 保活开着才需要提醒（没开保活的话切走本来就可能丢，提醒也没用）
     return {
-      show: supported && enabled && keepOn && risky,
-      text: risky
-        ? '本次要分 ' + tiles + ' 块依次生成，耗时较长。已开启后台保活，切走或锁屏都不会中断 —— 但请别从最近任务里划掉应用。'
-        : ''
+      show: supported && enabled && keepOn && !seen,
+      text: '生成中（约 ' + (sec > 0 ? sec + ' 秒' : '30~60 秒') +
+        '），已开启后台保活，切走或锁屏都不会中断 —— 但请别从最近任务里划掉应用。'
+    };
+  }
+
+  /* ====================== 7.01e2 工具栏高度 ====================== */
+
+  /**
+   * 工具栏高度档位。
+   *
+   * 为什么需要：修图时最缺的是画布高度。工具栏展开占 240px 左右，
+   * 在 6 寸手机上画布只剩一半 —— 但不同人需求不同：
+   * 有人喜欢全展开随时点工具，有人只要一个生成按钮。
+   * 所以给一个「自由调节」而不是写死的两档。
+   *
+   * 设计取舍：用「露出多少像素」而不是「百分比」描述 ——
+   * 百分比在不同屏幕高度下表现不一致（同一档在大屏上露出的内容完全不同），
+   * 像素值才能保证「正好露出工具行」这类意图在任何设备上都成立。
+   */
+  const BAR_MIN = 40;      // 只露手柄 + 一行工具
+
+  /**
+   * 把工具栏高度夹到合法范围。
+   *
+   * @param {number} h 期望露出高度（px）
+   * @param {number} full 完全展开时的高度（px）
+   * @param {number} viewH 视口高度（px）
+   * @returns {number} 夹取后的高度
+   */
+  function clampBarHeight(h, full, viewH) {
+    const f = Math.max(0, num(full, 0));
+    const vh = Math.max(0, num(viewH, 0));
+    // 上限：工具栏自身高度，且不超过视口的 70% —— 否则画布被挤没了
+    const max = Math.min(f, Math.max(BAR_MIN, vh * 0.7));
+    return Math.round(Math.max(BAR_MIN, Math.min(max, num(h, max))));
+  }
+
+  /**
+   * 判断当前高度算「收起」还是「展开」。
+   *
+   * 阈值取「完全展开高度的一半」而不是固定像素：
+   * 不同机型工具栏高度不同，固定阈值会让小屏上「稍微拉一点就算展开」。
+   */
+  function isBarCollapsed(h, full) {
+    const f = Math.max(1, num(full, 1));
+    return num(h, f) < f * 0.5;
+  }
+
+  /**
+   * 规划工具栏状态。
+   *
+   * @param {object} o { height, full, viewH, hasImage }
+   * @returns {{height:number, collapsed:boolean, full:number, pct:number}}
+   */
+  function planToolbar(o) {
+    const opt = o || {};
+    const full = Math.max(BAR_MIN, num(opt.full, 0));
+    const viewH = num(opt.viewH, 0);
+    const height = clampBarHeight(opt.height, full, viewH);
+    return {
+      height,
+      full,
+      collapsed: isBarCollapsed(height, full),
+      // 展开程度（0~1），用于提示与动画
+      pct: full > 0 ? Math.round((height / full) * 100) / 100 : 1
     };
   }
 
@@ -4870,16 +4823,6 @@
     return parts.filter(Boolean).join(isZh ? '。' : '. ').replace(/。。+/g, '。');
   }
 
-  /** 分块生成时给提示词附加的位置说明 */
-  function tileHint(index, total, isZh) {
-    if (total <= 1) return '';
-    const pos = ['左上', '中上', '右上', '左中', '中央', '右中', '左下', '中下', '右下'];
-    const p = pos[Math.min(index, pos.length - 1)];
-    return isZh
-      ? `这是同一张照片的局部（${p}区域，第 ${index + 1}/${total} 块），请与整张照片的风格、光线、色彩保持一致`
-      : `This is a crop of a larger photo (${p} area, tile ${index + 1}/${total}); keep the style, lighting and colors consistent with the whole photo`;
-  }
-
   /* ============================ 9. 导出 ============================ */
 
   function formatBytes(n) {
@@ -4894,12 +4837,6 @@
     const d = new Date();
     const p = (n) => String(n).padStart(2, '0');
     return `${prefix || 'photo'}_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.${ext || 'jpg'}`;
-  }
-
-  /** 估算某个选区要调用几次模型（分块） */
-  function estimateCalls(rect, opts) {
-    const tiles = planTileCrop(rect, opts);
-    return tiles.length;
   }
 
   /* ============================ 导出 API ============================ */
@@ -4919,11 +4856,11 @@
     srgbToLinear, linearToSrgb, rgbToOklab, oklabToRgb, colorDistance,
     relativeLuminance, bestTextColor, rgbToHex, hexToRgb,
     // 尺寸
-    parseSize, snapTo, resolveOutputSize, resolveAspectRatio, planTileCrop,
+    parseSize, snapTo, resolveOutputSize, resolveAspectRatio,
     SIZE_RULES, sizeRulesFor, validateSize, conformSize,
     planUpscale, mapUpscaledSelection,
     coverCrop, aspectMismatch, mapSelectionToResult,
-    tileBlendWeights, accumulateTile, resolveAccumulated,
+
     parseImageSize,
     patchMemory, planHistoryMemory, planSessionPersist, packMask, unpackMask,
     normalizeLayer, layerAlphaAt, layerAlphaMap, layerCoverage, sortLayers,
@@ -4937,6 +4874,8 @@
     LIBRARY_BUDGET_BYTES, LIBRARY_MAX_ITEMS, THUMB_MAX_SIDE,
     // 后台保活
     planKeepAlive, describeKeepAlive, planGenForegroundNotice,
+    // 工具栏高度
+    planToolbar, clampBarHeight, isBarCollapsed, BAR_MIN,
     // 浏览器能力兼容
     planCompat, compatClassNames,
     // 对比视图手势
@@ -4964,8 +4903,8 @@
     classifyModel, pickImageModels, findKnownModel, modelParams,
     validateImageRequest, diagnoseResponse,
     // 提示词
-    STYLE_PRESETS, SCOPE_PRESETS, buildPrompt, tileHint,
+    STYLE_PRESETS, SCOPE_PRESETS, buildPrompt,
     // 导出
-    formatBytes, timestampName, estimateCalls
+    formatBytes, timestampName
   };
 });

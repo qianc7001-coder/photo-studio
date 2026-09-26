@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-2132%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-2595%20passed-brightgreen.svg)](#测试)
 
 给摄影师用的**局部修图**工具：在照片上框选任意区域，交给生图模型修改，结果自动贴回原位置。
 
 **核心特点**：结果无缝融合，非破坏性可调，保留拍摄信息。
 
-> 最新版本 **v3.1.0** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
+> 最新版本 **v3.2.0** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
 
 ---
 
@@ -32,6 +32,9 @@
 - 打开应用先看到**修过的照片**（按 今天 / 昨天 / N 天前 分组），而不是一块空白画布
 - 点任意一条**接着改**，或点右上角「修新照片」
 - 工具栏默认收起，进入编辑页才展开 —— 手机竖向空间全给画布
+- **工具栏高度可自由调节**：拖动底栏手柄拉到任意高度，轻点手柄或箭头收起/展开；
+  高度会被记住，换图、重启都沿用
+- 工具提示（画笔/引导线怎么用）**只显示一次**，第二次进入不再弹出
 
 ### 编辑
 - **自由框选**：任意位置、任意大小，支持拖拽手柄调整、锁定比例
@@ -108,13 +111,14 @@
 - 边缘羽化（消除拼接硬边）
 - 接缝色彩匹配（把生成结果色调对齐原图）
 - 细长选区自动按比例裁切贴合，**不会变形**
-- **整块一次生成**（默认不分块）—— 选区再大也整块发送，从根上避免接缝
+- **整块一次生成** —— 选区再大也整块发送，从根上避免接缝
 - 小选区自动放大后发送（应对接口最小尺寸限制）
 
 > **关于分块**：早期版本会把大选区切成多块分别生成，但每块是模型**独立生成**的，
 > 重叠区内容必然不完全一致，加权平均后接缝处会出现重影或发糊 ——
-> 这是分块方案本身的固有缺陷，不是参数能调好的。因此**默认关闭**。
-> 设置里仍保留开关：万一服务商拒绝大尺寸请求，可以临时打开。
+> 这是分块方案本身的固有缺陷，不是参数能调好的。
+> **该功能已在 v3.2.0 彻底移除**：现在无论选区多大都整块一次生成，
+> 成本也从「按块数翻倍」回到固定一次。老配置里残留的分块字段会在升级时自动清除。
 
 ### 照片信息
 - 一键看清这张照片的**机型、镜头、快门、光圈、ISO、焦距、拍摄时间**（直接读 EXIF）
@@ -325,7 +329,8 @@ WebView 里用 `file://` 打开页面时，跨域请求会被拦截，而且 `lo
 
 | 版本 | 主要变化 |
 |---|---|
-| **v3.1.0** | 引导线支持自由绘制（笔迹画进图片，模型照着走向生成）；笔迹颜色可选 |
+| **v3.2.0** | 彻底删除大选区分块；工具栏高度可自由调节；工具提示只显示一次 |
+| [v3.1.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.1.0) | 引导线支持自由绘制（笔迹画进图片，模型照着走向生成）；笔迹颜色可选 |
 | [v3.0.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.0.0) | 首页改为修改历史；照片信息；引导线构图；导出格式与大小可选 |
 | [v2.9.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.9.0) | 应用内检查更新；修复 GitHub「最新版」指向错误版本 |
 | [v2.8.2](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.8.2) | 设置界面改成手机系统设置风格；加 GitHub 入口 |
