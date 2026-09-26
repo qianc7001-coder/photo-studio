@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-2289%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-2407%20passed-brightgreen.svg)](#测试)
 
 给摄影师用的**局部修图**工具：在照片上框选任意区域，交给生图模型修改，结果自动贴回原位置。
 
 **核心特点**：结果无缝融合，非破坏性可调，保留拍摄信息。
 
-> 最新版本 **v3.3.0** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
+> 最新版本 **v3.4.0** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
 
 ---
 
@@ -32,6 +32,9 @@
 - 打开应用先看到**修过的照片**（按 今天 / 昨天 / N 天前 分组），而不是一块空白画布
 - 点任意一条**接着改**，或点右上角「修新照片」
 - 工具栏默认收起，进入编辑页才展开 —— 手机竖向空间全给画布
+- **返回键逐级退**：有浮层先关浮层（作品预览 → 设置/记录/历史/修改记录/照片信息/导出 → 对比图 → 失败说明），
+  生成中先取消生成，画笔/平移/引导线模式退回框选，编辑中退回首页，已在首页才退出应用
+- 退回首页前会**先把当前作品存进修图记录**，随时可以从首页点回去继续编辑
 - **工具栏高度可自由调节**：拖动底栏手柄拉到任意高度，轻点手柄或箭头收起/展开；
   高度会被记住，换图、重启都沿用
 - 工具提示（画笔/引导线怎么用）**只显示一次**，第二次进入不再弹出
@@ -332,7 +335,8 @@ WebView 里用 `file://` 打开页面时，跨域请求会被拦截，而且 `lo
 
 | 版本 | 主要变化 |
 |---|---|
-| **v3.3.0** | 修复应用内「检查更新」永远失败（代理只支持 POST / 缺 UA / 不回退直连） |
+| **v3.4.0** | 修复按一下返回键就退出应用；返回键改为逐级退（浮层 → 生成 → 工具 → 首页） |
+| [v3.3.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.3.0) | 修复应用内「检查更新」永远失败（代理只支持 POST / 缺 UA / 不回退直连） |
 | [v3.2.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.2.0) | 彻底删除大选区分块；工具栏高度可自由调节；工具提示只显示一次 |
 | [v3.1.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.1.0) | 引导线支持自由绘制（笔迹画进图片，模型照着走向生成）；笔迹颜色可选 |
 | [v3.0.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.0.0) | 首页改为修改历史；照片信息；引导线构图；导出格式与大小可选 |

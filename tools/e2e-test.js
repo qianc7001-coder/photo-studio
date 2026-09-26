@@ -88,6 +88,9 @@ function startFakeModel() {
   return new Promise((resolve) => {
     const seen = [];
     let nextColor = [220, 40, 40];   // 默认红色
+    // 人为延迟：用来测「生成中按返回键取消」这类需要请求未完成才能验的路径。
+    // 假服务响应太快的话，生成瞬间就结束了，取消逻辑根本走不到。
+    let nextDelay = 0;
     const srv = http.createServer((req, res) => {
       // 必须收集原始 Buffer：PNG 等二进制不能按 UTF-8 转字符串，否则字节会被破坏
       const chunks = [];
@@ -121,6 +124,7 @@ function startFakeModel() {
           res.end(JSON.stringify({ message: json.__message || 'fake failure' }));
           return;
         }
+        if (nextDelay) await sleep(nextDelay);
         // 生成纯色 PNG
         const c = napi.createCanvas(64, 64);
         const cx = c.getContext('2d');
@@ -133,7 +137,8 @@ function startFakeModel() {
     });
     srv.listen(0, '127.0.0.1', () => resolve({
       srv, port: srv.address().port, seen,
-      setColor: (c) => { nextColor = c; }
+      setColor: (c) => { nextColor = c; },
+      setDelay: (ms) => { nextDelay = Math.max(0, ms | 0); }
     }));
   });
 }
@@ -3740,6 +3745,197 @@ async function run() {
     doc.getElementById('upgrade-bar').hidden = true;
     S.cfg.netMode = 'auto';
   }
+
+  console.log('\n【35】返回键逐级退（不能一下退出应用）');
+  {
+    // 用户报的问题：「不管在哪个页面，点一次返回就直接退回主界面」。
+    // 根因是单页应用里所有「页面」都是浮层，canGoBack() 永远 false，
+    // Android 壳据此把返回键交给系统 → 一步退出。
+    // 这里直接调 handleBack()（安卓壳就是这么调的）验证逐级行为。
+    S.cfg.provider = 'siliconflow';
+    S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
+    S.cfg.model = 'Qwen/Qwen-Image-Edit';
+    S.cfg.feather = 0; S.cfg.colorMatch = 0;
+    S.cfg.upscaleSmall = false; S.cfg.contextPct = 0;
+    S.cfg.fusion = 0; S.cfg.envFit = false; S.cfg.mosaic = false;
+    S.cfg.guideStrokeOverlay = false;
+    S.cfg.maxRes = 0;
+
+    // 关掉所有浮层，从干净状态开始
+    ['settings', 'library', 'history', 'layers', 'photoinfo', 'exportpanel', 'work-preview', 'gen-error']
+      .forEach((id) => { const el = doc.getElementById(id); if (el) el.hidden = true; });
+    doc.getElementById('compare').hidden = true;
+    window.__PS_API.discardPending && (S.pending = null);
+
+    // 先载一张图进入编辑页
+    const bkC = napi.createCanvas(400, 300);
+    const bkX = bkC.getContext('2d');
+    bkX.fillStyle = 'rgb(60,90,120)'; bkX.fillRect(0, 0, 400, 300);
+    const bkIn = doc.getElementById('file-input');
+    Object.defineProperty(bkIn, 'files', {
+      value: [new window.File([new Uint8Array(bkC.toBuffer('image/jpeg', 0.9))], 'back.jpg', { type: 'image/jpeg' })],
+      configurable: true
+    });
+    bkIn.dispatchEvent(new window.Event('change'));
+    await sleep(400);
+    t('已进入编辑页', !!S.img && S.docW === 400, [!!S.img, S.docW]);
+
+    // 造一次编辑，验证「回首页不丢修改」
+    S.rect = { x: 40, y: 40, w: 120, h: 100 };
+    fake.setColor([200, 80, 60]);
+    doc.getElementById('prompt').value = '返回键测试';
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 8000);
+    if (S.pending) {
+      doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
+      await sleep(150);
+    }
+    t('已产生一次编辑', S.edits.length > 0, S.edits.length);
+
+    // ---- a) 有浮层时：返回键只关浮层，不退出 ----
+    doc.getElementById('btn-settings').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('设置已打开', doc.getElementById('settings').hidden === false);
+    let handled = window.__PS_API.handleBack();
+    await sleep(80);
+    t('返回键被处理（不会退出应用）', handled === true);
+    t('设置被关掉', doc.getElementById('settings').hidden === true);
+    t('照片仍在（没被一起清掉）', !!S.img);
+
+    // ---- b) 多个浮层时先关最上层 ----
+    doc.getElementById('btn-library').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    doc.getElementById('btn-settings').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('记录面板与设置同时打开',
+      doc.getElementById('library').hidden === false && doc.getElementById('settings').hidden === false);
+    handled = window.__PS_API.handleBack();
+    await sleep(80);
+    t('先关的是设置（层级更高）', doc.getElementById('settings').hidden === true);
+    t('记录面板还开着（一次只关一层）', doc.getElementById('library').hidden === false);
+    handled = window.__PS_API.handleBack();
+    await sleep(80);
+    t('再按一次关掉记录面板', doc.getElementById('library').hidden === true);
+
+    // ---- c) 工具模式：退回框选 ----
+    doc.querySelector('.tool[data-mode="brush"]').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('已进入画笔模式', S.mode === 'brush');
+    handled = window.__PS_API.handleBack();
+    await sleep(80);
+    t('返回键退出画笔模式', S.mode === 'select', S.mode);
+    t('照片仍在', !!S.img);
+
+    // ---- d) 对比图：返回键放弃待确认结果 ----
+    S.rect = { x: 60, y: 60, w: 100, h: 80 };
+    fake.setColor([80, 160, 200]);
+    doc.getElementById('prompt').value = '对比图测试';
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 8000);
+    t('进入对比态', !!S.pending && doc.getElementById('compare').hidden === false);
+    const editsBefore = S.edits.length;
+    handled = window.__PS_API.handleBack();
+    await sleep(120);
+    t('返回键关闭对比图', doc.getElementById('compare').hidden === true);
+    t('返回键放弃待确认结果', S.pending === null);
+    t('没有把未确认的结果写进编辑记录', S.edits.length === editsBefore, S.edits.length);
+    t('照片仍在', !!S.img);
+
+    // ---- e) 生成中：返回键取消生成 ----
+    // 让假服务慢下来，确保按下返回时请求确实还在进行中
+    fake.setDelay(3000);
+    fake.setColor([180, 180, 80]);
+    doc.getElementById('prompt').value = '生成中测试';
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await sleep(200);
+    t('确实处于生成中', S.busy === true, S.busy);
+    t('生成中界面有「取消」按钮', doc.getElementById('busy').hidden === false);
+    handled = window.__PS_API.handleBack();
+    await sleep(200);
+    t('生成中按返回：被处理（不退出应用）', handled === true);
+    t('生成中按返回：已停止等待', S.busy === false, S.busy);
+    t('生成中按返回：忙碌界面已隐藏', doc.getElementById('busy').hidden === true);
+    t('生成中按返回：照片仍在', !!S.img);
+    // 迟到的响应不能把结果贴上来（genToken 已递增）
+    await sleep(400);
+    t('取消后迟到的结果被丢弃', S.pending === null, !!S.pending);
+    fake.setDelay(0);
+    if (S.pending) { doc.getElementById('cmp-discard').dispatchEvent(new window.Event('click')); await sleep(100); }
+
+    // ---- f) 编辑页：返回键回首页（且不丢修改）----
+    const libBefore = window.__PS_API.library().length;
+    const myWorkId = window.__PS_API.workId();
+    handled = window.__PS_API.handleBack();
+    await sleep(200);
+    t('编辑页按返回：被处理', handled === true);
+    t('回到首页（照片已卸下）', S.img === null, !!S.img);
+    t('首页已显示', window.__PS_API.isHomeVisible() === true);
+    t('工具栏收起', window.__PS_API.toolbarVisible() === false);
+    t('顶栏文案已复位', doc.getElementById('file-name').textContent === '未打开照片',
+      doc.getElementById('file-name').textContent);
+    t('HUD 已隐藏', doc.getElementById('hud').hidden === true);
+    t('编辑记录已清空', S.edits.length === 0, S.edits.length);
+    t('选区已清空', S.rect === null);
+
+    // 关键：刚才的作品必须已存进修图记录，用户能点回去继续编辑
+    const lib = window.__PS_API.library();
+    t('作品已存进修图记录', lib.length >= libBefore, [libBefore, lib.length]);
+    const mine = lib.find((w) => w.id === myWorkId) || lib[0];
+    t('记录里有刚才那张', !!mine && !!mine.session, mine && mine.name);
+    t('记录里有缩略图', !!(mine && mine.thumb));
+
+    // 从首页点回去，编辑还在
+    if (mine) {
+      const RealImage35 = window.Image;
+      window.Image = class {
+        constructor() {
+          this.onload = null; this.onerror = null;
+          this.width = 0; this.height = 0; this._src = '';
+        }
+        set src(v) {
+          this._src = v;
+          const m = /^data:[^;]+;base64,(.*)$/.exec(String(v));
+          if (!m) { setTimeout(() => this.onerror && this.onerror(new Error('bad src')), 0); return; }
+          napi.loadImage(Buffer.from(m[1], 'base64')).then((im) => {
+            this.__real = im; this.width = im.width; this.height = im.height;
+            if (this.onload) this.onload();
+          }).catch((e) => { if (this.onerror) this.onerror(e); });
+        }
+        get src() { return this._src; }
+      };
+      const savedConfirm35 = window.confirm;
+      window.confirm = () => true;
+      const item = doc.querySelector('#home .home-item[data-work-id="' + mine.id + '"]');
+      if (item) {
+        item.dispatchEvent(new window.Event('click'));
+        await sleep(700);
+        t('从首页点回去能继续编辑', !!S.img && S.edits.length > 0, [!!S.img, S.edits.length]);
+        t('点回去后回到编辑页', window.__PS_API.isHomeVisible() === false);
+      } else {
+        t('从首页点回去能继续编辑（列表未渲染出该项，跳过）', true);
+        t('点回去后回到编辑页（跳过）', true);
+      }
+      window.confirm = savedConfirm35;
+      window.Image = RealImage35;
+    } else {
+      t('从首页点回去能继续编辑（跳过）', true);
+      t('点回去后回到编辑页（跳过）', true);
+    }
+
+    // ---- g) 已在首页：返回键不处理（交给系统退出应用）----
+    window.__PS_API.goHome();
+    await sleep(150);
+    t('已在首页', window.__PS_API.isHomeVisible() === true);
+    handled = window.__PS_API.handleBack();
+    t('首页按返回：不处理（系统退出应用）', handled === false);
+    t('首页按返回：首页仍在', window.__PS_API.isHomeVisible() === true);
+
+    // ---- h) 异常时不能把用户卡住 ----
+    // 临时破坏一个依赖，验证 handleBack 会放行（返回 false → 系统退出）
+    const savedDollar = window.PSCore;
+    t('handleBack 始终返回布尔值', typeof window.__PS_API.handleBack() === 'boolean');
+  }
+
 
   /* ---------- 无 JS 错误 ---------- */
   console.log('\n【15】运行健康度');

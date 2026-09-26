@@ -21,7 +21,6 @@ import android.os.Environment;
 import android.os.PowerManager;
 import android.provider.Settings;
 import android.util.Log;
-import android.view.KeyEvent;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
@@ -33,6 +32,7 @@ import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import android.webkit.ValueCallback;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.widget.Toast;
@@ -246,14 +246,55 @@ public class MainActivity extends Activity {
         }
     }
 
-    @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if (keyCode == KeyEvent.KEYCODE_BACK && web != null && web.canGoBack()) {
-            web.goBack();
-            return true;
-        }
-        return super.onKeyDown(keyCode, event);
+    /**
+     * 交给系统处理返回（真正退出应用）。
+     *
+     * 单独抽成方法是因为 super.onBackPressed() 不能在回调里调用。
+     */
+    @SuppressWarnings("deprecation")
+    private void callSuperBack() {
+        super.onBackPressed();
     }
+
+    /**
+     * 返回键处理。
+     *
+     * 为什么不能只看 canGoBack()：
+     *   这是个单页应用 —— 设置、修图记录、对比图、历史时间线全是**浮层**，
+     *   没有真正的页面跳转，所以 web.canGoBack() 永远是 false。
+     *   原实现为假就把事件交给系统 → **从任何浮层按一下返回键都直接退出整个应用**，
+     *   用户以为刚做的修改丢了。
+     *
+     * 现在改为先问页面：「这一下返回你处理了吗？」
+     *   页面按「浮层 → 取消生成 → 退回框选 → 回首页」的顺序逐级处理，
+     *   全部处理完（已在首页）才返回 false，交给系统退出应用。
+     *
+     * 注意用 onBackPressed 而不是 onKeyDown：evaluateJavascript 是**异步**的，
+     * 而 onKeyDown 必须同步返回 true/false。onBackPressed 返回 void，可以用回调。
+     * 回调写成匿名内部类而不是 lambda —— 构建用的 android.jar 不含
+     * LambdaMetafactory，用 lambda 会编译失败（javac 报 cannot find symbol metafactory）。
+     */
+    @SuppressWarnings("deprecation")
+    @Override
+    public void onBackPressed() {
+        if (web == null) {
+            callSuperBack();
+            return;
+        }
+        // 真机可能因 WebView 未就绪等原因返回 null —— 那时按「退出」处理，
+        // 宁可退出也不要让用户卡在按返回没反应的界面里
+        web.evaluateJavascript(BACK_PROBE_JS, new ValueCallback<String>() {
+            @Override
+            public void onReceiveValue(String value) {
+                if (value == null || value.indexOf("true") < 0) callSuperBack();
+            }
+        });
+    }
+
+    /** 问页面「返回键你处理了吗」；页面异常时按「没处理」处理（交给系统退出） */
+    private static final String BACK_PROBE_JS =
+            "(function(){try{return !!(window.__PS_API&&window.__PS_API.handleBack&&window.__PS_API.handleBack());}" +
+            "catch(e){return false;}})()";
 
     @Override
     protected void onDestroy() {

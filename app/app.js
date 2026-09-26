@@ -3354,6 +3354,138 @@
     return applyBarHeight(C.BAR_MIN, { animate, collapsed: true, save });
   }
 
+  /**
+   * 回到首页（修图记录列表）。
+   *
+   * 为什么需要：返回键在编辑页要能退回首页，但在此之前应用里
+   * **没有任何路径能把照片卸下来** —— S.img 一旦设置就从不清空，
+   * 所以「回首页」只能靠退出应用重进。这里补上。
+   *
+   * 关键：卸载前必须先把当前作品存进作品库，否则用户「返回」一下
+   * 就丢了刚才所有修改 —— 那是比「退出应用」更糟的体验。
+   */
+  function goHome() {
+    // 1) 先把当前作品落盘（防抖保存可能还没触发）
+    try {
+      if (S.edits.length) touchWork();
+    } catch (e) { /* 作品库失败不该挡住返回 */ }
+
+    // 2) 中止在途生成：否则结果返回时会贴到已卸载的文档上
+    if (S.aborter) {
+      try { S.aborter.abort(); } catch (e) { /* ignore */ }
+      S.aborter = null;
+    }
+    S.genToken++;
+    setBusy(false);
+
+    // 3) 关掉所有依赖照片的浮层（对比图、生成失败说明）
+    S.pending = null;
+    closeCompare();
+    clearErrorPanel();
+
+    // 4) 卸载文档
+    S.img = null;
+    S.imgW = 0; S.imgH = 0;
+    S.docW = 0; S.docH = 0;
+    S.docCanvas = null; S.docCtx = null;
+    S.viewCanvas = null; S.viewCtx = null;
+    S.meta = null;
+    S.edits = [];
+    S.redo = [];
+    S.rect = null;
+    S.strokes = [];
+    S.guides = [];
+    S.mode = 'select';
+    S.ratio = 0;
+    S.workId = null;
+    S.workStartedAt = 0;
+    S.histPreview = null;
+    S.histStash = null;
+    S.docVersion++;      // 旧文档的在途结果一律作废
+    S.docRev++;
+    updateGuideBadge();
+
+    // 5) 顶栏与 HUD 复位
+    $('file-name').textContent = '未打开照片';
+    $('file-meta').textContent = '点「打开」导入手机里的照片';
+    $('hud').hidden = true;
+    $('btn-save').disabled = true;
+
+    // 6) 会话存档属于「这张图未完成的编辑」，卸载后没有意义
+    try { localStorage.removeItem(LS_KEY_SESSION); } catch (e) { /* ignore */ }
+
+    // 7) 清空画布并切回首页布局
+    const v = viewSize();
+    if (ctx) { ctx.clearRect(0, 0, v.w, v.h); ctx.fillStyle = bgColor; ctx.fillRect(0, 0, v.w, v.h); }
+    renderHome();
+    syncToolbar();
+    updateUI();
+  }
+
+  /* ---------- 返回键 ---------- */
+
+  /**
+   * 处理一次返回键。返回 true 表示「已处理，别退出应用」。
+   *
+   * Android 壳通过 evaluateJavascript 调用它并读取返回值决定是否退出。
+   * 浏览器里没有返回键，所以这个函数只服务于安卓壳（测试也可直接调）。
+   */
+  function handleBack() {
+    try {
+      const open = {
+        workPreview: !!$('work-preview') && !$('work-preview').hidden,
+        settings: !!$('settings') && !$('settings').hidden,
+        library: !!$('library') && !$('library').hidden,
+        history: !!$('history') && !$('history').hidden,
+        layers: !!$('layers') && !$('layers').hidden,
+        photoinfo: !!$('photoinfo') && !$('photoinfo').hidden,
+        exportpanel: !!$('exportpanel') && !$('exportpanel').hidden,
+        compare: !!$('compare') && !$('compare').hidden,
+        genError: !!$('gen-error') && !$('gen-error').hidden
+      };
+      const plan = C.planBackAction({
+        open, busy: !!S.busy, mode: S.mode, editing: !!S.img
+      });
+      if (!plan.handled) return false;
+
+      switch (plan.action) {
+        case 'close':
+          switch (plan.target) {
+            case 'workPreview': $('work-preview').hidden = true; break;
+            case 'settings': closeSettings(); break;
+            case 'library': closeLibrary(); break;
+            case 'history': closeHistory(); break;
+            case 'layers': closeLayers(); break;
+            case 'photoinfo': closePhotoInfo(); break;
+            case 'exportpanel': closeExportPanel(); break;
+            case 'compare': discardPending(); break;
+            case 'genError': clearErrorPanel(); break;
+          }
+          break;
+        case 'cancel-gen':
+          if (S.aborter) { try { S.aborter.abort(); } catch (e) { /* ignore */ } }
+          setBusy(false);
+          toast('已取消生成');
+          break;
+        case 'mode':
+          S.mode = 'select';
+          S.strokes = []; invalidateMask();
+          resetTipDecision();
+          updateUI(); draw();
+          break;
+        case 'home':
+          goHome();
+          toast('已存进修图记录，可随时继续编辑', 3000);
+          break;
+      }
+      return true;
+    } catch (e) {
+      // 处理失败时宁可让系统退出，也不要让用户卡在按返回没反应的界面里
+      console.warn('[修图台] 返回键处理失败', e);
+      return false;
+    }
+  }
+
   /** 工具栏展开 / 收起（供外部与旧代码调用） */
   function setToolbarVisible(visible) {
     if (visible) expandToolbar();
@@ -5805,6 +5937,8 @@
     toolbarVisible: () => S.toolbarVisible,
     toolbarHeight: () => S.toolbarHeight,
     toolbarFull: () => S.toolbarFull,
+    handleBack,
+    goHome,
     openPhotoInfo,
     closePhotoInfo,
     openExportPanel,

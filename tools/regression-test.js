@@ -2438,5 +2438,91 @@ console.log('\n【更新】检查更新必须走通本地代理（POST-only 代�
 })();
 /* ---------- 检查更新走代理 ---------- */
 
+// ===== 返回键（回归块） =====
+console.log('\n【返回】按一下返回键不能直接退出应用');
+(() => {
+  const fs3 = require('fs');
+  const appSrc = fs3.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const javaSrc = fs3.readFileSync(__dirname + '/../android/src/com/photostudio/app/MainActivity.java', 'utf8');
+
+  /* 回归点 1：根因 —— 单页应用 canGoBack() 永远 false，返回键被交给系统
+        这是用户报的问题：「不管在哪个页面，点一次返回就直接退回主界面」。
+        旧实现只判断 canGoBack()，为假就 super → 一步退出整个应用。 */
+  t('不再只靠 canGoBack 判断', !/if \(keyCode == KeyEvent\.KEYCODE_BACK && web != null && web\.canGoBack\(\)\)/.test(javaSrc));
+  t('改用 onBackPressed 询问页面', /public void onBackPressed\(\)/.test(javaSrc));
+  t('页面能拦下返回键', /handleBack/.test(javaSrc));
+
+  /* 回归点 2：evaluateJavascript 是异步的，不能用 onKeyDown 同步决定。
+        所以必须用 onBackPressed（返回 void，可以走回调）。 */
+  t('用 onBackPressed 而非 onKeyDown（异步回调）', !/public boolean onKeyDown/.test(javaSrc));
+
+  /* 回归点 3：构建用的 android.jar 不含 LambdaMetafactory ——
+        回调写成 lambda 会编译失败（javac: cannot find symbol metafactory）。 */
+  t('回调不用 lambda', !/evaluateJavascript\([^)]*->/.test(javaSrc));
+
+  /* 回归点 4：super.onBackPressed() 不能在回调里调用，必须单独抽方法 */
+  t('super 调用抽成独立方法', /private void callSuperBack\(\)[\s\S]{0,80}super\.onBackPressed\(\)/.test(javaSrc));
+
+  /* 回归点 5：应用里原本没有「卸下照片」这条路（S.img 从不清空），
+        所以「回首页」只能靠退出应用重进。goHome 补上了这条路径，
+        而且**必须先把作品存档** —— 否则返回一下就把刚才的修改丢了。 */
+  t('存在卸下照片的路径', /S\.img = null;/.test(appSrc));
+  t('卸下前先存档（否则返回=丢修改）',
+    /function goHome[\s\S]{0,400}touchWork\(\)/.test(appSrc));
+  t('存档失败不挡住返回', /catch \(e\) \{ \/\* 作品库失败不该挡住返回 \*\/ \}/.test(appSrc));
+
+  /* 回归点 6：卸载文档必须作废在途生成，否则结果会贴到已卸载的文档上 */
+  t('卸载时作废在途生成',
+    /function goHome[\s\S]{0,900}S\.genToken\+\+/.test(appSrc) &&
+    /function goHome[\s\S]{0,600}S\.aborter\.abort\(\)/.test(appSrc));
+
+  /* 回归点 7：处理失败不能让用户卡住 —— 返回 false 交给系统退出 */
+  t('handleBack 异常时放行退出',
+    /catch \(e\) \{[\s\S]{0,400}return false;/.test(appSrc));
+  t('安卓侧 null 也放行', /value == null \|\| value\.indexOf\("true"\) < 0/.test(javaSrc));
+
+  /* 顺序正确性：必须与 z-index 一致 */
+  t('层级顺序与 z-index 一致',
+    C.BACK_LAYERS.every((L, i) => i === 0 || C.BACK_LAYERS[i - 1].z >= L.z));
+  t('关闭最上层（不是最下层）', (() => {
+    const r = C.planBackAction({ open: { settings: true, workPreview: true } });
+    return r.target === 'workPreview';
+  })());
+
+  /* 逐级退：连续按返回应依次处理，最后才退出 */
+  t('连续按返回逐级退到退出', (() => {
+    let st = { open: { settings: true }, busy: true, mode: 'brush', editing: true };
+    const seq = [];
+    for (let i = 0; i < 6; i++) {
+      const r = C.planBackAction(st);
+      seq.push(r.action);
+      if (!r.handled) break;
+      // 模拟处理后的状态推进
+      if (r.action === 'close') st = Object.assign({}, st, { open: {} });
+      else if (r.action === 'cancel-gen') st = Object.assign({}, st, { busy: false });
+      else if (r.action === 'mode') st = Object.assign({}, st, { mode: 'select' });
+      else if (r.action === 'home') st = Object.assign({}, st, { editing: false });
+    }
+    return JSON.stringify(seq) === JSON.stringify(['close', 'cancel-gen', 'mode', 'home', 'exit']);
+  })(), (() => {
+    let st = { open: { settings: true }, busy: true, mode: 'brush', editing: true };
+    const seq = [];
+    for (let i = 0; i < 6; i++) {
+      const r = C.planBackAction(st);
+      seq.push(r.action);
+      if (!r.handled) break;
+      if (r.action === 'close') st = Object.assign({}, st, { open: {} });
+      else if (r.action === 'cancel-gen') st = Object.assign({}, st, { busy: false });
+      else if (r.action === 'mode') st = Object.assign({}, st, { mode: 'select' });
+      else if (r.action === 'home') st = Object.assign({}, st, { editing: false });
+    }
+    return seq.join(',');
+  })());
+
+  /* 不能因为修返回键把「退出应用」弄丢 —— 首页按返回仍要能退出 */
+  t('首页按返回仍能退出应用', C.planBackAction({ editing: false, mode: 'select' }).handled === false);
+})();
+/* ---------- 返回键 ---------- */
+
 console.log(`\n合计 ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

@@ -1112,6 +1112,136 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
 
 
 /* ---------- 环境契合提示词 ---------- */
+// ===== 返回键分层处理（测试块） =====
+(() => {
+  const fs9 = require('fs');
+  const appSrc = fs9.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const javaSrc = fs9.readFileSync(__dirname + '/../android/src/com/photostudio/app/MainActivity.java', 'utf8');
+
+  /* ---------- 层级表 ---------- */
+
+  t('返回层级表存在', Array.isArray(C.BACK_LAYERS) && C.BACK_LAYERS.length >= 8, C.BACK_LAYERS.length);
+  // 顺序必须与 z-index 一致：后开的浮层压在上面，返回时先关它。
+  // 顺序错了会出现「关掉了看不见的那个面板」这种怪事。
+  t('作品预览在最前（z-index 最高）', C.BACK_LAYERS[0].id === 'workPreview', C.BACK_LAYERS[0].id);
+  t('层级表按 z-index 降序',
+    C.BACK_LAYERS.every((L, i) => i === 0 || C.BACK_LAYERS[i - 1].z >= L.z),
+    C.BACK_LAYERS.map((L) => L.id + ':' + L.z));
+  t('对比图排在浮层之后', (() => {
+    const ci = C.BACK_LAYERS.findIndex((L) => L.id === 'compare');
+    const si = C.BACK_LAYERS.findIndex((L) => L.id === 'settings');
+    return ci > si;
+  })());
+  t('生成失败说明在最后', C.BACK_LAYERS[C.BACK_LAYERS.length - 1].id === 'genError');
+  t('每个层级都有中文名（用于提示）', C.BACK_LAYERS.every((L) => !!L.zh));
+
+  /* ---------- 规划逻辑 ---------- */
+
+  const P = (o) => C.planBackAction(o);
+
+  t('无浮层+无照片 → 退出（交给系统）', P({}).handled === false && P({}).action === 'exit');
+  t('空参数不崩', typeof P().handled === 'boolean');
+  t('null 参数不崩', typeof C.planBackAction(null).handled === 'boolean');
+
+  // 浮层优先
+  t('设置开着 → 关设置', P({ open: { settings: true } }).target === 'settings');
+  t('作品预览优先于设置', P({ open: { settings: true, workPreview: true } }).target === 'workPreview');
+  t('多个浮层同时开着时关最上层', (() => {
+    const r = P({ open: { library: true, history: true, layers: true } });
+    return r.target === 'library';   // 表中 library 在 history/layers 之前
+  })());
+  t('对比图优先于失败说明', P({ open: { compare: true, genError: true } }).target === 'compare');
+  t('浮层优先于取消生成', P({ open: { settings: true }, busy: true }).action === 'close');
+
+  // 生成中
+  t('生成中 → 取消生成', P({ busy: true }).action === 'cancel-gen');
+  t('取消生成优先于模式切换', P({ busy: true, mode: 'brush' }).action === 'cancel-gen');
+  t('取消生成优先于回首页', P({ busy: true, editing: true }).action === 'cancel-gen');
+
+  // 工具模式
+  t('画笔模式 → 退回框选', P({ mode: 'brush' }).action === 'mode');
+  t('平移模式 → 退回框选', P({ mode: 'pan' }).action === 'mode');
+  t('引导线模式 → 退回框选', P({ mode: 'guide' }).action === 'mode');
+  t('已是框选则不处理模式', P({ mode: 'select', editing: true }).action === 'home');
+  t('模式切换优先于回首页', P({ mode: 'brush', editing: true }).action === 'mode');
+
+  // 编辑页
+  t('编辑中 → 回首页', P({ editing: true }).action === 'home');
+  t('回首页带中文说明', /首页/.test(P({ editing: true }).zh), P({ editing: true }).zh);
+
+  // 优先级整体：浮层 > 生成 > 模式 > 编辑 > 退出
+  t('完整优先级链', (() => {
+    const full = { open: { settings: true }, busy: true, mode: 'brush', editing: true };
+    if (P(full).action !== 'close') return false;
+    if (P({ busy: true, mode: 'brush', editing: true }).action !== 'cancel-gen') return false;
+    if (P({ mode: 'brush', editing: true }).action !== 'mode') return false;
+    if (P({ editing: true }).action !== 'home') return false;
+    return P({}).action === 'exit';
+  })());
+
+  /* ---------- 界面接线 ---------- */
+
+  t('handleBack 已定义', /function handleBack/.test(appSrc));
+  t('handleBack 已导出（安卓壳要调）', /handleBack,/.test(appSrc));
+  t('handleBack 读取全部浮层状态',
+    ['workPreview', 'settings', 'library', 'history', 'layers', 'photoinfo', 'exportpanel', 'compare', 'genError']
+      .every((k) => appSrc.indexOf(k + ':') >= 0));
+  t('handleBack 用 planBackAction 决策', /C\.planBackAction\(\{/.test(appSrc));
+  t('关闭动作覆盖全部层级', (() => {
+    const i = appSrc.indexOf("case 'close':");
+    // 截到外层 switch 的下一个分支（内层 switch 的 case 缩进更深，用行首缩进区分）
+    const rest = appSrc.slice(i);
+    const next = rest.search(/\n        case '/);
+    const body = next > 0 ? rest.slice(0, next) : rest.slice(0, 1200);
+    return ['workPreview', 'settings', 'library', 'history', 'layers', 'photoinfo', 'exportpanel', 'compare', 'genError']
+      .every((k) => body.indexOf("'" + k + "'") >= 0);
+  })());
+  t('生成中取消走 abort', /case 'cancel-gen':[\s\S]{0,200}S\.aborter\.abort\(\)/.test(appSrc));
+  t('模式动作回到框选', /case 'mode':[\s\S]{0,200}S\.mode = 'select'/.test(appSrc));
+  t('编辑中回首页', /case 'home':[\s\S]{0,80}goHome\(\)/.test(appSrc));
+  // 处理失败时返回 false（宁可退出，也不要让用户卡在按返回没反应的界面里）
+  t('handleBack 异常时返回 false（不把用户卡住）',
+    /catch \(e\) \{[\s\S]{0,300}return false;[\s\S]{0,40}\}/.test(appSrc));
+
+  /* ---------- goHome：应用里原本没有「卸下照片」这条路 ---------- */
+
+  t('goHome 已定义', /function goHome/.test(appSrc));
+  // 最关键：卸载前必须先存档，否则用户「返回」一下就把刚才的修改丢了 ——
+  // 那比退出应用更糟
+  t('回首页前先保存作品', /function goHome[\s\S]{0,300}touchWork\(\)/.test(appSrc));
+  t('回首页会中止在途生成', /function goHome[\s\S]{0,600}S\.aborter\.abort\(\)/.test(appSrc));
+  t('回首页递增 genToken（作废旧结果）', /function goHome[\s\S]{0,900}S\.genToken\+\+/.test(appSrc));
+  t('回首页清空照片状态', /S\.img = null;/.test(appSrc));
+  t('回首页清空画布引用', /S\.viewCanvas = null; S\.viewCtx = null;/.test(appSrc));
+  t('回首页清空编辑记录', /function goHome[\s\S]{0,1200}S\.edits = \[\];/.test(appSrc));
+  t('回首页清空选区与笔迹', /S\.rect = null;[\s\S]{0,120}S\.strokes = \[\];/.test(appSrc));
+  t('回首页清空引导线', /S\.guides = \[\];[\s\S]{0,60}S\.mode = 'select';/.test(appSrc));
+  t('回首页复位顶栏文案', /未打开照片/.test(appSrc));
+  t('回首页隐藏 HUD', /function goHome[\s\S]{0,2000}\$\('hud'\)\.hidden = true/.test(appSrc));
+  t('回首页清理会话存档', /function goHome[\s\S]{0,2200}removeItem\(LS_KEY_SESSION\)/.test(appSrc));
+  t('回首页切回首页布局', /function goHome[\s\S]{0,2400}renderHome\(\)[\s\S]{0,60}syncToolbar\(\)/.test(appSrc));
+  t('回首页后重绘（不留旧画面）', /function goHome[\s\S]{0,3000}ctx\.clearRect/.test(appSrc));
+
+  /* ---------- 安卓壳 ---------- */
+
+  // 根因：单页应用里所有「页面」都是浮层，canGoBack() 永远 false，
+  // 于是返回键被交给系统 → 从任何浮层按一下都直接退出应用
+  t('安卓壳覆写了 onBackPressed', /public void onBackPressed\(\)/.test(javaSrc));
+  t('返回键先问页面是否处理', /evaluateJavascript\(BACK_PROBE_JS/.test(javaSrc));
+  t('页面处理了就不退出', /indexOf\("true"\) < 0\) callSuperBack\(\)/.test(javaSrc));
+  t('页面异常时按未处理（交给系统退出，不卡住用户）',
+    /value == null \|\| value\.indexOf\("true"\) < 0/.test(javaSrc));
+  t('WebView 为空时直接退出', /if \(web == null\) \{[\s\S]{0,60}callSuperBack\(\)/.test(javaSrc));
+  t('探针调用 handleBack', /__PS_API\.handleBack\(\)/.test(javaSrc));
+  t('探针返回布尔值', /return !!\(window\.__PS_API/.test(javaSrc));
+  // 构建用的 android.jar 不含 LambdaMetafactory，用 lambda 会编译失败
+  t('回调用匿名内部类（lambda 会编译失败）',
+    /new ValueCallback<String>\(\)/.test(javaSrc) && !/evaluateJavascript\([^)]*->/.test(javaSrc));
+  t('已导入 ValueCallback', /import android\.webkit\.ValueCallback;/.test(javaSrc));
+  t('super.onBackPressed 单独抽成方法（回调里不能 super）', /private void callSuperBack\(\)/.test(javaSrc));
+})();
+/* ---------- 返回键分层处理 ---------- */
+
 // ===== 引导线自由笔迹 · 笔迹进图（测试块） =====
 (() => {
   const rect = { x: 0, y: 0, w: 100, h: 100 };

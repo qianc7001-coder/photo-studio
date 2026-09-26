@@ -2434,6 +2434,66 @@
     };
   }
 
+  /* ====================== 7.01e1 返回键分层处理 ====================== */
+
+  /**
+   * 返回键要逐级关闭的浮层，**按 z-index 从高到低**排列。
+   *
+   * 为什么需要这张表：
+   *   这是个单页应用 —— 设置、修图记录、对比图、历史时间线全是浮层，
+   *   没有真正的页面跳转，所以 WebView 的 canGoBack() 永远是 false。
+   *   Android 壳原先只判断 canGoBack()，为假就交给系统 → **按一下返回键
+   *   直接从任何浮层退出整个应用**，用户以为「改动丢了」。
+   *
+   * 顺序必须与视觉层级一致（后开的浮层压在上面，返回时先关它），
+   * 否则会出现「关掉了看不见的那个面板」这种怪事。
+   */
+  const BACK_LAYERS = [
+    { id: 'workPreview', z: 120, zh: '作品预览' },   // #work-preview
+    { id: 'settings', z: 100, zh: '设置' },
+    { id: 'library', z: 100, zh: '修图记录' },
+    { id: 'history', z: 100, zh: '历史时间线' },
+    { id: 'layers', z: 100, zh: '修改记录' },
+    { id: 'photoinfo', z: 100, zh: '照片信息' },
+    { id: 'exportpanel', z: 100, zh: '导出设置' },
+    { id: 'compare', z: 60, zh: '对比图' },          // #compare（在 stage 内）
+    { id: 'genError', z: 45, zh: '生成失败说明' }
+  ];
+
+  /**
+   * 规划一次返回键动作。
+   *
+   * 从「最上层」往下找第一件该处理的事：
+   *   1. 有浮层开着 → 关掉它
+   *   2. 正在生成 → 取消（与「取消」按钮一致；此时退出应用同样会丢结果，
+   *      但取消是明确的、可重试的）
+   *   3. 当前不是框选工具 → 退回框选（笔刷/平移/引导线都是临时状态）
+   *   4. 正在编辑照片 → 回首页（修图记录列表）
+   *   5. 已在首页 → 交给系统退出应用
+   *
+   * @param {object} o { open:{id:boolean}, busy, mode, editing }
+   * @returns {{handled:boolean, action:string, target:string, zh:string}}
+   */
+  function planBackAction(o) {
+    const opt = o || {};
+    const open = opt.open || {};
+    for (const L of BACK_LAYERS) {
+      if (open[L.id]) {
+        return { handled: true, action: 'close', target: L.id, zh: '关闭' + L.zh };
+      }
+    }
+    if (opt.busy) {
+      return { handled: true, action: 'cancel-gen', target: 'busy', zh: '取消生成' };
+    }
+    if (opt.mode && opt.mode !== 'select') {
+      return { handled: true, action: 'mode', target: 'select', zh: '回到框选' };
+    }
+    if (opt.editing) {
+      return { handled: true, action: 'home', target: 'home', zh: '回到首页' };
+    }
+    return { handled: false, action: 'exit', target: '', zh: '退出应用' };
+  }
+
   /* ====================== 7.01e2 工具栏高度 ====================== */
 
   /**
@@ -4877,6 +4937,8 @@
     LIBRARY_BUDGET_BYTES, LIBRARY_MAX_ITEMS, THUMB_MAX_SIDE,
     // 后台保活
     planKeepAlive, describeKeepAlive, planGenForegroundNotice,
+    // 返回键分层处理
+    planBackAction, BACK_LAYERS,
     // 工具栏高度
     planToolbar, clampBarHeight, isBarCollapsed, BAR_MIN,
     // 浏览器能力兼容
