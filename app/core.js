@@ -2984,27 +2984,82 @@
    *   这是把「构图意图」从模糊的文字变成精确的几何约束。
    */
   const GUIDE_KINDS = [
-    { id: 'horizon', zh: '地平线', en: 'horizon line', desc: '水平参考：地平线 / 水平面' },
-    { id: 'vertical', zh: '垂直线', en: 'vertical line', desc: '垂直参考：墙角 / 立柱 / 树干' },
-    { id: 'diagonal', zh: '对角线', en: 'diagonal line', desc: '视线引导：道路 / 河流 / 栏杆' },
-    { id: 'subject', zh: '主体位置', en: 'subject placement', desc: '标出主体应出现的位置' }
+    { id: 'horizon', zh: '地平线', en: 'horizon line', desc: '水平参考：地平线 / 水平面（只写进提示词）' },
+    { id: 'vertical', zh: '垂直线', en: 'vertical line', desc: '垂直参考：墙角 / 立柱 / 树干（只写进提示词）' },
+    { id: 'diagonal', zh: '对角线', en: 'diagonal line', desc: '视线引导：道路 / 河流 / 栏杆（只写进提示词）' },
+    { id: 'subject', zh: '主体位置', en: 'subject placement', desc: '标出主体应出现的位置（只写进提示词）' },
+    {
+      id: 'freehand', zh: '自由绘制', en: 'freehand stroke', freehand: true,
+      desc: '手画走向：发丝 / 水流 / 衣褶 —— 笔迹会画进发给模型的图片'
+    }
   ];
+
+  /**
+   * 笔迹颜色。
+   *
+   * 为什么要可切换：不同底色上对比度差别很大（红发上画红线等于没画），
+   * 而且各家模型对「什么颜色代表标注」的理解并不一致。
+   * 颜色名必须和提示词里的说法严格对应 —— 画品红却说「红色线条」，模型会去找一条不存在的线。
+   */
+  const GUIDE_STROKE_COLORS = [
+    { id: 'red', zh: '红色', en: 'red', hex: '#ff2d2d' },
+    { id: 'magenta', zh: '品红色', en: 'magenta', hex: '#ff2df0' },
+    { id: 'cyan', zh: '青色', en: 'cyan', hex: '#00e5ff' }
+  ];
+
+  /** 取笔迹颜色定义（未知退化为第一个） */
+  function getStrokeColor(id) {
+    return GUIDE_STROKE_COLORS.find((c) => c.id === id) || GUIDE_STROKE_COLORS[0];
+  }
 
   /** 取引导线类型定义（未知类型退化为第一条） */
   function getGuideKind(id) {
     return GUIDE_KINDS.find((k) => k.id === id) || GUIDE_KINDS[0];
   }
 
-  /** 归一化一条引导线：夹取端点、补齐字段 */
+  /** 是否自由笔迹（构图线只进提示词，笔迹还要画进请求图） */
+  function isFreehandGuide(g) {
+    return getGuideKind((g || {}).kind).freehand === true;
+  }
+
+  /**
+   * 归一化一条引导线：夹取坐标、补齐字段。
+   *
+   * 两种形态：
+   *   构图线（horizon/vertical/diagonal/subject）—— 两个端点，只翻译成文字；
+   *   自由笔迹（freehand）—— 一整条折线，既要文字说明，还要画进请求图。
+   */
   function normalizeGuide(g) {
     const G = g || {};
-    return {
-      kind: getGuideKind(G.kind).id,
+    const kind = getGuideKind(G.kind);
+    const out = {
+      kind: kind.id,
       x1: clamp01(num(G.x1, 0)),
       y1: clamp01(num(G.y1, 0)),
       x2: clamp01(num(G.x2, 0)),
       y2: clamp01(num(G.y2, 0))
     };
+    if (kind.freehand) {
+      const pts = Array.isArray(G.points) ? G.points : [];
+      const clean = [];
+      for (const p of pts) {
+        if (!p) continue;
+        const x = num(p.x, NaN), y = num(p.y, NaN);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        // **刻意不夹取到 0~1**：手指拖到选区外是常态，夹取会把越界部分压到边界上，
+        // 让笔迹贴着选区边缘拉出一道假直线（模型会把它当成画面内容）。
+        // 越界部分交给 clipPolyline 在画进请求图时真正裁掉。
+        clean.push({ x, y });
+      }
+      out.points = clean;
+      // 端点跟着折线走：否则会出现「points 有几十个点、x1..y2 却还是 0」的脏数据，
+      // 让后续按端点算的中点/方向全部落在左上角
+      if (clean.length) {
+        out.x1 = clean[0].x; out.y1 = clean[0].y;
+        out.x2 = clean[clean.length - 1].x; out.y2 = clean[clean.length - 1].y;
+      }
+    }
+    return out;
   }
 
   /**
@@ -3025,6 +3080,8 @@
 
   function snapGuide(g) {
     const G = normalizeGuide(g);
+    // 自由笔迹是手画的形状本身，拉直等于毁掉它（头发弧度会被掰成直线）
+    if (isFreehandGuide(G)) return G;
     const dx = G.x2 - G.x1, dy = G.y2 - G.y1;
     if (Math.abs(dx) < 1e-6 && Math.abs(dy) < 1e-6) return G;
     // 用屏幕上的角度判断（选区可能不是正方形，不能只看归一化坐标）
@@ -3086,9 +3143,41 @@
       return pct + '%' + ref;
     };
 
+    /** 折线的包围盒（相对选区，0~1） */
+    const bboxOf = (pts) => {
+      let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+      for (const p of pts) {
+        if (p.x < x0) x0 = p.x;
+        if (p.y < y0) y0 = p.y;
+        if (p.x > x1) x1 = p.x;
+        if (p.y > y1) y1 = p.y;
+      }
+      return { x0, y0, x1, y1 };
+    };
+
     const lines = [];
+    const strokes = [];      // 自由笔迹单独收集，措辞完全不同
     for (const g of list) {
       const mx = (g.x1 + g.x2) / 2, my = (g.y1 + g.y2) / 2;
+      if (isFreehandGuide(g)) {
+        const pts = g.points && g.points.length ? g.points : [{ x: g.x1, y: g.y1 }, { x: g.x2, y: g.y2 }];
+        const bb = bboxOf(pts);
+        // 用包围盒 + 走向描述，而不是把几十个点念一遍 —— 模型读不了坐标列表
+        const dir = (() => {
+          const dx = g.x2 - g.x1, dy = g.y2 - g.y1;
+          if (Math.abs(dx) < 0.05 && Math.abs(dy) < 0.05) return isZh ? '集中在一处' : 'in one spot';
+          if (Math.abs(dy) < Math.abs(dx) * 0.4) return isZh ? '基本横向' : 'mostly horizontal';
+          if (Math.abs(dx) < Math.abs(dy) * 0.4) return isZh ? '基本纵向' : 'mostly vertical';
+          return isZh ? '斜向' : 'diagonal';
+        })();
+        const area = isZh
+          ? '横向 ' + Math.round(bb.x0 * 100) + '%~' + Math.round(bb.x1 * 100) +
+            '%、纵向 ' + Math.round(bb.y0 * 100) + '%~' + Math.round(bb.y1 * 100) + '%'
+          : Math.round(bb.x0 * 100) + '%–' + Math.round(bb.x1 * 100) + '% horizontally and ' +
+            Math.round(bb.y0 * 100) + '%–' + Math.round(bb.y1 * 100) + '% vertically';
+        strokes.push({ g, area, dir, n: pts.length });
+        continue;
+      }
       if (isZh) {
         if (g.kind === 'horizon') {
           lines.push('水平参考线（地平线/水平面）位于画面高度 ' + posWord(my) +
@@ -3123,13 +3212,45 @@
     }
 
     if (isZh) {
-      return '【构图引导】我画了 ' + list.length + ' 条引导线，请严格按它们构图：' +
-        lines.join('；') +
-        '。这些线只用于说明构图位置，不要在画面里画出任何线条、标记或辅助线。';
+      const parts = [];
+      if (lines.length) {
+        parts.push('【构图引导】我画了 ' + lines.length + ' 条引导线，请严格按它们构图：' +
+          lines.join('；') +
+          '。这些线只用于说明构图位置，不要在画面里画出任何线条、标记或辅助线。');
+      }
+      if (strokes.length) {
+        // 自由笔迹是「画在图片上的草图」，措辞必须和构图线区分开：
+        // 前者要模型「沿着它生成内容」，后者要模型「别把线画出来」。
+        const sDesc = strokes.map((x, i) =>
+          '第 ' + (i + 1) + ' 笔（' + x.dir + '，位于' + x.area + '）').join('；');
+        parts.push('【手绘草图】我在图片上用' + (opt.strokeColorZh || '红色') +
+          '画了 ' + strokes.length + ' 笔走向草图：' + sDesc +
+          '。这些笔迹表示我希望生成内容的**位置、走向和范围** —— ' +
+          '请沿着笔迹生成相应的内容（例如头发、水流、衣褶、烟雾等线性或成束的形态），' +
+          '让生成结果贴合笔迹的走向与范围。' +
+          '笔迹只是我的示意，**绝对不要把' + (opt.strokeColorZh || '红色') +
+          '线条本身画进画面**，最终画面里不能出现任何线条、涂鸦或标记。');
+      }
+      return parts.join('');
     }
-    return '[Composition guides] I drew ' + list.length +
-      ' guide line(s); compose strictly according to them: ' + lines.join('; ') +
-      '. These lines only indicate composition — do not draw any lines, marks or overlays.';
+    const enParts = [];
+    if (lines.length) {
+      enParts.push('[Composition guides] I drew ' + lines.length +
+        ' guide line(s); compose strictly according to them: ' + lines.join('; ') +
+        '. These lines only indicate composition — do not draw any lines, marks or overlays.');
+    }
+    if (strokes.length) {
+      const sDesc = strokes.map((x, i) =>
+        'stroke ' + (i + 1) + ' (' + x.dir + ', at ' + x.area + ')').join('; ');
+      enParts.push('[Hand-drawn sketch] I drew ' + strokes.length + ' ' +
+        (opt.strokeColorEn || 'red') + ' stroke(s) on the image showing the intended flow: ' + sDesc +
+        '. These strokes indicate the position, direction and extent of the content I want — ' +
+        'generate the corresponding content (hair strands, water flow, fabric folds, smoke, etc.) ' +
+        'following the strokes. The strokes are only my indication: ' +
+        '**never draw the ' + (opt.strokeColorEn || 'red') +
+        ' lines themselves into the image**; the final image must contain no lines, scribbles or marks.');
+    }
+    return enParts.join(' ');
   }
 
   /**
@@ -3168,19 +3289,182 @@
           y2: clamp01((rect.y + g.y2 * rect.h - ctx.y) / h)
         }));
     }
-    return (opt.guides || []).map((raw) => {
-      const g = normalizeGuide(raw);
+    const conv = (g) => {
       // 引导线存的是「相对选区」的归一化坐标：先还原成文档坐标，再换算到请求图
-      const dx1 = rect.x + g.x1 * rect.w, dy1 = rect.y + g.y1 * rect.h;
-      const dx2 = rect.x + g.x2 * rect.w, dy2 = rect.y + g.y2 * rect.h;
-      return {
+      const out = {
         kind: g.kind,
-        x1: clamp01((dx1 - ctx.x) / w),
-        y1: clamp01((dy1 - ctx.y) / h),
-        x2: clamp01((dx2 - ctx.x) / w),
-        y2: clamp01((dy2 - ctx.y) / h)
+        x1: clamp01((rect.x + g.x1 * rect.w - ctx.x) / w),
+        y1: clamp01((rect.y + g.y1 * rect.h - ctx.y) / h),
+        x2: clamp01((rect.x + g.x2 * rect.w - ctx.x) / w),
+        y2: clamp01((rect.y + g.y2 * rect.h - ctx.y) / h)
       };
-    });
+      if (g.points && g.points.length) {
+        out.points = g.points.map((pt) => ({
+          x: clamp01((rect.x + pt.x * rect.w - ctx.x) / w),
+          y: clamp01((rect.y + pt.y * rect.h - ctx.y) / h)
+        }));
+      }
+      return out;
+    };
+    return (opt.guides || []).map((raw) => conv(normalizeGuide(raw)));
+  }
+
+  /* ====================== 7.03c 笔迹进图（让模型「看见」你画的走向） ====================== */
+
+  /**
+   * 为什么需要把笔迹画进图片：
+   *
+   * 构图线可以用文字说清楚（「地平线在 62% 处」），但「头发要往这个方向飘」
+   * 用文字几乎说不明白 —— 模型看不到你的坐标系，也读不了几十个点。
+   * 唯一可行的办法是把笔迹直接画在发给它的图片上：模型看图就懂。
+   *
+   * 为什么默认可以关掉：
+   *   早期版本把选区涂成半透明蓝色当标记，模型把蓝色当成了画面内容，
+   *   生成结果整体偏蓝。教训是「标记有可能被当成画面内容」。
+   *   对认识标注的模型（Qwen-Image-Edit / Nano Banana 等）笔迹很有效，
+   *   但某些模型或中转仍可能把线画进结果 —— 所以必须能一键关掉。
+   *
+   * 颜色可切换的原因：红发上画红线等于没画；不同模型对「什么颜色代表标注」
+   * 理解也不同。颜色名必须和提示词里的说法严格一致。
+   *
+   * @param {object} o { guides, rect, ctxRect, enabled, colorId, width }
+   * @returns {{draw:Array, note:string, count:number}}
+   */
+  /**
+   * 把一条折线裁剪到 [0,w]×[0,h] 矩形内（逐段用 Liang-Barsky）。
+   *
+   * 为什么不能简单地把越界点 clamp 到边界：分块生成时笔迹常常跨出当前瓦片，
+   * clamp 会让整条线**贴着瓦片边缘**拉出一道直线 —— 模型看到的就是一条沿边缘的
+   * 假线，生成结果会莫名其妙多出一道光或一道痕。正确做法是真正裁掉框外的部分。
+   *
+   * @returns {Array<Array<{x:number,y:number}>>} 裁剪后的若干段折线（可能为空）
+   */
+  function clipPolyline(pts, w, h) {
+    /** 裁剪单条线段；完全在框外返回 null */
+    const clipSeg = (a, b) => {
+      let t0 = 0, t1 = 1;
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const tests = [[-dx, a.x], [dx, w - a.x], [-dy, a.y], [dy, h - a.y]];
+      for (const [p, q] of tests) {
+        if (p === 0) { if (q < 0) return null; continue; }
+        const r = q / p;
+        if (p < 0) { if (r > t1) return null; if (r > t0) t0 = r; }
+        else { if (r < t0) return null; if (r < t1) t1 = r; }
+      }
+      return [
+        { x: a.x + t0 * dx, y: a.y + t0 * dy },
+        { x: a.x + t1 * dx, y: a.y + t1 * dy }
+      ];
+    };
+
+    const out = [];
+    let run = [];      // 当前正在累积的连续段
+    for (let i = 1; i < pts.length; i++) {
+      const seg = clipSeg(pts[i - 1], pts[i]);
+      if (!seg) {                       // 这一段整个在框外 → 断开
+        if (run.length > 1) out.push(run);
+        run = [];
+        continue;
+      }
+      const last = run[run.length - 1];
+      // 上一段的终点与这一段的起点不重合 → 中间有内容被裁掉，另起一段
+      if (last && Math.hypot(last.x - seg[0].x, last.y - seg[0].y) > 1e-6) {
+        if (run.length > 1) out.push(run);
+        run = [];
+      }
+      if (!run.length) run.push(seg[0]);
+      run.push(seg[1]);
+    }
+    if (run.length > 1) out.push(run);
+    return out;
+  }
+
+  function planStrokeOverlay(o) {
+    const opt = o || {};
+    const color = getStrokeColor(opt.colorId);
+    const rect = opt.rect || { x: 0, y: 0, w: 1, h: 1 };
+    const ctx = opt.ctxRect || rect;
+    if (opt.enabled === false) {
+      return { draw: [], note: '笔迹未画进图片（已关闭）', count: 0, color };
+    }
+    const rw = Math.max(1, num(rect.w, 1)), rh = Math.max(1, num(rect.h, 1));
+    const w = Math.max(1, num(ctx.w, 1)), h = Math.max(1, num(ctx.h, 1));
+    // 线宽跟着请求图大小走：小图用细线、大图用粗线，视觉粗细才一致。
+    // 下限给到 4px 是实测出来的：2px 的细线在 JPEG 编码后会被压得几乎看不见
+    // （600px 图上从 698 个像素掉到 42 个，位置也糊掉了），
+    // 模型看不到笔迹，这个功能就等于没做。
+    const width = Math.max(4, Math.round(num(opt.width, Math.min(w, h) * 0.012)));
+    const draw = [];
+    for (const raw of (opt.guides || [])) {
+      const g = normalizeGuide(raw);
+      if (!isFreehandGuide(g)) continue;
+      const pts = (g.points && g.points.length >= 2)
+        ? g.points
+        : [{ x: g.x1, y: g.y1 }, { x: g.x2, y: g.y2 }];
+      if (pts.length < 2) continue;
+      // 选区归一化坐标 → 请求图像素坐标（**不夹取**：越界信息要留给裁剪用）
+      const px = pts.map((pt) => ({
+        x: (rect.x + pt.x * rw - ctx.x) / w * w,
+        y: (rect.y + pt.y * rh - ctx.y) / h * h
+      }));
+      // 整笔都在框外的直接跳过，不浪费绘制。
+      // 注意必须按**包围盒**判断，不能按「有没有点在框内」：
+      // 一条从框上方穿到框下方的竖线，两个端点都在框外，但它明明穿过整个画面 ——
+      // 按点判断会把它整条丢掉（这个坑真实踩过）。
+      let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+      for (const q of px) {
+        if (q.x < bx0) bx0 = q.x;
+        if (q.y < by0) by0 = q.y;
+        if (q.x > bx1) bx1 = q.x;
+        if (q.y > by1) by1 = q.y;
+      }
+      const near = bx1 >= -width && bx0 <= w + width && by1 >= -width && by0 <= h + width;
+      if (!near) continue;
+      for (const seg of clipPolyline(px, w, h)) {
+        if (seg.length < 2) continue;
+        draw.push({ color: color.hex, width, points: seg });
+      }
+    }
+    return {
+      draw,
+      color,
+      count: draw.length,
+      note: draw.length ? '已把 ' + draw.length + ' 笔草图用' + color.zh + '画进请求图' : ''
+    };
+  }
+
+  /**
+   * 在 canvas 上画笔迹。
+   *
+   * 只画线，不加箭头/圆点等任何装饰 —— 模型可能把装饰也当成画面内容。
+   * 画两遍（先深色描边再本色）是为了在任何底色上都看得清：
+   * 纯红笔在红色区域上等于没画，深色描边能保证轮廓可见。
+   */
+  function drawStrokeOverlay(c2d, plan) {
+    if (!c2d || !plan || !plan.draw || !plan.draw.length) return 0;
+    c2d.save();
+    c2d.lineCap = 'round';
+    c2d.lineJoin = 'round';
+    let n = 0;
+    for (const st of plan.draw) {
+      if (st.points.length < 2) continue;
+      const path = () => {
+        c2d.beginPath();
+        c2d.moveTo(st.points[0].x, st.points[0].y);
+        for (let i = 1; i < st.points.length; i++) c2d.lineTo(st.points[i].x, st.points[i].y);
+      };
+      // 外描边：深色，保证在任何底色上都分得清
+      c2d.strokeStyle = 'rgba(0,0,0,.55)';
+      c2d.lineWidth = st.width + 2;
+      path(); c2d.stroke();
+      // 本色
+      c2d.strokeStyle = st.color;
+      c2d.lineWidth = st.width;
+      path(); c2d.stroke();
+      n++;
+    }
+    c2d.restore();
+    return n;
   }
 
   /* ====================== 7.04 无缝融合（模型输出对齐原图） ====================== */
@@ -4669,7 +4953,9 @@
     parseJpegSegments, extractExif, extractICC, readExifOrientation,
     parseExifFields, describePhotoInfo, formatExifDate, EXIF_TAGS,
     // 引导线
-    GUIDE_KINDS, getGuideKind, normalizeGuide, snapGuide, guideOrientation,
+    GUIDE_KINDS, getGuideKind, getStrokeColor, GUIDE_STROKE_COLORS, isFreehandGuide,
+    normalizeGuide, snapGuide, guideOrientation,
+    planStrokeOverlay, drawStrokeOverlay,
     describeGuides, mapGuidesToRequest,
     normalizeExifOrientation, buildExifPayload, injectMetadata, isSrgbProfile,
     // 模型

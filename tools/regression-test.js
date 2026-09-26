@@ -2125,7 +2125,12 @@ console.log('\n【引导线】位置必须精确传到模型，且不能把线�
   // 3) 引导线不进图片：请求图必须原样发送，绝不能把线画上去
   //    （和当初「蓝色掩膜被当成画面内容」是同一类坑）
   const imgBuild = appSrc.slice(appSrc.indexOf('function buildRequestImage'), appSrc.indexOf('function canvasToDataUrl'));
-  t('请求图构建里不画引导线', !/drawGuides|guide/.test(imgBuild), imgBuild.length);
+  // 构图线永远不进图；自由笔迹按设置进图（两者用途不同，必须分开）
+  t('请求图构建里不画构图线', !/drawGuides/.test(imgBuild), imgBuild.length);
+  t('请求图构建里只画笔迹（不画其它引导线）',
+    /planStrokeOverlay\(\{/.test(imgBuild) && /isFreehandGuide/.test(
+      fs3.readFileSync(__dirname + '/../app/core.js', 'utf8')));
+  t('笔迹进图受开关控制', /S\.cfg\.guideStrokeOverlay !== false/.test(imgBuild));
   t('引导线只画在屏幕预览上', /if \(S\.guides\.length && S\.rect\) drawGuides\(/.test(appSrc));
 
   // 4) 引导线相对选区存储 → 换选区/换图必须清空，否则位置全错
@@ -2182,6 +2187,124 @@ console.log('\n【导出】格式与大小可选，且不能把小图放大');
   t('CSS 有格式选中态', /\.exp-check/.test(css));
 })();
 /* ---------- 导出设置 ---------- */
+
+// ===== 引导线自由笔迹（回归块） =====
+console.log('\n【笔迹】手绘走向必须真的送到模型，且不能被压成贴边直线');
+(() => {
+  const fs3 = require('fs');
+  const appSrc = fs3.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html = fs3.readFileSync(__dirname + '/../app/index.html', 'utf8');
+  const css = fs3.readFileSync(__dirname + '/../app/style.css', 'utf8');
+  const rect = { x: 0, y: 0, w: 100, h: 100 };
+  const mk = (pts, extra) => C.planStrokeOverlay(Object.assign({
+    guides: [{ kind: 'freehand', points: pts }],
+    rect, ctxRect: rect, colorId: 'red', width: 3
+  }, extra || {}));
+
+  /* 1) 回归：越界笔迹曾被 clamp 成贴边直线
+        根因是 normalizeGuide 把点夹到 0~1 —— 分块时笔迹常跨出瓦片，
+        夹取后整条线贴着瓦片边缘，模型看到一条沿边缘的假线。 */
+  t('笔迹越界部分被裁掉而非压到边界', (() => {
+    const p = mk([{ x: .1, y: .5 }, { x: 1.8, y: .5 }]);
+    const last = p.draw[0].points[p.draw[0].points.length - 1];
+    return p.count === 1 && last.x === 100 && last.y === 50;
+  })());
+  t('笔迹点保留越界值（不被夹取）', (() => {
+    const g = C.normalizeGuide({ kind: 'freehand', points: [{ x: -0.4, y: .5 }, { x: .5, y: .5 }] });
+    return g.points[0].x === -0.4;
+  })());
+
+  /* 2) 回归：按「有没有点在框内」预筛，会把贯穿画面的线整条丢掉 */
+  t('两端都在框外的贯穿笔迹不被丢弃', (() => {
+    const p = mk([{ x: .5, y: -0.5 }, { x: .5, y: 1.5 }]);
+    return p.count === 1 && p.draw[0].points[0].y === 0 && p.draw[0].points[1].y === 100;
+  })());
+
+  /* 3) 回归：分块时若以瓦片为基准换算，第二块之后的笔迹会整体偏移/消失 */
+  // 笔迹坐标相对**整个选区**存储。分块时若拿瓦片当基准，坐标会整体偏移，
+  // 表现为「第二块之后的笔迹跑到别处 / 整条消失」。
+  t('分块换算以选区为基准（坐标精确）', (() => {
+    const sel = { x: 0, y: 0, w: 400, h: 400 };
+    // 笔迹在选区归一化 x=0.25 → 选区像素 x=100
+    const guides = [{ kind: 'freehand', points: [{ x: .25, y: .5 }, { x: .25, y: .6 }] }];
+    // 瓦片 2 覆盖选区左下：x 0..220、y 180..400
+    const tile = { x: 0, y: 180, w: 220, h: 220 };
+    const p = C.planStrokeOverlay({ guides, rect: sel, ctxRect: tile, colorId: 'red', width: 3 });
+    if (p.count !== 1) return false;
+    const pts = p.draw[0].points;
+    // 期望：x = 100 - 0 = 100；y = (200-180)=20 → (240-180)=60
+    // 用容差比较：0.6*400 这类运算必然带浮点误差
+    const near = (a, b) => Math.abs(a - b) < 1e-6;
+    return near(pts[0].x, 100) && near(pts[0].y, 20) && near(pts[1].y, 60);
+  })());
+  // 若错用瓦片作基准，同一笔会得到 x = 0.25*220 = 55（偏移 45px）
+  t('分块换算不会退化成瓦片基准', (() => {
+    const sel = { x: 0, y: 0, w: 400, h: 400 };
+    const tile = { x: 0, y: 180, w: 220, h: 220 };
+    const guides = [{ kind: 'freehand', points: [{ x: .25, y: .5 }, { x: .25, y: .6 }] }];
+    const wrong = C.planStrokeOverlay({ guides, rect: tile, ctxRect: tile, colorId: 'red', width: 3 });
+    const right = C.planStrokeOverlay({ guides, rect: sel, ctxRect: tile, colorId: 'red', width: 3 });
+    return wrong.count === 0 || wrong.draw[0].points[0].x !== right.draw[0].points[0].x;
+  })());
+
+  /* 4) 提示词：两件事必须同时说清 —— 沿笔迹生成、别把线画出来。
+        只说要生成 → 模型把线画进画面；只说别画线 → 模型忽略笔迹。 */
+  const d = C.describeGuides({
+    guides: [{ kind: 'freehand', points: [{ x: .2, y: .3 }, { x: .8, y: .4 }] }],
+    isZh: true, strokeColorZh: '红色'
+  });
+  t('提示词要求沿笔迹生成', /沿着笔迹生成/.test(d));
+  t('提示词禁止把线画进画面', /绝对不要把红色线条本身画进画面/.test(d));
+  t('提示词强调最终画面不能有线条', /不能出现任何线条/.test(d));
+  // 颜色名必须和实际画进图的颜色一致，否则模型会去找不存在的颜色
+  t('颜色名与设置一致', (() => {
+    for (const id of ['red', 'magenta', 'cyan']) {
+      const c = C.getStrokeColor(id);
+      const s2 = C.describeGuides({
+        guides: [{ kind: 'freehand', points: [{ x: .2, y: .3 }, { x: .8, y: .4 }] }],
+        isZh: true, strokeColorZh: c.zh
+      });
+      if (s2.indexOf(c.zh) < 0) return false;
+    }
+    return true;
+  })());
+
+  /* 5) 笔迹不能进「构图线」的措辞分支 —— 两者行为完全不同 */
+  t('笔迹不写成构图线说明', !/构图引导/.test(d));
+  t('构图线不写成手绘草图', !/手绘草图/.test(C.describeGuides({
+    guides: [{ kind: 'horizon', x1: 0, y1: .6, x2: 1, y2: .6 }], isZh: true
+  })));
+
+  /* 6) 风险控制：必须能一键关掉（早期蓝色掩膜被模型当成画面内容的教训） */
+  t('有开关能关掉笔迹进图', /id="set-strokeimg"/.test(html));
+  t('开关默认开', /guideStrokeOverlay: true,/.test(appSrc));
+  t('关掉后不调用绘制', (() => {
+    const seg = appSrc.slice(appSrc.indexOf('let strokeNote'), appSrc.indexOf('lastStrokeNote = strokeNote'));
+    return /S\.cfg\.guideStrokeOverlay !== false/.test(seg);
+  })());
+  t('关掉后仍作为文字说明（不是彻底失效）', (() => {
+    const seg = appSrc.slice(appSrc.indexOf('const sc = C.getStrokeColor'), appSrc.indexOf('const req = C.buildImageRequest'));
+    return /describeGuides/.test(seg);
+  })());
+  t('界面提示了怎么应对线被画出来', /关掉/.test(html) && /画进/.test(html));
+
+  /* 7) 笔迹不吸附（拉直会毁掉手画的弧度） */
+  t('笔迹不吸附', (() => {
+    const g = C.snapGuide({ kind: 'freehand', points: [{ x: .1, y: .5 }, { x: .5, y: .6 }, { x: .9, y: .5 }] });
+    return g.points[1].y === .6;
+  })());
+
+  /* 8) 界面接线 */
+  t('有颜色选择条', /id="guide-colors"/.test(html));
+  t('有自由绘制专用提示', /id="guide-tip-free"/.test(html));
+  t('切到自由绘制才显示颜色条', /cb\.hidden = !\(inGuide && free\)/.test(appSrc));
+  t('提示文案随类型切换', /tf\.hidden = !\(inGuide && free\)/.test(appSrc) && /tg\.hidden = !\(inGuide && !free\)/.test(appSrc));
+  t('CSS 有色块样式', /\.chip-color \.swatch/.test(css));
+  t('CSS 有颜色条布局', /#guide-color-bar/.test(css));
+  t('CSS 有无 flex-gap 兜底', /\.ps-no-flex-gap #guide-color-bar/.test(css));
+  t('自由笔迹提示用醒目边框（有副作用）', /#guide-tip-free \{ border-left-color/.test(css));
+})();
+/* ---------- 引导线自由笔迹 ---------- */
 
 console.log(`\n合计 ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

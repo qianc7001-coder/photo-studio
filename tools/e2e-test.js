@@ -2804,8 +2804,8 @@ async function run() {
     t('引导线模式已激活', S.mode === 'guide');
     t('引导线参数条已显示', doc.getElementById('guide-bar').hidden === false);
     t('引导线提示已显示', doc.getElementById('guide-tip').hidden === false);
-    t('类型选择器有 4 个选项',
-      doc.querySelectorAll('#guide-kinds [data-gk]').length === 4);
+    t('类型选择器有 5 个选项（含自由绘制）',
+      doc.querySelectorAll('#guide-kinds [data-gk]').length === 5);
     t('默认类型是地平线',
       doc.querySelector('#guide-kinds [data-gk="horizon"]').classList.contains('on'));
 
@@ -3043,6 +3043,274 @@ async function run() {
     doc.createElement = exOrigCreate;
     S.cfg.expPresetChosen = false;
     S.cfg.expFormat = 'jpeg';
+  }
+
+
+  console.log('\n【30】引导线自由笔迹：画进请求图，模型照着走向生成');
+  {
+    S.cfg.provider = 'siliconflow';
+    S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
+    S.cfg.model = 'Qwen/Qwen-Image-Edit';
+    S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.tile = 0;
+    S.cfg.upscaleSmall = false; S.cfg.contextPct = 0;
+    S.cfg.fusion = 0; S.cfg.envFit = false; S.cfg.mosaic = false;
+    S.cfg.guideStrokeOverlay = true;
+    S.cfg.guideStrokeColor = 'red';
+    S.cfg.maxRes = 0;
+
+    // 一张干净的深色图：方便逐像素找笔迹
+    const skC = napi.createCanvas(600, 400);
+    const skX = skC.getContext('2d');
+    skX.fillStyle = 'rgb(30,30,30)'; skX.fillRect(0, 0, 600, 400);
+    const skIn = doc.getElementById('file-input');
+    Object.defineProperty(skIn, 'files', {
+      value: [new window.File([new Uint8Array(skC.toBuffer('image/jpeg', 0.95))], 'stroke.jpg', { type: 'image/jpeg' })],
+      configurable: true
+    });
+    skIn.dispatchEvent(new window.Event('change'));
+    await sleep(400);
+    t('测试图已载入', S.docW === 600 && S.docH === 400, [S.docW, S.docH]);
+
+    // 框选整块画面
+    S.rect = { x: 0, y: 0, w: 600, h: 400 };
+    window.__PS_API.updateUI();
+
+    // 进引导线模式 → 选「自由绘制」
+    doc.getElementById('btn-guide').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    doc.querySelector('#guide-kinds [data-gk="freehand"]').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('已切到自由绘制', S.guideKind === 'freehand');
+    t('自由绘制时显示颜色条', doc.getElementById('guide-color-bar').hidden === false);
+    t('自由绘制时显示专用提示', doc.getElementById('guide-tip-free').hidden === false);
+    t('自由绘制时隐藏构图提示', doc.getElementById('guide-tip').hidden === true);
+    t('颜色条有 3 个选项', doc.querySelectorAll('#guide-colors [data-gc]').length === 3);
+    t('默认选中红色',
+      doc.querySelector('#guide-colors [data-gc="red"]').classList.contains('on'));
+
+    // 手画一条弧线（模拟发丝走向）
+    const cv3 = doc.getElementById('cv');
+    const r3 = cv3.getBoundingClientRect();
+    const sr3 = window.PSCore.imageRectToScreen(S.rect, S.view);
+    const toS = (nx, ny) => ({ x: r3.left + sr3.x + nx * sr3.w, y: r3.top + sr3.y + ny * sr3.h });
+    const ev3 = (type, pt) => {
+      const e = new window.Event(type, { bubbles: true, cancelable: true });
+      e.clientX = pt.x; e.clientY = pt.y;
+      e.pointerId = 1; e.button = 0; e.pointerType = 'touch';
+      cv3.dispatchEvent(e);
+    };
+    const arc = [[.25, .35], [.35, .40], [.45, .42], [.55, .40], [.65, .34], [.75, .30]];
+    ev3('pointerdown', toS(arc[0][0], arc[0][1]));
+    for (let i = 1; i < arc.length; i++) ev3('pointermove', toS(arc[i][0], arc[i][1]));
+    ev3('pointerup', toS(arc[arc.length - 1][0], arc[arc.length - 1][1]));
+    await sleep(100);
+    t('笔迹已记录', S.guides.length === 1, S.guides.length);
+    t('笔迹是折线（多点）', S.guides[0].points && S.guides[0].points.length >= 4,
+      S.guides[0].points && S.guides[0].points.length);
+    t('笔迹类型是 freehand', S.guides[0].kind === 'freehand');
+    // 关键：笔迹不能被吸附拉直
+    t('笔迹保留弧度（未被拉直）', (() => {
+      const ys = S.guides[0].points.map((p) => p.y);
+      return Math.max(...ys) - Math.min(...ys) > 0.03;
+    })(), S.guides[0].points.map((p) => p.y.toFixed(3)));
+
+    // 生成：请求图里必须有笔迹像素
+    const before30 = fake.seen.length;
+    fake.setColor([120, 180, 120]);
+    doc.getElementById('prompt').value = '给她生成长发';
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 8000);
+    const gen30 = fake.seen.slice(before30).filter((x) => x.body && x.body.prompt);
+    t('发起了请求', gen30.length > 0, gen30.length);
+
+    if (gen30.length) {
+      const pr30 = gen30[0].body.prompt;
+      t('提示词含「手绘草图」段', /手绘草图/.test(pr30), pr30.slice(0, 120));
+      t('提示词要求沿笔迹生成', /沿着笔迹生成/.test(pr30));
+      t('提示词含发丝等示例', /头发/.test(pr30));
+      t('提示词禁止把线画进画面', /绝对不要把红色线条本身画进画面/.test(pr30));
+
+      // ★ 核心：请求图里必须真的出现红色笔迹
+      const imgStr = String(gen30[0].body.image || '');
+      const m30 = /^data:image\/(jpeg|png);base64,(.*)$/.exec(imgStr);
+      t('请求里带了参考图', !!m30);
+      if (m30) {
+        const im30 = await napi.loadImage(Buffer.from(m30[2], 'base64'));
+        const cc30 = napi.createCanvas(im30.width, im30.height);
+        const cx30 = cc30.getContext('2d');
+        cx30.drawImage(im30, 0, 0);
+        const px30 = cx30.getImageData(0, 0, im30.width, im30.height).data;
+        let red = 0, redMinX = 1e9, redMaxX = -1, redMinY = 1e9, redMaxY = -1;
+        for (let y = 0; y < im30.height; y++) {
+          for (let x = 0; x < im30.width; x++) {
+            const i = (y * im30.width + x) * 4;
+            // 底图是灰 30，红色笔迹应满足 R 明显高于 G/B
+            if (px30[i] > 110 && px30[i] - px30[i + 1] > 50 && px30[i] - px30[i + 2] > 50) {
+              red++;
+              if (x < redMinX) redMinX = x;
+              if (x > redMaxX) redMaxX = x;
+              if (y < redMinY) redMinY = y;
+              if (y > redMaxY) redMaxY = y;
+            }
+          }
+        }
+        t('请求图里确实有红色笔迹像素', red > 100, red);
+        // 位置必须对得上：笔迹在选区 x 25%~75%、y 30%~42%
+        if (red > 0) {
+          const nx0 = redMinX / im30.width, nx1 = redMaxX / im30.width;
+          const ny0 = redMinY / im30.height, ny1 = redMaxY / im30.height;
+          t('笔迹横向位置正确（约 25%~75%）',
+            Math.abs(nx0 - 0.25) < 0.06 && Math.abs(nx1 - 0.75) < 0.06,
+            [nx0.toFixed(3), nx1.toFixed(3)]);
+          t('笔迹纵向位置正确（约 30%~42%）',
+            Math.abs(ny0 - 0.30) < 0.06 && Math.abs(ny1 - 0.42) < 0.06,
+            [ny0.toFixed(3), ny1.toFixed(3)]);
+        } else {
+          t('笔迹横向位置正确（跳过）', true);
+          t('笔迹纵向位置正确（跳过）', true);
+        }
+        // 反向确认：没画笔迹的地方不能出现红色（说明没有整片染色）
+        const corner = (() => {
+          const i = ((10 * im30.width) + 10) * 4;
+          return [px30[i], px30[i + 1], px30[i + 2]];
+        })();
+        t('笔迹之外没有红色（不是整片染色）',
+          Math.abs(corner[0] - corner[1]) < 40 && Math.abs(corner[1] - corner[2]) < 40, corner);
+      }
+    }
+
+    t('请求自检里标注了笔迹', /已把/.test(window.__PS_API.strokeNote()), window.__PS_API.strokeNote());
+
+    if (S.pending) {
+      doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
+      await sleep(120);
+    }
+
+    // ---- 切换颜色：请求图里的颜色必须跟着变 ----
+    doc.querySelector('#guide-colors [data-gc="magenta"]').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('切到品红色', S.cfg.guideStrokeColor === 'magenta');
+    t('颜色选择已落盘',
+      JSON.parse(window.localStorage.getItem('photoStudio.cfg.v1')).guideStrokeColor === 'magenta');
+    const beforeC = fake.seen.length;
+    fake.setColor([120, 180, 120]);
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 8000);
+    const genC = fake.seen.slice(beforeC).filter((x) => x.body && x.body.prompt);
+    if (genC.length) {
+      t('提示词里的颜色名跟着变（品红色）', /品红色/.test(genC[0].body.prompt));
+      const mC = /^data:image\/(jpeg|png);base64,(.*)$/.exec(String(genC[0].body.image || ''));
+      if (mC) {
+        const imC = await napi.loadImage(Buffer.from(mC[2], 'base64'));
+        const ccC = napi.createCanvas(imC.width, imC.height);
+        const cxC = ccC.getContext('2d');
+        cxC.drawImage(imC, 0, 0);
+        const pxC = cxC.getImageData(0, 0, imC.width, imC.height).data;
+        let mag = 0;
+        for (let i = 0; i < pxC.length; i += 4) {
+          // 品红：R 与 B 都高、G 低
+          if (pxC[i] > 110 && pxC[i + 2] > 110 && pxC[i + 1] < pxC[i] - 50) mag++;
+        }
+        t('请求图里的笔迹真的变成了品红', mag > 100, mag);
+      } else {
+        t('请求图里的笔迹真的变成了品红（跳过）', true);
+      }
+    }
+    if (S.pending) {
+      doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
+      await sleep(120);
+    }
+
+    // ---- 开关：关掉后请求图里不能有笔迹，但提示词仍要有说明 ----
+    S.cfg.guideStrokeOverlay = false;
+    const beforeOff = fake.seen.length;
+    fake.setColor([120, 180, 120]);
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 8000);
+    const genOff = fake.seen.slice(beforeOff).filter((x) => x.body && x.body.prompt);
+    t('关掉后仍发起了请求', genOff.length > 0, genOff.length);
+    if (genOff.length) {
+      t('关掉后提示词里仍有笔迹说明（退化成文字）', /手绘草图/.test(genOff[0].body.prompt));
+      const mOff = /^data:image\/(jpeg|png);base64,(.*)$/.exec(String(genOff[0].body.image || ''));
+      if (mOff) {
+        const imO = await napi.loadImage(Buffer.from(mOff[2], 'base64'));
+        const ccO = napi.createCanvas(imO.width, imO.height);
+        const cxO = ccO.getContext('2d');
+        cxO.drawImage(imO, 0, 0);
+        const pxO = cxO.getImageData(0, 0, imO.width, imO.height).data;
+        let any = 0;
+        for (let i = 0; i < pxO.length; i += 4) {
+          if (pxO[i] > 110 && pxO[i + 1] < pxO[i] - 50) any++;
+        }
+        t('关掉后请求图里没有笔迹', any === 0, any);
+      } else {
+        t('关掉后请求图里没有笔迹（跳过）', true);
+      }
+    }
+    t('关掉后自检标注为「未画进图片」', /关闭/.test(window.__PS_API.strokeNote()), window.__PS_API.strokeNote());
+    if (S.pending) {
+      doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
+      await sleep(120);
+    }
+    S.cfg.guideStrokeOverlay = true;
+
+    // ---- 设置页开关与颜色 ----
+    doc.getElementById('btn-settings').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('设置里有笔迹进图开关', !!doc.getElementById('set-strokeimg'));
+    t('设置开关反映当前状态', doc.getElementById('set-strokeimg').checked === true);
+    t('设置里有颜色选择', doc.getElementById('set-strokecolor').value === 'magenta');
+    doc.getElementById('set-strokecolor').value = 'cyan';
+    doc.getElementById('set-strokecolor').dispatchEvent(new window.Event('change'));
+    await sleep(60);
+    t('从设置改颜色生效', S.cfg.guideStrokeColor === 'cyan');
+    doc.getElementById('set-strokeimg').checked = false;
+    doc.getElementById('set-strokeimg').dispatchEvent(new window.Event('change'));
+    await sleep(60);
+    t('从设置关开关生效', S.cfg.guideStrokeOverlay === false);
+    t('关开关后不再显示颜色条说明', window.__PS_API.strokeOverlayEnabled() === false);
+    doc.getElementById('set-strokeimg').checked = true;
+    doc.getElementById('set-strokeimg').dispatchEvent(new window.Event('change'));
+    await sleep(60);
+    doc.querySelector('#settings [data-close]').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+
+    // ---- 笔迹随会话保存 ----
+    const sess31 = JSON.parse(window.localStorage.getItem('photoStudio.session.v1') || 'null');
+    t('笔迹写进了会话存档', !!(sess31 && sess31.guides && sess31.guides.length === 1),
+      sess31 && sess31.guides && sess31.guides.length);
+    t('存档里的笔迹带 points', !!(sess31 && sess31.guides[0].points &&
+      sess31.guides[0].points.length >= 4));
+    t('存档里记了笔迹类型', sess31 && sess31.guideKind === 'freehand', sess31 && sess31.guideKind);
+
+    // ---- 点已有的笔迹可删除 ----
+    const mid = S.guides[0].points[Math.floor(S.guides[0].points.length / 2)];
+    ev3('pointerdown', toS(mid.x, mid.y));
+    ev3('pointerup', toS(mid.x, mid.y));
+    await sleep(80);
+    t('点笔迹中段可删除', S.guides.length === 0, S.guides.length);
+
+    // ---- 太短的笔迹被丢弃 ----
+    ev3('pointerdown', toS(.5, .5));
+    ev3('pointermove', toS(.502, .502));
+    ev3('pointerup', toS(.502, .502));
+    await sleep(80);
+    t('太短的笔迹被丢弃', S.guides.length === 0, S.guides.length);
+
+    // ---- 画一个闭合小圈：首尾几乎重合，但它是有效笔迹 ----
+    const loop = [[.4, .4], [.5, .38], [.56, .45], [.5, .52], [.4, .5], [.4, .4]];
+    ev3('pointerdown', toS(loop[0][0], loop[0][1]));
+    for (let i = 1; i < loop.length; i++) ev3('pointermove', toS(loop[i][0], loop[i][1]));
+    ev3('pointerup', toS(loop[loop.length - 1][0], loop[loop.length - 1][1]));
+    await sleep(80);
+    t('闭合小圈被保留（按折线长度判废，不是首尾距离）', S.guides.length === 1, S.guides.length);
+
+    // 清理
+    doc.getElementById('guide-clear').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    doc.querySelector('.tool[data-mode="select"]').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    S.cfg.guideStrokeColor = 'red';
   }
 
 

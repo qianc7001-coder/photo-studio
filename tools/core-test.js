@@ -1113,6 +1113,235 @@ t('estimateCalls', C.estimateCalls({x:0,y:0,w:3000,h:3000},{maxSide:1400,overlap
 
 
 /* ---------- 环境契合提示词 ---------- */
+// ===== 引导线自由笔迹 · 笔迹进图（测试块） =====
+(() => {
+  const rect = { x: 0, y: 0, w: 100, h: 100 };
+  const mk = (pts, extra) => C.planStrokeOverlay(Object.assign({
+    guides: [{ kind: 'freehand', points: pts }],
+    rect, ctxRect: rect, colorId: 'red', width: 3
+  }, extra || {}));
+
+  /* ---------- 类型与颜色表 ---------- */
+
+  t('引导线多了「自由绘制」类型', C.GUIDE_KINDS.length === 5, C.GUIDE_KINDS.length);
+  t('自由绘制被标记为 freehand', C.getGuideKind('freehand').freehand === true);
+  t('构图类型不带 freehand 标记', C.getGuideKind('horizon').freehand !== true);
+  t('isFreehandGuide 判定笔迹', C.isFreehandGuide({ kind: 'freehand' }) === true);
+  t('isFreehandGuide 判定构图线', C.isFreehandGuide({ kind: 'horizon' }) === false);
+  t('isFreehandGuide 空值不崩', C.isFreehandGuide(null) === false);
+  t('三种笔迹颜色', C.GUIDE_STROKE_COLORS.length === 3);
+  t('颜色含红/品红/青', C.GUIDE_STROKE_COLORS.map((c) => c.id).join(',') === 'red,magenta,cyan');
+  t('每种颜色都有中文名与色值',
+    C.GUIDE_STROKE_COLORS.every((c) => c.zh && /^#[0-9a-f]{6}$/i.test(c.hex)));
+  t('取颜色', C.getStrokeColor('magenta').hex === '#ff2df0');
+  t('未知颜色退化为红色', C.getStrokeColor('nope').id === 'red');
+  t('颜色空值不崩', C.getStrokeColor(null).id === 'red');
+
+  /* ---------- 笔迹数据 ---------- */
+
+  t('笔迹保留 points', (() => {
+    const g = C.normalizeGuide({ kind: 'freehand', points: [{ x: .1, y: .2 }, { x: .3, y: .4 }] });
+    return g.points.length === 2 && g.points[0].x === .1;
+  })());
+  t('笔迹端点跟随折线（不是 0）', (() => {
+    const g = C.normalizeGuide({ kind: 'freehand', points: [{ x: .3, y: .4 }, { x: .7, y: .8 }] });
+    return g.x1 === .3 && g.y1 === .4 && g.x2 === .7 && g.y2 === .8;
+  })());
+  // 关键：笔迹点**不能**夹到 0~1。夹取会把越界部分压到边界，变成贴边假直线
+  t('笔迹点不被夹取到 0~1（越界信息要保留）', (() => {
+    const g = C.normalizeGuide({ kind: 'freehand', points: [{ x: -0.3, y: 1.5 }, { x: 2, y: 0.5 }] });
+    return g.points[0].x === -0.3 && g.points[0].y === 1.5 && g.points[1].x === 2;
+  })());
+  t('笔迹点里的脏数据被丢掉', (() => {
+    const g = C.normalizeGuide({ kind: 'freehand', points: [{ x: 1, y: 1 }, null, { x: 'a', y: 2 }, { x: .5, y: .5 }] });
+    return g.points.length === 2;
+  })());
+  t('没有 points 时退化成两个端点', (() => {
+    const g = C.normalizeGuide({ kind: 'freehand', x1: .1, y1: .2, x2: .3, y2: .4 });
+    return g.points.length === 0 && g.x1 === .1;
+  })());
+  t('构图线不产生 points', (() => {
+    const g = C.normalizeGuide({ kind: 'horizon', x1: 0, y1: .5, x2: 1, y2: .5 });
+    return g.points === undefined;
+  })());
+
+  /* ---------- 吸附：笔迹不能被拉直 ---------- */
+
+  // 拉直等于毁掉手画的弧度（头发会被掰成直线）
+  t('笔迹不吸附（保留弧度）', (() => {
+    const g = C.snapGuide({ kind: 'freehand', points: [{ x: .1, y: .5 }, { x: .5, y: .52 }, { x: .9, y: .5 }] });
+    return g.points[1].y === .52;
+  })());
+  t('笔迹吸附后端点不变', (() => {
+    const g = C.snapGuide({ kind: 'freehand', points: [{ x: .1, y: .5 }, { x: .9, y: .51 }] });
+    return g.y1 === .5 && g.y2 === .51;
+  })());
+  t('构图线仍然吸附', (() => {
+    const g = C.snapGuide({ kind: 'horizon', x1: .1, y1: .5, x2: .9, y2: .52 });
+    return Math.abs(g.y2 - g.y1) < 1e-9;
+  })());
+
+  /* ---------- 笔迹进图：坐标换算与裁剪 ---------- */
+
+  t('完整在框内的笔迹原样保留', (() => {
+    const p = mk([{ x: .2, y: .2 }, { x: .5, y: .5 }]);
+    return p.count === 1 && p.draw[0].points[0].x === 20 && p.draw[0].points[1].y === 50;
+  })());
+  // 分块/越界的核心：必须真裁掉，不能压到边界
+  t('越界部分被裁掉（不贴边拉直）', (() => {
+    const p = mk([{ x: 0, y: .5 }, { x: .5, y: .5 }, { x: 1.5, y: .5 }]);
+    return p.count === 1 && p.draw[0].points.length === 3 &&
+      p.draw[0].points[2].x === 100;
+  })());
+  t('完全在框外的笔迹被丢弃', mk([{ x: 2, y: 2 }, { x: 3, y: 3 }]).count === 0);
+  t('穿出去又回来的笔迹断成两段', mk([{ x: .2, y: .5 }, { x: .5, y: 2 }, { x: .8, y: .5 }]).count === 2);
+  t('两端越界但横穿的笔迹保留', mk([{ x: -1, y: .5 }, { x: .5, y: .5 }, { x: 2, y: .5 }]).count === 1);
+  // 这条最容易错：两个端点都在框外，但它穿过整个画面 —— 按「有没有点在框内」筛会整条丢掉
+  t('纵向贯穿（两端都在框外）仍被保留', (() => {
+    const p = mk([{ x: .5, y: -.2 }, { x: .5, y: 1.2 }]);
+    return p.count === 1 && p.draw[0].points[0].y === 0 && p.draw[0].points[1].y === 100;
+  })());
+  t('斜向贯穿也被保留', mk([{ x: -.5, y: -.5 }, { x: 1.5, y: 1.5 }]).count === 1);
+  t('从框外绕过去的笔迹被丢弃', mk([{ x: 2, y: .2 }, { x: 2, y: .8 }, { x: 3, y: .8 }]).count === 0);
+
+  t('构图线不参与笔迹进图', C.planStrokeOverlay({
+    guides: [{ kind: 'horizon', x1: 0, y1: .5, x2: 1, y2: .5 }],
+    rect, ctxRect: rect, colorId: 'red'
+  }).count === 0);
+
+  t('开关关闭时不画进图', (() => {
+    const p = mk([{ x: .2, y: .2 }, { x: .8, y: .8 }], { enabled: false });
+    return p.count === 0 && /关闭/.test(p.note);
+  })());
+  t('开关开启时给出说明', (() => {
+    const p = mk([{ x: .2, y: .2 }, { x: .8, y: .8 }]);
+    return /画进请求图/.test(p.note) && /红色/.test(p.note);
+  })());
+  t('说明里的颜色名跟着实际颜色走', (() => {
+    const p = mk([{ x: .2, y: .2 }, { x: .8, y: .8 }], { colorId: 'cyan' });
+    return /青色/.test(p.note) && p.color.zh === '青色';
+  })());
+  t('笔迹颜色写进 draw 项', mk([{ x: .2, y: .2 }, { x: .8, y: .8 }], { colorId: 'magenta' })
+    .draw[0].color === '#ff2df0');
+  t('线宽随图大小缩放', (() => {
+    const big = C.planStrokeOverlay({
+      guides: [{ kind: 'freehand', points: [{ x: .2, y: .2 }, { x: .8, y: .8 }] }],
+      rect: { x: 0, y: 0, w: 2000, h: 2000 },
+      ctxRect: { x: 0, y: 0, w: 2000, h: 2000 }, colorId: 'red'
+    });
+    return big.draw[0].width > 3;
+  })());
+  // 下限 4px 是实测出来的：2px 的细线经 JPEG 编码后从 698 个像素掉到 42 个，
+  // 位置也糊掉了 —— 模型看不到笔迹，功能等于没做
+  t('线宽下限 4px（细线会被 JPEG 压没）', (() => {
+    const small = C.planStrokeOverlay({
+      guides: [{ kind: 'freehand', points: [{ x: .2, y: .2 }, { x: .8, y: .8 }] }],
+      rect: { x: 0, y: 0, w: 50, h: 50 },
+      ctxRect: { x: 0, y: 0, w: 50, h: 50 }, colorId: 'red'
+    });
+    return small.draw[0].width >= 4;
+  })());
+  t('600px 图上线宽至少 5px', (() => {
+    const p = C.planStrokeOverlay({
+      guides: [{ kind: 'freehand', points: [{ x: .2, y: .2 }, { x: .8, y: .8 }] }],
+      rect: { x: 0, y: 0, w: 600, h: 400 },
+      ctxRect: { x: 0, y: 0, w: 600, h: 400 }, colorId: 'red'
+    });
+    return p.draw[0].width >= 5;
+  })());
+  t('planStrokeOverlay 空参数不崩', C.planStrokeOverlay().count === 0);
+
+  // 分块：笔迹相对**整个选区**存储，换算必须以选区为基准
+  t('分块时以选区为基准换算（不是瓦片）', (() => {
+    const sel = { x: 0, y: 0, w: 200, h: 200 };
+    const tile = { x: 0, y: 100, w: 200, h: 100 };
+    const p = C.planStrokeOverlay({
+      guides: [{ kind: 'freehand', points: [{ x: .2, y: .75 }, { x: .8, y: .75 }] }],
+      rect: sel, ctxRect: tile, colorId: 'red', width: 3
+    });
+    return p.count === 1 && p.draw[0].points[0].y === 50;   // 瓦片高度的一半
+  })());
+
+  // 上下文外扩：笔迹坐标也要补偿，否则整体偏移
+  t('有上下文外扩时补偿偏移', (() => {
+    const sel = { x: 100, y: 100, w: 100, h: 100 };
+    const ctxRect = { x: 88, y: 88, w: 124, h: 124 };
+    const p = C.planStrokeOverlay({
+      guides: [{ kind: 'freehand', points: [{ x: 0, y: .5 }, { x: 1, y: .5 }] }],
+      rect: sel, ctxRect, colorId: 'red', width: 3
+    });
+    // 选区中线 y=150 → 请求图 (150-88)/124*124 = 62
+    return p.count === 1 && p.draw[0].points[0].y === 62;
+  })());
+
+  /* ---------- 提示词：措辞必须区分「沿它生成」与「别画出来」 ---------- */
+
+  const freeDesc = C.describeGuides({
+    guides: [{ kind: 'freehand', points: [{ x: .2, y: .3 }, { x: .5, y: .5 }, { x: .8, y: .4 }] }],
+    isZh: true, strokeColorZh: '红色'
+  });
+  t('笔迹说明含「手绘草图」', /手绘草图/.test(freeDesc), freeDesc.slice(0, 60));
+  t('笔迹说明要求沿笔迹生成内容', /沿着笔迹生成/.test(freeDesc));
+  t('笔迹说明含颜色名', /红色/.test(freeDesc));
+  t('笔迹说明明确禁止把线画进画面', /绝对不要把红色线条本身画进画面/.test(freeDesc));
+  t('笔迹说明描述走向', /基本横向|基本纵向|斜向|集中在一处/.test(freeDesc));
+  t('笔迹说明描述范围（包围盒）', /横向 20%~80%/.test(freeDesc));
+  t('笔迹说明不逐点念坐标', !/0\.2|0\.3/.test(freeDesc));
+  t('笔迹说明举例了头发', /头发/.test(freeDesc));
+  t('英文版也有对应措辞', (() => {
+    const d = C.describeGuides({
+      guides: [{ kind: 'freehand', points: [{ x: .2, y: .3 }, { x: .8, y: .4 }] }],
+      isZh: false, strokeColorEn: 'red'
+    });
+    return /Hand-drawn sketch/.test(d) && /never draw the red lines/i.test(d);
+  })());
+  t('颜色名跟着设置走（品红）', /品红色/.test(C.describeGuides({
+    guides: [{ kind: 'freehand', points: [{ x: .2, y: .3 }, { x: .8, y: .4 }] }],
+    isZh: true, strokeColorZh: '品红色'
+  })));
+  // 构图线和笔迹可以共存，两段说明都要在
+  t('构图线与笔迹共存时两段都在', (() => {
+    const d = C.describeGuides({
+      guides: [
+        { kind: 'horizon', x1: 0, y1: .6, x2: 1, y2: .6 },
+        { kind: 'freehand', points: [{ x: .2, y: .3 }, { x: .8, y: .4 }] }
+      ], isZh: true, strokeColorZh: '红色'
+    });
+    return /构图引导/.test(d) && /手绘草图/.test(d);
+  })());
+  t('只有笔迹时不出现构图引导段', !/构图引导/.test(freeDesc));
+
+  /* ---------- 界面接线 ---------- */
+
+  const fs8 = require('fs');
+  const appSrc8 = fs8.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html8 = fs8.readFileSync(__dirname + '/../app/index.html', 'utf8');
+
+  t('HTML 有笔迹颜色条', /id="guide-colors"/.test(html8));
+  t('HTML 有自由绘制专用提示', /id="guide-tip-free"/.test(html8));
+  t('提示里说明了「会画进图片」', /会画进发给模型的图片/.test(html8));
+  t('设置里有笔迹进图开关', /id="set-strokeimg"/.test(html8));
+  t('设置里有笔迹颜色选择', /id="set-strokecolor"/.test(html8));
+  t('设置里说明了怎么应对「线被画出来」', /关掉上面的开关/.test(html8));
+  t('开关会持久化', /'guideStrokeOverlay', 'guideStrokeColor'/.test(appSrc8));
+  t('开关默认开启', /guideStrokeOverlay: true,/.test(appSrc8));
+  t('颜色默认红色', /guideStrokeColor: 'red',/.test(appSrc8));
+  t('颜色有类型校正（防脏数据）', /c\.guideStrokeColor = C\.getStrokeColor\(/.test(appSrc8));
+  t('笔迹确实画进请求图', /C\.drawStrokeOverlay\(cx, sp\)/.test(appSrc8));
+  t('只在开关打开时画', /S\.cfg\.guideStrokeOverlay !== false && S\.guides\.length/.test(appSrc8));
+  t('换算以选区为基准（分块正确）', /const baseRect = lastSelRect \|\| rect;/.test(appSrc8));
+  t('生成开始时记录选区', /lastSelRect = rect;/.test(appSrc8));
+  t('颜色名传给提示词（与实际颜色一致）', /strokeColorZh: sc\.zh, strokeColorEn: sc\.en/.test(appSrc8));
+  t('笔迹绘制不画箭头圆点等装饰', !/arrow|arrowhead/i.test(
+    appSrc8.slice(appSrc8.indexOf('function drawGuides'), appSrc8.indexOf('function screenToGuideNorm'))));
+  t('屏幕上笔迹用实色（和请求图同色）', /const lineColor = free \? strokeHex : '#3ddcc4'/.test(appSrc8));
+  t('请求自检里显示笔迹状态', /手绘草图：/.test(appSrc8));
+  t('拖动时对笔迹抽稀（防点数爆炸）', /minD/.test(appSrc8));
+  t('单笔点数有硬上限', /pts\.length > 400/.test(appSrc8));
+  t('笔迹按折线总长度判废（不是首尾距离）', /笔迹按「折线总长度」判废/.test(appSrc8));
+})();
+/* ---------- 引导线自由笔迹 ---------- */
+
 // ===== 照片信息 · 引导线 · 导出设置（测试块） =====
 (() => {
   /* ---------- 功能 1：照片信息（EXIF 解析 + 展示分组） ---------- */
@@ -1288,7 +1517,7 @@ t('estimateCalls', C.estimateCalls({x:0,y:0,w:3000,h:3000},{maxSide:1400,overlap
 
   /* ---------- 功能 3：引导线 ---------- */
 
-  t('引导线类型有 4 种', C.GUIDE_KINDS.length === 4);
+  t('引导线类型有 5 种（含自由绘制）', C.GUIDE_KINDS.length === 5);
   t('取引导线类型', C.getGuideKind('vertical').zh === '垂直线');
   t('未知类型退化为第一种', C.getGuideKind('nope').id === 'horizon');
   t('未知类型 null 也不崩', C.getGuideKind(null).id === 'horizon');

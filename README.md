@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-1990%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-2132%20passed-brightgreen.svg)](#测试)
 
 给摄影师用的**局部修图**工具：在照片上框选任意区域，交给生图模型修改，结果自动贴回原位置。
 
 **核心特点**：结果无缝融合，非破坏性可调，保留拍摄信息。
 
-> 最新版本 **v3.0.0** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
+> 最新版本 **v3.1.0** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
 
 ---
 
@@ -36,11 +36,19 @@
 ### 编辑
 - **自由框选**：任意位置、任意大小，支持拖拽手柄调整、锁定比例
 - **画笔**：涂抹标记"这里不要动"（默认整块都会改）
-- **引导线**：在选区里画一条线，直接告诉模型「地平线在这里 / 主体放这儿」
-  - 四种类型：地平线、垂直线、对角线、主体位置
-  - 手画的小斜角会**自动吸附**到水平/垂直（12° 内），避免手抖误导模型
-  - 位置换算到请求图坐标时**补偿上下文外扩**，不会偏移
-  - 点一下已有的线即可删除；引导线**只画在屏幕上**，绝不进入发给模型的图片
+- **引导线**：两种模式，用途完全不同
+  - **构图线**（地平线 / 垂直线 / 对角线 / 主体位置）：拖一条线，翻译成文字写进提示词，
+    告诉模型「地平线在这里 / 主体放这儿」。手画的小斜角会**自动吸附**到水平/垂直（12° 内）。
+    这类线**只画在屏幕上**，绝不进入发给模型的图片
+  - **自由绘制**：手画一笔，告诉模型「头发 / 水流 / 衣褶往这个方向走」。
+    笔迹**会画进发给模型的图片**，模型照着走向生成 —— 比文字描述准得多
+    （「头发往这个方向飘」用文字根本说不明白：模型看不到你的坐标系，也读不了几十个点）
+    - 笔迹颜色可选 **红 / 品红 / 青**，提示词里的颜色名跟着实际颜色走
+    - 笔迹**不做方向吸附**（拉直会毁掉手画的弧度）
+    - 设置里可**一键关掉「笔迹画进请求图」**：万一模型把线条也画进了画面，
+      关掉后笔迹退化成文字说明
+  - 两种模式共通：位置换算到请求图坐标时**补偿上下文外扩**；分块时越界部分被真正裁掉
+    （不能压到边缘，否则模型会看到一条沿瓦片边缘的假线）；点一下即可删除
 - **缩放平移**：双指缩放、拖拽平移，最高 12 倍放大
 
 ### 非破坏性
@@ -317,7 +325,8 @@ WebView 里用 `file://` 打开页面时，跨域请求会被拦截，而且 `lo
 
 | 版本 | 主要变化 |
 |---|---|
-| **v3.0.0** | 首页改为修改历史；照片信息；引导线构图；导出格式与大小可选 |
+| **v3.1.0** | 引导线支持自由绘制（笔迹画进图片，模型照着走向生成）；笔迹颜色可选 |
+| [v3.0.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.0.0) | 首页改为修改历史；照片信息；引导线构图；导出格式与大小可选 |
 | [v2.9.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.9.0) | 应用内检查更新；修复 GitHub「最新版」指向错误版本 |
 | [v2.8.2](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.8.2) | 设置界面改成手机系统设置风格；加 GitHub 入口 |
 | [v2.8.1](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.8.1) | 每次请求附带「周围环境特征」描述 |

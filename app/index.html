@@ -174,8 +174,15 @@
       <div class="chips" id="guide-kinds"></div>
       <button class="chip" id="guide-clear">清空</button>
     </div>
+    <div id="guide-color-bar" hidden>
+      <span class="lbl">笔迹颜色</span>
+      <div class="chips" id="guide-colors"></div>
+    </div>
     <div id="guide-tip" hidden>在照片上拖一条线，告诉模型「地平线/主体应该在这里」。
       比文字描述准确得多 —— 拖完点生成即可。</div>
+    <div id="guide-tip-free" hidden>手画一笔，告诉模型「头发/水流/衣褶往这个方向走」。
+      <b>这一笔会画进发给模型的图片里</b>，模型照着走向生成 —— 比文字描述准得多。
+      画完检查一下效果：万一模型把线也画出来了，去设置里关掉「笔迹画进请求图」。</div>
 
     <!-- 选区参数 -->
     <div id="sel-bar">
@@ -574,6 +581,28 @@
             <span class="st-label">JPEG 质量 <b class="st-badge" id="v-quality">95%</b></span>
             <input type="range" class="st-range" id="set-quality" min="70" max="100" value="95">
           </label>
+        </div>
+      </div>
+
+      <!-- ============ 引导线 ============ -->
+      <div class="st-group">引导线 · 手绘草图</div>
+      <div class="st-card">
+        <label class="st-row">
+          <span class="st-label">把笔迹画进请求图 <i class="st-desc-inline">自由绘制的笔迹</i></span>
+          <input type="checkbox" class="st-switch" id="set-strokeimg" checked>
+        </label>
+        <label class="st-row">
+          <span class="st-label">笔迹颜色</span>
+          <select class="st-value" id="set-strokecolor">
+            <option value="red">红色</option>
+            <option value="magenta">品红色</option>
+            <option value="cyan">青色</option>
+          </select>
+        </label>
+        <div class="st-desc">
+          自由绘制的笔迹（发丝 / 水流 / 衣褶的走向）会画进发给模型的图片，模型照着走向生成。
+          <b>若发现模型把线条也画进了画面</b>，关掉上面的开关 —— 笔迹就只作为文字说明。
+          颜色请选与画面反差大的：红发上画红线等于没画。
         </div>
       </div>
 

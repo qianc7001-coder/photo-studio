@@ -136,6 +136,9 @@
     // 刻意与设置页的 exportPreset 分开存 —— 用户临时改一次导出格式，
     // 不应该把设置页里选的「交付预设」也改掉。
     // expPresetChosen=false 表示「还没在面板里选过」→ 首次打开跟随设置页预设。
+    // 引导线：自由笔迹是否画进请求图（默认开），以及笔迹颜色
+    guideStrokeOverlay: true,
+    guideStrokeColor: 'red',
     expPresetChosen: false,
     expFormat: 'jpeg',
     expMaxSide: 0,
@@ -165,6 +168,7 @@
     'contextPct', 'feather', 'colorMatch', 'maxRes', 'tile',
     'lang', 'seed', 'format', 'quality', 'mosaic', 'upscaleSmall', 'exportPreset',
     'expPresetChosen', 'expFormat', 'expMaxSide', 'expQuality', 'expKeepExif', 'expKeepGps', 'expKeepIcc',
+    'guideStrokeOverlay', 'guideStrokeColor',
     'priceOverride', 'usdCny',
     'historyBudgetMB', 'autoSaveSession',
     'keepAlive', 'keepAliveAlways',
@@ -212,6 +216,9 @@
       c.expMaxSide = clampNum(c.expMaxSide, 0, 16384, 0);
       c.expQuality = clampNum(c.expQuality, 60, 100, 95);
       if (!C.EXPORT_FORMATS.some((f) => f.id === c.expFormat)) c.expFormat = 'jpeg';
+      // 笔迹颜色：历史脏数据/手改 localStorage 不能让取色失败（退化成红色）
+      c.guideStrokeColor = C.getStrokeColor(c.guideStrokeColor).id;
+      c.guideStrokeOverlay = c.guideStrokeOverlay !== false;
       c.expPresetChosen = c.expPresetChosen === true;
       if (!c.baseUrl && c.provider) {
         const p = C.getProvider(c.provider);
@@ -1195,31 +1202,56 @@
     ctx.save();
     if (dim) ctx.globalAlpha = 0.42;
     ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    const strokeHex = C.getStrokeColor(S.cfg.guideStrokeColor).hex;
     for (const g of S.guides) {
       // 归一化坐标 → 屏幕坐标
       const x1 = sr.x + g.x1 * sr.w, y1 = sr.y + g.y1 * sr.h;
       const x2 = sr.x + g.x2 * sr.w, y2 = sr.y + g.y2 * sr.h;
+      const free = C.isFreehandGuide(g);
+      // 自由笔迹用「和请求图同色」的实线（用户看到的颜色就是模型看到的颜色），
+      // 构图线用青色虚线 —— 两者用途不同，视觉上必须能分辨
+      const lineColor = free ? strokeHex : '#3ddcc4';
 
-      // 外描边（深色）保证在任何底图上都看得清
-      ctx.strokeStyle = 'rgba(0,0,0,.55)';
-      ctx.lineWidth = 5;
-      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      if (free && g.points && g.points.length >= 2) {
+        const path = () => {
+          ctx.beginPath();
+          ctx.moveTo(sr.x + g.points[0].x * sr.w, sr.y + g.points[0].y * sr.h);
+          for (let i = 1; i < g.points.length; i++) {
+            ctx.lineTo(sr.x + g.points[i].x * sr.w, sr.y + g.points[i].y * sr.h);
+          }
+        };
+        ctx.strokeStyle = 'rgba(0,0,0,.55)';
+        ctx.lineWidth = 6.5;
+        path(); ctx.stroke();
+        ctx.strokeStyle = lineColor;
+        ctx.lineWidth = 3.5;
+        path(); ctx.stroke();
+      } else {
+        // 外描边（深色）保证在任何底图上都看得清
+        ctx.strokeStyle = 'rgba(0,0,0,.55)';
+        ctx.lineWidth = 5;
+        ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
 
-      ctx.strokeStyle = '#3ddcc4';
-      ctx.lineWidth = 2.5;
-      ctx.setLineDash([9, 5]);
-      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
-      ctx.setLineDash([]);
+        ctx.strokeStyle = lineColor;
+        ctx.lineWidth = 2.5;
+        if (!free) ctx.setLineDash([9, 5]);
+        ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+        ctx.setLineDash([]);
+      }
 
-      // 端点
-      for (const [px, py] of [[x1, y1], [x2, y2]]) {
-        ctx.beginPath();
-        ctx.arc(px, py, 5.5, 0, Math.PI * 2);
-        ctx.fillStyle = '#3ddcc4';
-        ctx.fill();
-        ctx.strokeStyle = '#0b1014';
-        ctx.lineWidth = 1.6;
-        ctx.stroke();
+      // 端点（自由笔迹不画端点圆点：头发走向不需要「起点终点」，
+      // 圆点还会被模型误当成画面元素）
+      if (!free) {
+        for (const [px, py] of [[x1, y1], [x2, y2]]) {
+          ctx.beginPath();
+          ctx.arc(px, py, 5.5, 0, Math.PI * 2);
+          ctx.fillStyle = lineColor;
+          ctx.fill();
+          ctx.strokeStyle = '#0b1014';
+          ctx.lineWidth = 1.6;
+          ctx.stroke();
+        }
       }
 
       // 类型标签（贴着线中点）
@@ -1243,7 +1275,7 @@
       ctx.quadraticCurveTo(bx, by, bx + rr, by);
       ctx.closePath();
       ctx.fill();
-      ctx.fillStyle = '#3ddcc4';
+      ctx.fillStyle = lineColor;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
       ctx.fillText(label, bx + 6, by + 3);
@@ -1279,19 +1311,51 @@
     toast('已清空引导线');
   }
 
-  /** 渲染引导线类型选择器 */
+  /** 渲染引导线类型选择器 + 笔迹颜色选择器 */
   function renderGuideKinds() {
     const el = $('guide-kinds');
-    if (!el) return;
-    el.innerHTML = C.GUIDE_KINDS.map((k) =>
-      '<button class="chip' + (k.id === S.guideKind ? ' on' : '') + '" data-gk="' + k.id + '" title="' +
-        esc(k.desc) + '">' + esc(k.zh) + '</button>').join('');
-    el.querySelectorAll('[data-gk]').forEach((b) => {
-      b.onclick = () => {
-        S.guideKind = b.dataset.gk;
-        renderGuideKinds();
-      };
-    });
+    if (el) {
+      el.innerHTML = C.GUIDE_KINDS.map((k) =>
+        '<button class="chip' + (k.id === S.guideKind ? ' on' : '') + '" data-gk="' + k.id + '" title="' +
+          esc(k.desc) + '">' + esc(k.zh) + '</button>').join('');
+      el.querySelectorAll('[data-gk]').forEach((b) => {
+        b.onclick = () => {
+          S.guideKind = b.dataset.gk;
+          renderGuideKinds();
+          // 切到自由绘制时提示会变（它和构图线的行为完全不同，必须说清楚）
+          updateGuideBarVisibility();
+        };
+      });
+    }
+
+    const ce = $('guide-colors');
+    if (ce) {
+      ce.innerHTML = C.GUIDE_STROKE_COLORS.map((c) =>
+        '<button class="chip chip-color' + (c.id === S.cfg.guideStrokeColor ? ' on' : '') +
+          '" data-gc="' + c.id + '">' +
+          '<i class="swatch" style="background:' + c.hex + '"></i>' + esc(c.zh) + '</button>').join('');
+      ce.querySelectorAll('[data-gc]').forEach((b) => {
+        b.onclick = () => {
+          S.cfg.guideStrokeColor = b.dataset.gc;
+          saveCfg();
+          renderGuideKinds();
+          draw();
+        };
+      });
+    }
+    updateGuideBarVisibility();
+  }
+
+  /** 引导线模式下：只有自由笔迹才需要选颜色，构图线不需要 */
+  function updateGuideBarVisibility() {
+    const inGuide = S.mode === 'guide';
+    const free = C.getGuideKind(S.guideKind).freehand === true;
+    const cb = $('guide-color-bar');
+    if (cb) cb.hidden = !(inGuide && free);
+    const tf = $('guide-tip-free');
+    if (tf) tf.hidden = !(inGuide && free);
+    const tg = $('guide-tip');
+    if (tg) tg.hidden = !(inGuide && !free);
   }
 
   function drawMaskOverlay() {
@@ -1428,9 +1492,12 @@
         return;
       }
       const n0 = screenToGuideNorm(p);
+      const free = C.getGuideKind(S.guideKind).freehand === true;
       const draft = { kind: S.guideKind, x1: n0.x, y1: n0.y, x2: n0.x, y2: n0.y };
+      // 自由笔迹要收整条折线（发丝/水流的走向是有弧度的，两个端点描述不了）
+      if (free) draft.points = [{ x: n0.x, y: n0.y }];
       S.guides.push(draft);
-      S.gesture = { type: 'guide', draft, rect };
+      S.gesture = { type: 'guide', draft, rect, free };
       draw();
       return;
     }
@@ -1506,6 +1573,18 @@
       const n = screenToGuideNorm(p);
       g.draft.x2 = n.x;
       g.draft.y2 = n.y;
+      if (g.free) {
+        const pts = g.draft.points;
+        const last = pts[pts.length - 1];
+        // 采样抽稀：手指移动每帧都记会让点数爆炸（一笔几百个点，存进会话还会撑爆存储）。
+        // 与上一个点距离小于选区短边的 1% 就丢弃 —— 肉眼看不出差别。
+        const minD = Math.min(g.rect.w, g.rect.h) * 0.01;
+        if (!last || Math.hypot((n.x - last.x) * g.rect.w, (n.y - last.y) * g.rect.h) >= minD) {
+          pts.push({ x: n.x, y: n.y });
+          // 硬上限：单笔最多 400 点，超了就丢中间点（防止极端情况下卡死）
+          if (pts.length > 400) pts.splice(Math.floor(pts.length / 2), 1);
+        }
+      }
       // 拖到选区外也允许：夹回边界，用户不用精确收手
       draw();
       return;
@@ -1540,10 +1619,31 @@
     }
     if (g.type === 'guide') {
       const d = g.draft;
-      // 太短的手抖轨迹丢掉，避免出现一个「点」
-      if (Math.hypot((d.x2 - d.x1) * g.rect.w, (d.y2 - d.y1) * g.rect.h) <
-          Math.max(12, Math.hypot(g.rect.w, g.rect.h) * 0.06)) {
+      const kind = C.getGuideKind(d.kind);
+      let tooShort;
+      if (kind.freehand) {
+        // 笔迹按「折线总长度」判废，不能只看首尾直线距离：
+        // 画一个闭合的小圈，首尾几乎重合，但它是有效笔迹
+        let len = 0;
+        const pts = d.points || [];
+        for (let i = 1; i < pts.length; i++) {
+          len += Math.hypot((pts[i].x - pts[i - 1].x) * g.rect.w, (pts[i].y - pts[i - 1].y) * g.rect.h);
+        }
+        tooShort = pts.length < 2 || len < Math.max(14, Math.hypot(g.rect.w, g.rect.h) * 0.06);
+      } else {
+        tooShort = Math.hypot((d.x2 - d.x1) * g.rect.w, (d.y2 - d.y1) * g.rect.h) <
+          Math.max(12, Math.hypot(g.rect.w, g.rect.h) * 0.06);
+      }
+      if (tooShort) {
         S.guides.pop();
+      } else if (kind.freehand) {
+        // 笔迹不做吸附 —— 拉直等于毁掉手画的弧度
+        const nrm = C.normalizeGuide(d);
+        d.x1 = nrm.x1; d.y1 = nrm.y1; d.x2 = nrm.x2; d.y2 = nrm.y2;
+        d.points = nrm.points;
+        updateGuideBadge();
+        toast('已加草图：' + (d.points ? d.points.length : 0) + ' 个点' +
+          (S.cfg.guideStrokeOverlay === false ? '（笔迹进图已关闭，只作为文字说明）' : ''));
       } else {
         // 吸附到常见方向，模型拿到的是干净的构图意图而不是手抖斜线
         const snapped = C.snapGuide(d);
@@ -1551,7 +1651,7 @@
         d.x2 = snapped.x2; d.y2 = snapped.y2;
         d.kind = snapped.kind;
         updateGuideBadge();
-        toast('已加引导线：' + C.getGuideKind(d.kind).zh);
+        toast('已加引导线：' + kind.zh);
       }
       S.gesture = null;
       updateGuideBadge();
@@ -1580,16 +1680,31 @@
     const rect = C.clampRect(S.rect, S.docW, S.docH);
     const sr = C.imageRectToScreen(rect, S.view);
     const TOL = 14;
+    /** 点到线段的最短距离 */
+    const segDist = (px, py, ax, ay, bx, by) => {
+      const dx = bx - ax, dy = by - ay;
+      const len2 = dx * dx + dy * dy;
+      let t = len2 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0;
+      t = Math.max(0, Math.min(1, t));
+      return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+    };
     for (let i = S.guides.length - 1; i >= 0; i--) {
       const g = S.guides[i];
+      if (g.points && g.points.length >= 2) {
+        // 折线：逐段算距离，取最小
+        let best = Infinity;
+        for (let k = 1; k < g.points.length; k++) {
+          const a = g.points[k - 1], b = g.points[k];
+          best = Math.min(best, segDist(p.x, p.y,
+            sr.x + a.x * sr.w, sr.y + a.y * sr.h,
+            sr.x + b.x * sr.w, sr.y + b.y * sr.h));
+        }
+        if (best <= TOL) return i;
+        continue;
+      }
       const x1 = sr.x + g.x1 * sr.w, y1 = sr.y + g.y1 * sr.h;
       const x2 = sr.x + g.x2 * sr.w, y2 = sr.y + g.y2 * sr.h;
-      const dx = x2 - x1, dy = y2 - y1;
-      const len2 = dx * dx + dy * dy;
-      let t = len2 ? ((p.x - x1) * dx + (p.y - y1) * dy) / len2 : 0;
-      t = Math.max(0, Math.min(1, t));
-      const d = Math.hypot(p.x - (x1 + t * dx), p.y - (y1 + t * dy));
-      if (d <= TOL) return i;
+      if (segDist(p.x, p.y, x1, y1, x2, y2) <= TOL) return i;
     }
     return -1;
   }
@@ -1834,6 +1949,39 @@
     // 生成结果整体偏蓝、和原图对不上。现在改为：图片原样发送，
     // 要修改的范围通过提示词里的文字描述表达（见 buildPrompt 的 centerPct）。
     // 蓝色只保留在屏幕预览上（drawMaskOverlay），永远不会进入发给模型的图片。
+    //
+    // 唯一的例外是**自由笔迹**（引导线里的 freehand 类型）：
+    // 「头发往这个方向飘」这类要求用文字根本说不明白（模型看不到我们的坐标系，
+    // 也读不了几十个点），只能把笔迹画在图上让模型直接看。
+    // 它和当初的蓝色掩膜有本质区别：蓝色掩膜标的是「改哪一块」（文字能说清），
+    // 笔迹标的是「生成成什么走向」（文字说不清）。
+    // 风险仍然存在（某些模型会把线画进画面），所以设置里可以一键关掉。
+    let strokeNote = '';
+    // 关掉开关但画了笔迹时也要留痕：否则用户以为笔迹带上了，
+    // 生成结果不对却找不到原因（自检面板里必须能看到「这次没带笔迹」）
+    if (S.cfg.guideStrokeOverlay === false && S.guides.some(C.isFreehandGuide)) {
+      strokeNote = '笔迹未画进图片（已关闭）';
+    }
+    if (S.cfg.guideStrokeOverlay !== false && S.guides.length) {
+      // 笔迹的坐标是相对**整个选区**存的（S.selRect），不是相对当前瓦片。
+      // 分块时必须用选区做基准换算，否则第二块之后的笔迹会整体偏移 ——
+      // 而且 clip 会把偏移后的线当成「越界」整条丢掉，表现为「分块后笔迹全没了」。
+      const baseRect = lastSelRect || rect;
+      const sp = C.planStrokeOverlay({
+        guides: S.guides,
+        rect: baseRect,
+        ctxRect,
+        enabled: true,
+        colorId: S.cfg.guideStrokeColor,
+        // 线宽按请求图短边给：图越大线越粗，视觉粗细才一致
+        width: Math.max(4, Math.round(Math.min(ctxRect.w, ctxRect.h) * 0.012))
+      });
+      // 无论画没画都要记录：关掉时也要如实告诉用户「这次没带上笔迹」，
+      // 否则他以为笔迹生效了，结果生成不对却找不到原因
+      strokeNote = sp.note;
+      if (sp.count) C.drawStrokeOverlay(cx, sp);
+    }
+    lastStrokeNote = strokeNote;
 
     // ---- 小选区上采样 ----
     // 很多接口对输入图有最小像素要求（如 0.66MP）。摄影师常改的恰恰是小区域，
@@ -2039,6 +2187,8 @@
     const lang = S.cfg.lang === 'auto' ? (C.HAS_CJK.test($('prompt').value) ? 'zh' : 'en') : S.cfg.lang;
 
     const tiles = (Number(S.cfg.tile) > 0) ? C.planTileCrop(rect, { maxSide: Number(S.cfg.tile), overlap: 80 }) : [rect];
+    // 笔迹坐标相对整个选区存储；分块时每块都要用它做换算基准
+    lastSelRect = rect;
 
     S.aborter = new AbortController();
     const token = ++S.genToken;
@@ -2114,8 +2264,14 @@
         const tileGuides = S.guides.length
           ? C.mapGuidesToRequest({ guides: S.guides, rect, ctxRect: built.rect, clip: tiles.length > 1 })
           : [];
+        const sc = C.getStrokeColor(S.cfg.guideStrokeColor);
         const guideDesc = tileGuides.length
-          ? C.describeGuides({ guides: tileGuides, isZh: lang === 'zh' })
+          ? C.describeGuides({
+            guides: tileGuides, isZh: lang === 'zh',
+            // 颜色名必须和实际画进图的颜色一致：画品红却说「红色线条」，
+            // 模型会去找一条根本不存在的红线
+            strokeColorZh: sc.zh, strokeColorEn: sc.en
+          })
           : '';
         let promptText = C.buildPrompt({
           instruction: $('prompt').value,
@@ -3447,7 +3603,10 @@
 
   let lastError = null;
   let lastRequest = null;   // 最近一次实际发出的请求（用于自查）
-  let lastUpscale = null;   // 最近一次的上采样信息
+  let lastUpscale = null;
+  let lastStrokeNote = '';   // 本次请求有没有把笔迹画进图（用于请求自检显示）
+  // 本次生成用的选区。笔迹坐标相对它存储，分块换算时必须用它做基准。
+  let lastSelRect = null;   // 最近一次的上采样信息
 
   function clearErrorPanel() {
     const el = $('gen-error');
@@ -4200,8 +4359,8 @@
     $('brush-tip').hidden = !inBrush;
     const inGuide = S.mode === 'guide';
     $('guide-bar').hidden = !inGuide;
-    $('guide-tip').hidden = !inGuide;
     $('btn-guide').classList.toggle('active', inGuide);
+    updateGuideBarVisibility();
     updateGuideBadge();
     $('brush-erase').setAttribute('aria-pressed', String(S.brushErase));
     $('brush-erase').classList.toggle('on', S.brushErase);
@@ -4233,6 +4392,8 @@
     $('set-fusiong').value = Math.round((S.cfg.fusionGrain != null ? S.cfg.fusionGrain : 0.6) * 100);
     $('set-envfit').checked = S.cfg.envFit !== false;
     $('set-autocheck').checked = S.cfg.autoCheckUpdate !== false;
+    if ($('set-strokeimg')) $('set-strokeimg').checked = S.cfg.guideStrokeOverlay !== false;
+    if ($('set-strokecolor')) $('set-strokecolor').value = C.getStrokeColor(S.cfg.guideStrokeColor).id;
     refreshUpdateStateText();
     $('set-maxres').value = String(S.cfg.maxRes);
     $('set-tile').value = S.cfg.tile;
@@ -4512,6 +4673,7 @@
       '提示词　：' + r.promptChars + ' 字',
       (lastUpscale ? '小图放大：是（' + lastUpscale.from + ' → ' + lastUpscale.to +
         '，' + lastUpscale.scale.toFixed(2) + ' 倍；生成后会按同比例缩回原分辨率）' : '小图放大：不需要'),
+      (lastStrokeNote ? '手绘草图：' + lastStrokeNote : '手绘草图：无'),
       '请求字段：' + r.keys.join(', ')
     ];
     if (!r.hasImage && r.model) {
@@ -4770,6 +4932,8 @@
     bindField('set-lang', 'lang');
     bindField('set-seed', 'seed');
     bindField('set-preset', 'exportPreset', null, updatePresetUI);
+    bindField('set-strokecolor', 'guideStrokeColor', null, () => { renderGuideKinds(); draw(); });
+    bindField('set-strokeimg', 'guideStrokeOverlay', (el) => el.checked);
     bindField('set-format', 'format');
     bindField('set-quality', 'quality', (el) => Number(el.value));
     bindField('set-mosaic', 'mosaic', (el) => el.checked);
@@ -5432,8 +5596,12 @@
     setGuides: (list) => { S.guides = (list || []).map(C.normalizeGuide); updateGuideBadge(); draw(); },
     clearGuides,
     renderGuideKinds,
+    updateGuideBarVisibility,
     drawGuides,
     hitGuide,
+    strokeColor: () => C.getStrokeColor(S.cfg.guideStrokeColor),
+    strokeOverlayEnabled: () => S.cfg.guideStrokeOverlay !== false,
+    strokeNote: () => lastStrokeNote,
     // 对比视图（供测试与外部调用）
     compareView: () => cmpView,
     compareSplit: () => cmpSplit,
