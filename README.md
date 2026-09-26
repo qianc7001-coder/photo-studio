@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-1536%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-1695%20passed-brightgreen.svg)](#测试)
 
 给摄影师用的**局部修图**工具：在照片上框选任意区域，交给生图模型修改，结果自动贴回原位置。
 
 **核心特点**：结果无缝融合，非破坏性可调，保留拍摄信息。
 
-> 最新版本 **v2.8.2** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
+> 最新版本 **v2.9.0** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
 
 ---
 
@@ -78,6 +78,13 @@
 - **契合度评分**：每个图层显示 0~100 分和具体问题，调参数时能看出有没有变好
 - 全部即时生效、**不重新调用模型**（不花钱）
 - **中心区域不做色调对齐** —— 你改的颜色完整保留，融合只修接缝的技术性瑕疵
+
+### 自动检查更新
+- 启动时自动向 GitHub 查询最新版本（每 12 小时最多一次，失败会退避）
+- 发现新版本时弹出提示条：可**一键更新**（系统下载 + 自动调起安装器）、查看更新内容、或忽略此版本
+- **忽略只针对那一个版本** —— 出了更新的版本仍会提示，不会从此收不到更新
+- 设置里可手动检查，显示上次检查时间与远程版本号，也可关闭自动检查
+- 实现上**不用 `/releases/latest`**（它按创建时间判定，补发旧版本后会指向旧版本），而是拉完整列表按版本号挑最高
 
 ### 画质
 - 边缘羽化（消除拼接硬边）
@@ -188,7 +195,7 @@ node tools/migrate-test.js     # 配置迁移（模拟老用户升级路径）
 node tools/e2e-test.js         # 端到端（jsdom + 真实 canvas，逐像素校验）
 ```
 
-当前规模：**1536 项**（459 单元 + 665 回归 + 14 配置迁移 + 398 端到端）。
+当前规模：**1695 项**（530 单元 + 724 回归 + 14 配置迁移 + 427 端到端）。
 
 端到端测试会：
 - 启动一个假生图模型服务器
@@ -217,7 +224,8 @@ tools/
   bump-version.js 版本号自增守卫
   core-test.js / regression-test.js / e2e-test.js  测试
   insert-block.js 幂等插入测试块（避免重复插入）
-  publish-archive.js 把本地归档发布为 GitHub Release（幂等）
+  publish-archive.js 补发历史版本 Release（幂等，不设为 latest）
+  publish-release.js 发布当前版本 Release（显式设为 latest 并复核）
   push-via-api.js 用 REST API 推送提交（github.com 被拦时的备用通道）
 version.json     版本号与更新说明（唯一来源）
 ```
@@ -286,7 +294,8 @@ WebView 里用 `file://` 打开页面时，跨域请求会被拦截，而且 `lo
 
 | 版本 | 主要变化 |
 |---|---|
-| **v2.8.2** | 设置界面改成手机系统设置风格；加 GitHub 入口 |
+| **v2.9.0** | 应用内检查更新；修复 GitHub「最新版」指向错误版本 |
+| [v2.8.2](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.8.2) | 设置界面改成手机系统设置风格；加 GitHub 入口 |
 | [v2.8.1](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.8.1) | 每次请求附带「周围环境特征」描述 |
 | [v2.8.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.8.0) | 无缝融合：对齐光照渐变/对比度/颗粒 |
 | [v2.7.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.7.0) | 修复对比图无法双击放大 |

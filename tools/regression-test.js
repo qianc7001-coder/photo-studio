@@ -1925,5 +1925,124 @@ console.log('\n【发布】历史版本必须可下载（README 与归档一致�
 
 
 /* ---------- 历史版本保留 ---------- */
+/* ---------- 检查更新 ---------- */
+console.log('\n【更新】应用内检测新版本（不能依赖 /releases/latest）');
+
+(() => {
+  const fs = require('fs');
+  const path = require('path');
+  const C2 = require(path.join(__dirname, '..', 'app', 'core.js'));
+  const appSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'app', 'index.html'), 'utf8');
+  const act = fs.readFileSync(path.join(__dirname, '..', 'android', 'src', 'com', 'photostudio', 'app', 'MainActivity.java'), 'utf8');
+  const mf = fs.readFileSync(path.join(__dirname, '..', 'android', 'AndroidManifest.xml'), 'utf8');
+
+  const mkRel = (tag, created, extra) => Object.assign({
+    tag_name: tag, created_at: created, draft: false, prerelease: false, name: tag, body: 'x',
+    assets: [{ name: 'photo-studio-' + tag + '.apk', browser_download_url: 'https://x/' + tag + '.apk' }]
+  }, extra || {});
+
+  // 1) 回归：绝不能用 /releases/latest
+  //    它按「创建时间」判定最新 —— 本项目补发 v1.8.0~v2.2.0 后，
+  //    这些旧版本的时间戳变成最新，/releases/latest 返回了 v2.2.0，
+  //    用户会被提示「更新」到更老的版本上。
+  const codeOnly = appSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  t('代码里没有 /releases/latest', !/releases\/latest/.test(codeOnly));
+  t('拉完整列表自己挑', /releases\?per_page=100/.test(codeOnly));
+
+  const list = [
+    mkRel('v1.8.0', '2026-09-26T10:00:00Z'),
+    mkRel('v2.2.0', '2026-09-26T10:05:00Z'),   // 时间最新，但版本低
+    mkRel('v2.8.2', '2026-09-25T10:00:00Z')
+  ];
+  t('挑出的是版本号最高的', C2.pickLatestRelease(list).tag_name === 'v2.8.2');
+  // 对照实验：证明「按时间挑」确实会错
+  const byTime = list.slice().sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+  t('对照：按时间挑会选到旧版本（所以必须按版本号）', byTime.tag_name === 'v2.2.0');
+
+  // 2) 版本比较必须按数字段（字符串比较会认为 "2.10" < "2.9"）
+  t('2.10.0 > 2.9.0', C2.compareVersion('2.10.0', '2.9.0') === 1);
+  t('2.9.0 < 2.10.0', C2.compareVersion('2.9.0', '2.10.0') === -1);
+  t('字符串比较会出错（对照）', !('2.10.0' > '2.9.0'));
+  t('带 v 前缀等价', C2.compareVersion('v2.8.2', '2.8.2') === 0);
+
+  // 3) 忽略此版本：只忽略那一个，出了新版还要提示
+  t('忽略过的版本不提示',
+    C2.planUpdate({ current: '2.8.2', latest: 'v2.9.0', skipped: 'v2.9.0' }).hasUpdate === false);
+  t('出了更新的版本仍提示',
+    C2.planUpdate({ current: '2.8.2', latest: 'v2.10.0', skipped: 'v2.9.0' }).hasUpdate === true);
+  t('本地比远程新时不提示（不回退版本）',
+    C2.planUpdate({ current: '2.9.0', latest: 'v2.8.2' }).hasUpdate === false);
+
+  // 4) 检查时机：不该每次启动都请求（浪费流量、可能被限流）
+  const H = 3600 * 1000;
+  t('首次会检查', C2.planUpdateCheck({ now: 1, lastCheck: 0 }).should === true);
+  t('刚检查过会跳过', C2.planUpdateCheck({ now: 1000, lastCheck: 999 }).should === false);
+  t('手动检查总是执行', C2.planUpdateCheck({ now: 1000, lastCheck: 999, force: true }).should === true);
+  t('失败会退避', C2.planUpdateCheck({ now: 13 * H, lastCheck: 1, failCount: 2 }).should === false);
+  t('退避有上限', C2.planUpdateCheck({ now: 200 * H, lastCheck: 1, failCount: 99 }).should === true);
+
+  // 5) APK 附件挑选
+  t('能挑出 APK', C2.pickApkAsset(mkRel('v2.8.2', 'x')).name === 'photo-studio-v2.8.2.apk');
+  t('没有 APK 时返回 null（调用方据此改用网页下载）',
+    C2.pickApkAsset({ tag_name: 'v1.0.0', assets: [] }) === null);
+
+  // 6) 安卓侧：下载与安装
+  t('提供原生下载接口', /downloadAndInstall/.test(act));
+  t('用系统下载管理器（有进度通知、断点续传）', /DownloadManager/.test(act));
+  t('下载完成自动调起安装器', /installDownloadedApk/.test(act));
+  // Android 8+ 必须显式授权，否则系统静默拒绝（用户看不到任何提示）
+  t('处理「安装未知应用」授权', /checkInstallPermission/.test(act));
+  t('Manifest 声明 REQUEST_INSTALL_PACKAGES', /REQUEST_INSTALL_PACKAGES/.test(mf));
+  t('授权回来后继续安装（不丢下载结果）', /pendingInstallPath/.test(act));
+  t('8.0 以下视为已授权', /SDK_INT < Build\.VERSION_CODES\.O\) return true/.test(act));
+  t('下载完注销广播', /unregisterDownloadReceiver/.test(act));
+  t('onDestroy 里清理广播', /onDestroy[\s\S]{0,600}unregisterDownloadReceiver/.test(act));
+
+  // 7) 发布流程：补发历史版本绝不能顶掉 latest
+  //    这是真实踩过的坑：补发 v1.8.0~v2.2.0 后，GitHub 的 /releases/latest
+  //    变成了 v2.2.0（按创建时间判定），用户点「最新版」反而下到旧包。
+  const pubArch = fs.readFileSync(path.join(__dirname, '..', 'tools', 'publish-archive.js'), 'utf8');
+  const pubRel = fs.readFileSync(path.join(__dirname, '..', 'tools', 'publish-release.js'), 'utf8');
+  t('补发历史版本时不设为 latest', /make_latest: 'false'/.test(pubArch));
+  t('发布当前版本时显式设为 latest', /make_latest: 'true'/.test(pubRel));
+  t('发布后会复核 /releases/latest 指向正确',
+    /releases\/latest/.test(pubRel) && /指向 \$\{tag\}/.test(pubRel));
+  t('发布脚本在 latest 不对时报错退出', /if \(!ok\) process\.exit\(1\)/.test(pubRel));
+  t('发布脚本会重建同名 release（保证附件最新）', /先删除再重建/.test(pubRel));
+
+  // 7.5) 安全：发布脚本绝不能泄漏 token
+  //     真实踩过：execFileSync 失败时 Node 把整个 argv（含 Authorization 头）
+  //     挂在错误对象上，脚本没捕获 → 打印出来 token 就进日志了。
+  for (const f of ['publish-archive.js', 'publish-release.js', 'push-via-api.js']) {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'tools', f), 'utf8');
+    t(f + '：body 走 stdin（不放命令行参数）',
+      /'--data-binary', '@-'/.test(src), f);
+    t(f + '：自己捕获 curl 异常（不把 argv 打出去）',
+      /catch \(e\) \{[\s\S]{0,200}__error/.test(src), f);
+    // 不允许把含 token 的变量直接交给 console
+    t(f + '：没有直接打印含 token 的变量',
+      !/console\.(log|error)\([^)]*\bTOKEN\b/.test(src), f);
+    t(f + '：没有打印 execFileSync 的错误对象',
+      !/console\.(log|error)\([^)]*\berr\b[^)]*\)/.test(src) ||
+      !/execFileSync/.test(src), f);
+  }
+
+  // 8) 接线
+  t('启动时静默检查', /setTimeout\(\(\) => \{ checkUpdate\(false\)/.test(codeOnly));
+  t('静默失败不打扰用户', /checkUpdate\(false\)\.catch/.test(codeOnly));
+  t('设置里可手动检查', /id="btn-checkupdate"/.test(html));
+  t('可关闭自动检查', /id="set-autocheck"/.test(html));
+  t('自动检查默认开启', /autoCheckUpdate: true,/.test(appSrc));
+  t('浏览器里退化成打开下载页', /openExternal\(apk\.browser_download_url\)/.test(appSrc));
+})();
+
+
+/* ---------- 检查更新 ---------- */
+/* ---------- 检查更新 ---------- */
+/* ---------- 检查更新 ---------- */
+/* ---------- 检查更新 ---------- */
+/* ---------- 检查更新 ---------- */
+/* ---------- 检查更新 ---------- */
 console.log(`\n合计 ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

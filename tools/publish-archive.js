@@ -42,12 +42,28 @@ function api(method, url, body, extraArgs) {
     '-H', 'Authorization: Bearer ' + TOKEN,
     '-H', 'Accept: application/vnd.github+json'];
   if (body !== undefined && body !== null) {
-    a.push('-H', 'Content-Type: application/json', '--data-binary', JSON.stringify(body));
+    // body 走 stdin：命令行参数有长度上限，且失败时 argv（含 token）
+    // 会被 Node 挂到错误对象上，一旦打印就泄漏
+    a.push('-H', 'Content-Type: application/json', '--data-binary', '@-');
   }
   if (extraArgs) a.push(...extraArgs);
   a.push(url);
-  const out = execFileSync('curl', a, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
+  const opts = { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 };
+  if (body !== undefined && body !== null) opts.input = JSON.stringify(body);
+  let out;
+  try {
+    out = execFileSync('curl', a, opts);
+  } catch (e) {
+    // 只报「哪一步失败」，绝不打印 argv（含 token）
+    return { __error: 'curl 调用失败（' + method + ' ' + safeUrl(url) + '）' };
+  }
   try { return JSON.parse(out); } catch (e) { return { __raw: out }; }
+}
+
+/** 去掉查询串，避免日志噪声 */
+function safeUrl(u) {
+  const i = String(u).indexOf('?');
+  return i > 0 ? String(u).slice(0, i) + '?…' : String(u);
 }
 
 /** 上传附件（二进制，必须走 uploads.github.com） */
@@ -160,14 +176,19 @@ function main() {
       continue;
     }
 
-    // 建 Release
+    // 建 Release。
+    // `make_latest: 'false'` 很关键：GitHub 默认把「创建时间最新」的 release
+    // 当作 latest，补发旧版本会让 /releases/latest 指向旧版本 ——
+    // 用户点 GitHub 上的「最新版」反而下到更老的包（本项目真实踩过）。
+    // 补发历史版本一律不设为 latest；真正的发布流程会自己声明 latest。
     const r = api('POST', `${API}/repos/${REPO}/releases`, {
       tag_name: rel.tag,
       target_commitish: 'main',
       name: titleOf(rel),
       body: bodyOf(rel),
       draft: false,
-      prerelease: false
+      prerelease: false,
+      make_latest: 'false'
     });
     if (!r || !r.id) {
       console.log(`  ✗ ${rel.tag} 创建失败：${(r && (r.message || r.__raw)) || '未知错误'}`);

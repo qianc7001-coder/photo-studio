@@ -46,16 +46,43 @@ const git = (args) => execFileSync('git', args, {
   cwd: ROOT, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024
 });
 
+/**
+ * 调 GitHub API。
+ *
+ * 两个必须注意的点：
+ *   1. **body 走 stdin**（`--data-binary @-`），不放命令行参数 ——
+ *      app.js 有 190KB，塞进 argv 会超出限制直接失败。
+ *   2. **绝不把 argv 打进日志**：argv 里含 Authorization 头。
+ *      Node 的 execFileSync 失败时会把整个 args 数组挂在错误对象上，
+ *      一旦被 console 打出来 token 就泄漏了（真实踩过）。
+ *      所以这里自己捕获异常，只输出脱敏后的信息。
+ */
 function api(method, url, body) {
   const a = ['-s', '-X', method,
     '-H', 'Authorization: Bearer ' + TOKEN,
     '-H', 'Accept: application/vnd.github+json'];
   if (body !== undefined) {
-    a.push('-H', 'Content-Type: application/json', '--data-binary', JSON.stringify(body));
+    a.push('-H', 'Content-Type: application/json', '--data-binary', '@-');
   }
   a.push(url);
-  const out = execFileSync('curl', a, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  let out = '';
+  try {
+    out = execFileSync('curl', a, {
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      input: body === undefined ? undefined : JSON.stringify(body)
+    });
+  } catch (e) {
+    // 只报「哪一步失败」，不报 argv（含 token）
+    return { __error: 'curl 调用失败（' + method + ' ' + safeUrl(url) + '）' };
+  }
   try { return JSON.parse(out); } catch (e) { return { __raw: out }; }
+}
+
+/** 去掉 URL 里的查询串，避免日志里出现无意义的噪声（也便于比对） */
+function safeUrl(u) {
+  const i = String(u).indexOf('?');
+  return i > 0 ? String(u).slice(0, i) + '?…' : String(u);
 }
 
 /**
