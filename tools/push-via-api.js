@@ -115,6 +115,33 @@ function changedFiles(remoteTree) {
 }
 
 /** 含 NUL 或大量不可打印字节 → 按二进制处理（base64） */
+/**
+ * 带重试的 API 调用。
+ *
+ * 为什么必须重试：GitHub 会间歇性返回 `We received a malformed request from your client`
+ * —— 同样的请求体重发一次就成功（本项目实测：同一份 app/app.js 第一次失败、第二次通过）。
+ * 大文件更容易触发（body 越大越可能被截断/分片出错）。
+ * 没有重试的话，一次偶发失败就会让整个推送中断在半路。
+ */
+function apiRetry(method, url, body, tries) {
+  const n = tries || 3;
+  let last = null;
+  for (let i = 1; i <= n; i++) {
+    last = api(method, url, body);
+    if (last && last.sha) return last;
+    if (last && last.id) return last;
+    // 明确的业务错误（如鉴权失败、路径不存在）不重试，重试也没用
+    const msg = String((last && (last.message || last.__error)) || '');
+    if (/Bad credentials|Not Found|Forbidden|Validation Failed/i.test(msg)) return last;
+    if (i < n) {
+      console.log(`    （第 ${i} 次失败，重试：${msg.slice(0, 60)}）`);
+      // 简单的线性退避：等一会儿再试，避免连续撞上同一个抖动窗口
+      try { execFileSync('sleep', [String(i)]); } catch (e) { /* ignore */ }
+    }
+  }
+  return last;
+}
+
 function isBinary(buf) {
   const n = Math.min(buf.length, 8000);
   if (!n) return false;
@@ -172,7 +199,7 @@ function main() {
     if (!fs.existsSync(abs)) continue;
     const buf = fs.readFileSync(abs);
     const bin = isBinary(buf);
-    const blob = api('POST', `${API}/repos/${REPO}/git/blobs`, {
+    const blob = apiRetry('POST', `${API}/repos/${REPO}/git/blobs`, {
       content: bin ? buf.toString('base64') : buf.toString('utf8'),
       encoding: bin ? 'base64' : 'utf-8'
     });
@@ -186,7 +213,7 @@ function main() {
   }
 
   // 4) 建 tree（基于远程最新 tree，保证不丢别人的提交）
-  const newTree = api('POST', `${API}/repos/${REPO}/git/trees`, { base_tree: baseTree, tree });
+  const newTree = apiRetry('POST', `${API}/repos/${REPO}/git/trees`, { base_tree: baseTree, tree });
   if (!newTree || !newTree.sha) {
     console.error('✗ 创建 tree 失败：' +
       ((newTree && (newTree.message || newTree.__error)) || '未知'));
@@ -195,7 +222,7 @@ function main() {
 
   // 5) 建 commit（提交信息用本地 HEAD，与 git 历史一致）
   const msg = git(['log', '-1', '--pretty=%B']).trim();
-  const commit = api('POST', `${API}/repos/${REPO}/git/commits`, {
+  const commit = apiRetry('POST', `${API}/repos/${REPO}/git/commits`, {
     message: msg, tree: newTree.sha, parents: [remoteSha]
   });
   if (!commit || !commit.sha) {
