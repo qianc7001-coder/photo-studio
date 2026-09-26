@@ -241,6 +241,14 @@ public class LocalServer {
         if (reqType == null || reqType.isEmpty()) reqType = headers.get("content-type");
         if (reqType == null || reqType.isEmpty()) reqType = "application/json";
 
+        // 上游请求方法。默认 POST（生图接口都是 POST），但有些接口只能 GET ——
+        // 例如 GitHub 的 releases 列表：用 POST 请求它会返回 401 Requires authentication，
+        // 表现为「应用内检查更新永远失败」。
+        String reqMethod = headers.get("x-target-method");
+        if (reqMethod == null || reqMethod.isEmpty()) reqMethod = "POST";
+        reqMethod = reqMethod.trim().toUpperCase(java.util.Locale.ROOT);
+        if (!"GET".equals(reqMethod) && !"POST".equals(reqMethod)) reqMethod = "POST";
+
         // 兼容旧协议：body 为 {url, headers, body}
         if (target == null && body.length > 0) {
             String s = new String(body, "UTF-8").trim();
@@ -264,17 +272,27 @@ public class LocalServer {
         HttpURLConnection conn = null;
         try {
             conn = (HttpURLConnection) new URL(target).openConnection();
-            conn.setRequestMethod("POST");
+            conn.setRequestMethod(reqMethod);
             conn.setConnectTimeout(UPSTREAM_CONNECT_TIMEOUT);
             conn.setReadTimeout(UPSTREAM_READ_TIMEOUT);
-            conn.setDoOutput(true);
             conn.setRequestProperty("Content-Type", reqType);
             if (auth != null && !auth.isEmpty()) conn.setRequestProperty("Authorization", auth);
-
-            OutputStream os = conn.getOutputStream();
-            os.write(body);
-            os.flush();
-            os.close();
+            // GitHub 的 API 强制要求 User-Agent，缺失会被 403 拒掉
+            // （"Request forbidden by administrative rules"）。
+            // 同时透传调用方指定的 Accept，避免上游返回非预期表示。
+            String ua = headers.get("x-target-user-agent");
+            conn.setRequestProperty("User-Agent", (ua == null || ua.isEmpty()) ? "PhotoStudio-Android" : ua);
+            String acc = headers.get("x-target-accept");
+            if (acc != null && !acc.isEmpty()) conn.setRequestProperty("Accept", acc);
+            if ("GET".equals(reqMethod)) {
+                conn.setDoOutput(false);
+            } else {
+                conn.setDoOutput(true);
+                OutputStream os = conn.getOutputStream();
+                os.write(body);
+                os.flush();
+                os.close();
+            }
 
             int code = conn.getResponseCode();
             InputStream is = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
@@ -288,7 +306,7 @@ public class LocalServer {
             byte[] data = bos.toByteArray();
             String ctype = conn.getContentType();
             if (ctype == null || ctype.isEmpty()) ctype = "application/json";
-            Log.i(TAG, "代理 POST " + target + " -> " + code + " (" + (System.currentTimeMillis() - t0) + "ms, " + data.length + "B)");
+            Log.i(TAG, "代理 " + reqMethod + " " + target + " -> " + code + " (" + (System.currentTimeMillis() - t0) + "ms, " + data.length + "B)");
             respondCors(out, code, ctype, data);
         } catch (Exception e) {
             Log.w(TAG, "代理失败: " + e.getMessage());

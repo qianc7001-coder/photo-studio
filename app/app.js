@@ -415,22 +415,55 @@
    * 走本地代理（同源，无跨域问题）；浏览器直开时 GitHub API 本身允许跨域
    * （`access-control-allow-origin: *`），所以直接 fetch 也能用。
    */
+  /**
+   * 拉取 GitHub 的 Release 列表。
+   *
+   * 两个坑（都真实踩过）：
+   *
+   * 1. **必须用 GET**。本地代理默认用 POST 转发（生图接口都是 POST），
+   *    但 GitHub 的 releases 列表用 POST 请求会返回 401 Requires authentication，
+   *    表现为「应用内检查更新永远失败，但用浏览器打开仓库明明是好的」。
+   *    所以这里显式带上 X-Target-Method: GET。
+   *
+   * 2. **代理失败必须回退直连**。生图路径（callModel）一直有这个回退，
+   *    检查更新这里当初漏了 —— 代理一旦不可用（老版本 APK 的代理不支持 GET、
+   *    或代理被安全策略挡住），检查更新就彻底不可用。
+   */
   async function fetchReleases() {
-    if (location.protocol !== 'file:' && S.cfg.netMode !== 'direct') {
+    const viaProxy = async () => {
       const r = await fetch('api/generate', {
         method: 'POST',
         headers: {
           'X-Target-Url': GH_RELEASES_API,
-          'X-Target-Content-Type': 'application/json'
+          'X-Target-Method': 'GET',
+          'X-Target-Content-Type': 'application/json',
+          // GitHub 的 API 要求 User-Agent，代理转发时必须显式带上；
+          // 浏览器直连时由浏览器自己加，所以只在代理路径需要
+          'X-Target-User-Agent': 'PhotoStudio-Android',
+          'X-Target-Accept': 'application/vnd.github+json'
         },
         body: '{}'
       });
       if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      // 代理自身出错时会回 200 + __proxyError，必须当成失败，
+      // 否则下面 pickLatestRelease 会拿到一个对象、静默返回「没有可用版本」
+      if (j && j.__proxyError) throw new Error(j.__proxyError);
+      return j;
+    };
+    const viaDirect = async () => {
+      const r = await fetch(GH_RELEASES_API, { headers: { Accept: 'application/vnd.github+json' } });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
       return await r.json();
-    }
-    const r = await fetch(GH_RELEASES_API, { headers: { Accept: 'application/vnd.github+json' } });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    return await r.json();
+    };
+
+    if (location.protocol === 'file:') return viaDirect();
+    const mode = S.cfg.netMode;
+    if (mode === 'direct') return viaDirect();
+    if (mode === 'proxy') return viaProxy();
+    // auto：先代理，失败再直连
+    try { return await viaProxy(); }
+    catch (e) { return await viaDirect(); }
   }
 
   /**

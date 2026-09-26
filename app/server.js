@@ -47,7 +47,7 @@ function send(res, code, body, headers) {
   const origin = res.__reqOrigin;
   if (origin && /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)) {
     h['Access-Control-Allow-Origin'] = origin;
-    h['Access-Control-Allow-Headers'] = 'Content-Type,X-Target-Url,X-Target-Auth';
+    h['Access-Control-Allow-Headers'] = 'Content-Type,X-Target-Url,X-Target-Auth,X-Target-Content-Type,X-Target-Method,X-Target-Accept,X-Target-User-Agent';
     h['Access-Control-Allow-Methods'] = 'GET,POST,OPTIONS';
   }
   res.writeHead(code, h);
@@ -169,17 +169,27 @@ async function handleGenerate(req, res) {
   // 透传原始 Content-Type：multipart/form-data 的 boundary 必须原样带上，
   // 否则上游无法解析表单，图片会被丢掉（表现为「上游回一段文字」）
   const contentType = req.headers['x-target-content-type'] || req.headers['content-type'] || 'application/json';
+  // 上游请求方法：默认 POST（生图接口都是 POST），
+  // 但 GitHub 的 releases 列表用 POST 会返回 401 —— 必须能指定 GET。
+  let method = String(req.headers['x-target-method'] || 'POST').trim().toUpperCase();
+  if (method !== 'GET' && method !== 'POST') method = 'POST';
   const headers = { 'Content-Type': contentType };
   if (auth) headers['Authorization'] = auth;
+  // GitHub 的 API 强制要求 User-Agent，缺失会被 403 拒掉
+  // （"Request forbidden by administrative rules"）。
+  // 浏览器直连时会自动带上，但经过本代理转发就没有了 —— 必须补。
+  // 同时透传调用方指定的 Accept，否则 GitHub 可能返回与预期不同的表示。
+  headers['User-Agent'] = req.headers['x-target-user-agent'] || 'PhotoStudio';
+  if (req.headers['x-target-accept']) headers['Accept'] = req.headers['x-target-accept'];
 
   const started = Date.now();
   try {
-    const out = await proxyUpstream(target, 'POST', headers, payload);
+    const out = await proxyUpstream(target, method, headers, method === 'GET' ? null : payload);
     const ms = Date.now() - started;
-    console.log(`[代理] POST ${target} -> ${out.status} (${ms}ms, ${out.body.length}B)`);
+    console.log(`[代理] ${method} ${target} -> ${out.status} (${ms}ms, ${out.body.length}B)`);
     send(res, out.status || 502, out.body, { 'Content-Type': out.headers['content-type'] || MIME['.json'] });
   } catch (e) {
-    console.log(`[代理] POST ${target} -> 失败: ${e.message}`);
+    console.log(`[代理] ${method} ${target} -> 失败: ${e.message}`);
     send(res, 502, JSON.stringify({ __proxyError: '转发失败：' + e.message }), { 'Content-Type': MIME['.json'] });
   }
 }

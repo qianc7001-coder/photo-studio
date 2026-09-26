@@ -2322,5 +2322,121 @@ console.log('\n【笔迹】手绘走向必须真的送到模型，且不能被�
 })();
 /* ---------- 引导线自由笔迹 ---------- */
 
+// ===== 检查更新走代理（回归块） =====
+console.log('\n【更新】检查更新必须走通本地代理（POST-only 代理会让它永远失败）');
+(() => {
+  const fs3 = require('fs');
+  const appSrc = fs3.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const srv = fs3.readFileSync(__dirname + '/../app/server.js', 'utf8');
+  const java = fs3.readFileSync(__dirname + '/../android/src/com/photostudio/app/LocalServer.java', 'utf8');
+
+  /* ---------- 根因：本地代理无条件用 POST 转发 ---------- */
+  // GitHub 的 releases 列表用 POST 请求会返回 401 Requires authentication，
+  // 而本地代理当初只为生图接口设计（全是 POST），于是：
+  //   浏览器打开仓库一切正常，应用内检查更新却永远失败。
+  // 必须让代理支持 GET，且调用方要显式声明方法。
+
+  t('Java 代理支持 GET 转发', /x-target-method/.test(java) && /"GET"\.equals\(reqMethod\)/.test(java));
+  t('Java 代理按声明的方法发请求', /conn\.setRequestMethod\(reqMethod\)/.test(java));
+  t('Java 代理 GET 时不写 body', /"GET"\.equals\(reqMethod\)\) \{\s*\n\s*conn\.setDoOutput\(false\)/.test(java));
+  t('Node 代理支持 GET 转发', /x-target-method/.test(srv));
+  t('Node 代理按声明的方法发请求', /proxyUpstream\(target, method, headers/.test(srv));
+  t('Node 代理 GET 时不发 body', /method === 'GET' \? null : payload/.test(srv));
+  t('非法方法退化为 POST（不崩）', /if \(method !== 'GET' && method !== 'POST'\) method = 'POST'/.test(srv) &&
+    /if \(!"GET"\.equals\(reqMethod\) && !"POST"\.equals\(reqMethod\)\) reqMethod = "POST"/.test(java));
+
+  /* ---------- 第二个坑：GitHub 强制要求 User-Agent ---------- */
+  // 缺 UA 会被 403 拒掉（"Request forbidden by administrative rules"）。
+  // 浏览器直连会自动带 UA，但经过代理转发就没有了。
+  t('Java 代理补了 User-Agent', /setRequestProperty\("User-Agent"/.test(java));
+  t('Node 代理补了 User-Agent', /headers\['User-Agent'\]/.test(srv));
+  t('调用方在代理路径声明 UA', /'X-Target-User-Agent': 'PhotoStudio-Android'/.test(appSrc));
+  t('调用方在代理路径声明 Accept', /'X-Target-Accept': 'application\/vnd\.github\+json'/.test(appSrc));
+  t('Java 代理透传 Accept', /x-target-accept/.test(java));
+  t('Node 代理透传 Accept', /x-target-accept/.test(srv));
+  t('CORS 放行了新头（Java）', /X-Target-Method/.test(java) || /Access-Control-Allow-Headers/.test(java));
+  t('CORS 放行了新头（Node）', /X-Target-Method,X-Target-Accept,X-Target-User-Agent/.test(srv));
+
+  /* ---------- 第三个坑：代理失败没有回退直连 ---------- */
+  // 生图路径（callModel）一直有 auto 回退，检查更新这里当初漏了 ——
+  // 代理一旦不可用（老版 APK 的代理不支持 GET、或代理被安全策略挡住），
+  // 检查更新就彻底不可用，而直连本来是能成功的。
+  const fr = appSrc.slice(appSrc.indexOf('async function fetchReleases'),
+    appSrc.indexOf('async function checkUpdate'));
+  t('检查更新有代理路径', /api\/generate/.test(fr));
+  t('检查更新有直连路径', /fetch\(GH_RELEASES_API/.test(fr));
+  t('auto 模式下代理失败会回退直连', /try \{ return await viaProxy\(\); \}\s*\n\s*catch \(e\) \{ return await viaDirect\(\); \}/.test(fr));
+  t('direct 模式只走直连', /mode === 'direct'\) return viaDirect\(\)/.test(fr));
+  t('proxy 模式只走代理', /mode === 'proxy'\) return viaProxy\(\)/.test(fr));
+  t('file: 协议直接走直连（没有代理可用）', /location\.protocol === 'file:'\) return viaDirect\(\)/.test(fr));
+
+  /* ---------- 第四个坑：代理返回 200 + __proxyError 会被当成成功 ---------- */
+  // 那样 pickLatestRelease 拿到一个对象，静默返回「没有可用版本」，
+  // 用户看到的是「已是最新」而不是「检查失败」—— 更糟，因为无从排查。
+  t('代理自身的错误被识别为失败', /j\.__proxyError\) throw new Error\(j\.__proxyError\)/.test(fr));
+
+  /* ---------- 解析链路仍然正确 ---------- */
+  // 用真实 API 返回的形状验证（不联网，只验解析）
+  const sample = [
+    { tag_name: 'v1.0.0', draft: false, prerelease: false, assets: [] },
+    {
+      tag_name: 'v3.2.0', draft: false, prerelease: false,
+      assets: [
+        // 故意混入一个不带版本号的旧命名，验证「优先选带版本号的」
+        { name: 'app.apk', browser_download_url: 'https://example.com/download/v3.2.0/app.apk' },
+        { name: 'photo-studio-v3.2.0.apk', browser_download_url: 'https://example.com/download/v3.2.0/photo-studio-v3.2.0.apk' }
+      ]
+    },
+    { tag_name: 'v2.9.0', draft: false, prerelease: false, assets: [] }
+  ];
+  const best = C.pickLatestRelease(sample);
+  t('从乱序列表挑出版本号最高的', best && best.tag_name === 'v3.2.0', best && best.tag_name);
+  t('挑出 APK 附件', (() => {
+    const a = C.pickApkAsset(best);
+    return !!a && /photo-studio-v3\.2\.0\.apk$/.test(a.browser_download_url);
+  })());
+  t('旧版能检测到更新', C.planUpdate({ current: '3.1.0', latest: 'v3.2.0' }).hasUpdate === true);
+  t('同版不提示', C.planUpdate({ current: '3.2.0', latest: 'v3.2.0' }).hasUpdate === false);
+  t('草稿/预发布不参与挑选', (() => {
+    const b = C.pickLatestRelease([
+      { tag_name: 'v9.0.0', draft: true, prerelease: false, assets: [] },
+      { tag_name: 'v3.2.0', draft: false, prerelease: false, assets: [] }
+    ]);
+    return b && b.tag_name === 'v3.2.0';
+  })());
+
+  /* ---------- 手动检查必须绕过时间间隔 ---------- */
+  // 用户点了「检查更新」却发现没反应（被 12 小时间隔挡住），
+  // 会以为功能坏了 —— 这正是本次问题的表象之一。
+  t('手动检查无视时间间隔', C.planUpdateCheck({
+    now: Date.now(), lastCheck: Date.now() - 1000, force: true
+  }).should === true);
+  t('自动检查受间隔限制', C.planUpdateCheck({
+    now: Date.now(), lastCheck: Date.now() - 1000, force: false
+  }).should === false);
+  // 连续失败时退避，避免网络不通还反复打扰；但必须封顶（4 倍 = 48 小时），
+  // 否则网络恢复后用户要等很久才重新检查
+  t('失败后按倍数退避', (() => {
+    const base = 12 * 60 * 60 * 1000;
+    // 间隔已过 1 倍但没到 2 倍：failCount=1 时应该还没到
+    const st = { now: Date.now(), lastCheck: Date.now() - base * 1.5 };
+    return C.planUpdateCheck(Object.assign({ failCount: 0 }, st)).should === true &&
+      C.planUpdateCheck(Object.assign({ failCount: 1 }, st)).should === false;
+  })());
+  t('退避封顶在 4 倍（48 小时）', (() => {
+    const base = 12 * 60 * 60 * 1000;
+    // 过了 4 倍间隔 → 即使失败很多次也该重新检查（封顶，不会无限退避）
+    const st = { now: Date.now(), lastCheck: Date.now() - base * 4.5 };
+    return C.planUpdateCheck(Object.assign({ failCount: 4 }, st)).should === true &&
+      C.planUpdateCheck(Object.assign({ failCount: 99 }, st)).should === true;
+  })());
+  t('超过封顶前仍退避', (() => {
+    const base = 12 * 60 * 60 * 1000;
+    const st = { now: Date.now(), lastCheck: Date.now() - base * 2.5 };
+    return C.planUpdateCheck(Object.assign({ failCount: 3 }, st)).should === false;
+  })());
+})();
+/* ---------- 检查更新走代理 ---------- */
+
 console.log(`\n合计 ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

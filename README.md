@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-2244%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-2289%20passed-brightgreen.svg)](#测试)
 
 给摄影师用的**局部修图**工具：在照片上框选任意区域，交给生图模型修改，结果自动贴回原位置。
 
 **核心特点**：结果无缝融合，非破坏性可调，保留拍摄信息。
 
-> 最新版本 **v3.2.0** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
+> 最新版本 **v3.3.0** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
 
 ---
 
@@ -101,11 +101,14 @@
 - **中心区域不做色调对齐** —— 你改的颜色完整保留，融合只修接缝的技术性瑕疵
 
 ### 自动检查更新
-- 启动时自动向 GitHub 查询最新版本（每 12 小时最多一次，失败会退避）
+- 启动时自动向 GitHub 查询最新版本（每 12 小时最多一次，失败会退避，最多退到 48 小时）
 - 发现新版本时弹出提示条：可**一键更新**（系统下载 + 自动调起安装器）、查看更新内容、或忽略此版本
 - **忽略只针对那一个版本** —— 出了更新的版本仍会提示，不会从此收不到更新
 - 设置里可手动检查，显示上次检查时间与远程版本号，也可关闭自动检查
 - 实现上**不用 `/releases/latest`**（它按创建时间判定，补发旧版本后会指向旧版本），而是拉完整列表按版本号挑最高
+- 请求经本地代理转发时显式声明 **GET** 并补 **User-Agent** —— GitHub 的版本列表用 POST 会返回 401、
+  缺 UA 会被 403，两者都会让「检查更新」静默失败
+- 代理不可用时**自动回退直连**（与生图路径一致），不会因为代理异常导致功能整个不可用
 
 ### 画质
 - 边缘羽化（消除拼接硬边）
@@ -329,7 +332,8 @@ WebView 里用 `file://` 打开页面时，跨域请求会被拦截，而且 `lo
 
 | 版本 | 主要变化 |
 |---|---|
-| **v3.2.0** | 彻底删除大选区分块；工具栏高度可自由调节；工具提示只显示一次 |
+| **v3.3.0** | 修复应用内「检查更新」永远失败（代理只支持 POST / 缺 UA / 不回退直连） |
+| [v3.2.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.2.0) | 彻底删除大选区分块；工具栏高度可自由调节；工具提示只显示一次 |
 | [v3.1.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.1.0) | 引导线支持自由绘制（笔迹画进图片，模型照着走向生成）；笔迹颜色可选 |
 | [v3.0.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.0.0) | 首页改为修改历史；照片信息；引导线构图；导出格式与大小可选 |
 | [v2.9.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.9.0) | 应用内检查更新；修复 GitHub「最新版」指向错误版本 |

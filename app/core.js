@@ -2695,8 +2695,11 @@
     if (opt.force) return { should: true, reason: 'manual', waitMs: 0 };
     if (!last) return { should: true, reason: 'first', waitMs: 0 };
 
-    // 连续失败时指数退避（最多 4 倍间隔），避免网络不通时反复打扰
-    const fails = Math.max(0, Math.min(4, Math.round(num(opt.failCount, 0))));
+    // 连续失败时指数退避，避免网络不通还反复打扰。
+    // 封顶在 **4 倍间隔**（48 小时）—— 注意 fails 封顶是 2 而不是 4：
+    // eff = interval * 2^fails，fails=4 会变成 16 倍（8 天），
+    // 网络只是短暂故障的用户要等 8 天才重新检查更新，明显太久。
+    const fails = Math.max(0, Math.min(2, Math.round(num(opt.failCount, 0))));
     const eff = interval * Math.pow(2, fails);
     const elapsed = now - last;
     if (elapsed >= eff) return { should: true, reason: 'due', waitMs: 0 };

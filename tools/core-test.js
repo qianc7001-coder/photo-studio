@@ -1973,11 +1973,12 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   // 失败退避：网络不通时不该反复重试
   t('失败后退避（等待时间变长）',
     C.planUpdateCheck({ now: 13 * H, lastCheck: 1, failCount: 2 }).should === false);
-  // 退避上限：间隔 12h × 2^4 = 192h（fails 被夹到 4），所以 200h 后必须执行
+  // 退避上限：间隔 12h × 2^2 = 48h（fails 被夹到 2）。
+  // 夹到 4 会变成 16 倍（8 天）—— 网络只是短暂故障的用户要等 8 天才重新检查，太久。
   t('退避有上限（不会无限增长）',
-    C.planUpdateCheck({ now: 200 * H, lastCheck: 1, failCount: 99 }).should === true);
-  t('退避不会超过 192 小时（12h × 2^4）',
-    C.planUpdateCheck({ now: 191 * H, lastCheck: 1, failCount: 99 }).should === false);
+    C.planUpdateCheck({ now: 50 * H, lastCheck: 1, failCount: 99 }).should === true);
+  t('退避不会超过 48 小时（12h × 2^2）',
+    C.planUpdateCheck({ now: 47 * H, lastCheck: 1, failCount: 99 }).should === false);
   t('返回剩余等待时间',
     C.planUpdateCheck({ now: 1000, lastCheck: 999 }).waitMs > 0);
   t('planUpdateCheck 对 null 安全', typeof C.planUpdateCheck(null).should === 'boolean');

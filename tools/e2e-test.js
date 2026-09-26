@@ -3632,6 +3632,115 @@ async function run() {
   }
 
 
+  console.log('\n【34】检查更新走通代理路径（含 GET 声明与回退）');
+  {
+    // 之前的用例全程 mock 了 window.fetch，所以「代理只支持 POST」这类真实环境问题
+    // 永远测不出来 —— 而用户点「检查更新」失败正是这个原因。
+    // 这里重点验证代理请求的两个必备声明（GET / UA）与失败回退。
+    const realFetch34 = window.fetch;
+    const GH_URL34 = 'https://api.github.com/repos/qianc7001-coder/photo-studio/releases?per_page=100';
+    const ghBody = JSON.stringify([{
+      tag_name: 'v9.9.9', draft: false, prerelease: false, body: '## 测试\n- 说明',
+      assets: [{ name: 'photo-studio-v9.9.9.apk', browser_download_url: 'https://example.com/photo-studio-v9.9.9.apk' }]
+    }]);
+    const mkRes = (status, body) => ({
+      ok: status >= 200 && status < 300, status,
+      json: async () => JSON.parse(body), text: async () => body, blob: async () => null
+    });
+
+    // ---- a) 代理路径：必须声明 GET 与 User-Agent ----
+    let proxyHdr = null;
+    window.fetch = async (u, opt) => {
+      const url = String(u);
+      if (url.indexOf('api/generate') >= 0) {
+        proxyHdr = (opt && opt.headers) || {};
+        return mkRes(200, ghBody);
+      }
+      throw new Error('不该直连：' + url);
+    };
+    window.localStorage.removeItem('photoStudio.updateCheck.v1');
+    S.cfg.netMode = 'auto';
+    const r34a = await window.__PS_API.checkUpdate(true);
+    await sleep(80);
+    t('走代理时声明了 GET 方法', proxyHdr && proxyHdr['X-Target-Method'] === 'GET',
+      proxyHdr && proxyHdr['X-Target-Method']);
+    t('走代理时带上了 User-Agent', proxyHdr && !!proxyHdr['X-Target-User-Agent'],
+      proxyHdr && proxyHdr['X-Target-User-Agent']);
+    t('走代理时带上了 Accept', proxyHdr && /github\+json/.test(proxyHdr['X-Target-Accept'] || ''),
+      proxyHdr && proxyHdr['X-Target-Accept']);
+    t('代理路径成功识别到新版本', r34a && r34a.ok === true && r34a.hasUpdate === true, r34a);
+    t('提示条已显示', doc.getElementById('upgrade-bar').hidden === false);
+    t('提示条显示版本号', /v9\.9\.9/.test(doc.getElementById('upgrade-bar').textContent));
+    t('提示条有「立即更新」', !!doc.getElementById('ub-update'));
+
+    // ---- b) 反向确认：不声明 GET 会被上游拒（证明这个声明是必需的）----
+    // 上游行为已在回归测试里用真实 HTTP 验证过：
+    //   POST https://api.github.com/.../releases → 401 Requires authentication
+    //   GET  同一地址 → 200
+    // 这里只守住「调用方确实声明了 GET」这一条（上面的断言已覆盖）。
+    t('GET 声明是必需的（上游 POST 会 401）', proxyHdr && proxyHdr['X-Target-Method'] === 'GET');
+
+    // ---- c) 代理自身报错 → auto 模式必须回退直连 ----
+    let direct34 = false;
+    window.fetch = async (u) => {
+      const url = String(u);
+      if (url.indexOf('api/generate') >= 0) {
+        // 代理 200 + __proxyError 是它自己的错误格式
+        return mkRes(200, JSON.stringify({ __proxyError: '转发失败：代理不可用' }));
+      }
+      if (url.indexOf('api.github.com') >= 0) { direct34 = true; return mkRes(200, ghBody); }
+      throw new Error('意外请求：' + url);
+    };
+    window.localStorage.removeItem('photoStudio.updateCheck.v1');
+    doc.getElementById('upgrade-bar').hidden = true;
+    const r34b = await window.__PS_API.checkUpdate(true);
+    await sleep(80);
+    t('代理报错时回退到直连', direct34 === true);
+    t('回退后仍检测成功', r34b && r34b.ok === true && r34b.hasUpdate === true, r34b);
+    t('回退后提示条正常显示', doc.getElementById('upgrade-bar').hidden === false);
+
+    // ---- d) 代理只报 __proxyError 时不能被当成「已是最新」----
+    // 若把 200+__proxyError 当成成功，pickLatestRelease 会拿到一个对象、
+    // 静默返回「没有可用版本」，用户看到「已是最新」—— 比明确报错更难排查
+    window.fetch = async (u) => {
+      const url = String(u);
+      if (url.indexOf('api/generate') >= 0) {
+        return mkRes(200, JSON.stringify({ __proxyError: '转发失败' }));
+      }
+      throw new Error('直连也失败');
+    };
+    window.localStorage.removeItem('photoStudio.updateCheck.v1');
+    const r34c = await window.__PS_API.checkUpdate(true);
+    await sleep(80);
+    t('两条路都失败时如实报错', r34c && r34c.ok === false, r34c);
+    t('不会误报「已是最新」', !(r34c && r34c.ok === true && r34c.hasUpdate === false), r34c);
+
+    // ---- e) proxy 模式不尝试直连；direct 模式不走代理 ----
+    let hit34 = '';
+    window.fetch = async (u) => {
+      const url = String(u);
+      hit34 = url.indexOf('api/generate') >= 0 ? 'proxy' : 'direct';
+      if (url.indexOf('api/generate') >= 0) return mkRes(200, ghBody);
+      return mkRes(200, ghBody);
+    };
+    window.localStorage.removeItem('photoStudio.updateCheck.v1');
+    S.cfg.netMode = 'proxy';
+    await window.__PS_API.checkUpdate(true);
+    await sleep(60);
+    t('proxy 模式走代理', hit34 === 'proxy', hit34);
+    window.localStorage.removeItem('photoStudio.updateCheck.v1');
+    S.cfg.netMode = 'direct';
+    await window.__PS_API.checkUpdate(true);
+    await sleep(60);
+    t('direct 模式走直连', hit34 === 'direct', hit34);
+
+    // 恢复
+    window.fetch = realFetch34;
+    window.localStorage.removeItem('photoStudio.updateCheck.v1');
+    doc.getElementById('upgrade-bar').hidden = true;
+    S.cfg.netMode = 'auto';
+  }
+
   /* ---------- 无 JS 错误 ---------- */
   console.log('\n【15】运行健康度');
   const errs = logs.filter((l) => /JSDOM_ERROR|Uncaught/.test(l));
