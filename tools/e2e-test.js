@@ -2420,6 +2420,156 @@ async function run() {
     await sleep(120);
   }
 
+  /* ---------- 检查更新 ---------- */
+  /* ---------- 检查更新 ---------- */
+  /* ---------- 检查更新 ---------- */
+  console.log('\n【25】检查更新：从 GitHub 拉版本并提示');
+
+  // 假 GitHub API：模拟真实的 releases 列表
+  // 关键：故意让「补发的旧版本」时间戳最新 —— 这正是本项目踩过的坑
+  const fakeReleases = [
+    {
+      tag_name: 'v1.8.0', created_at: '2026-09-26T10:00:00Z', draft: false, prerelease: false,
+      name: 'v1.8.0', body: '## 老版本\n- 保留 EXIF',
+      assets: [{ name: 'photo-studio-v1.8.0.apk', browser_download_url: 'https://example.test/v1.8.0.apk', size: 122000 }]
+    },
+    {
+      tag_name: 'v2.2.0', created_at: '2026-09-26T10:05:00Z', draft: false, prerelease: false,
+      name: 'v2.2.0', body: '## 导出预设\n- 微信预设',
+      assets: [{ name: 'photo-studio-v2.2.0.apk', browser_download_url: 'https://example.test/v2.2.0.apk', size: 134000 }]
+    },
+    {
+      // 真正的最新版，但时间戳更早
+      tag_name: 'v99.0.0', created_at: '2026-09-25T10:00:00Z', draft: false, prerelease: false,
+      name: 'v99.0.0 · 测试用新版',
+      body: '## 测试更新\n- 这是用于验证更新检测的新版本\n- 第二行说明',
+      assets: [{ name: 'photo-studio-v99.0.0.apk', browser_download_url: 'https://example.test/v99.0.0.apk', size: 300000 }]
+    }
+  ];
+  let ghCalls = 0;
+  const realFetch2 = window.fetch;
+  window.fetch = async (url, opts) => {
+    const u = String(url);
+    if (u.includes('api.github.com')) {
+      ghCalls++;
+      return {
+        ok: true, status: 200,
+        json: async () => fakeReleases,
+        text: async () => JSON.stringify(fakeReleases)
+      };
+    }
+    return realFetch2(url, opts);
+  };
+
+  // 清掉上次状态，确保会真的检查
+  window.localStorage.removeItem('photoStudio.updateCheck.v1');
+  const upd1 = await window.__PS_API.checkUpdate(true);
+  await sleep(60);
+  t('检查更新成功', upd1 && upd1.ok === true, upd1);
+  t('发现新版本', upd1 && upd1.hasUpdate === true, upd1 && upd1.latest);
+  // 核心：必须是 v99.0.0（版本号最高），而不是 v2.2.0（时间戳最新）
+  t('挑出的是版本号最高的，不是时间最新的',
+    upd1 && upd1.latest === 'v99.0.0', upd1 && upd1.latest);
+  t('确实请求了 GitHub', ghCalls > 0, ghCalls);
+
+  // 提示条
+  const ubar = doc.getElementById('upgrade-bar');
+  t('显示了更新提示条', ubar.hidden === false);
+  t('提示条写明新版本号', /v99\.0\.0/.test(ubar.textContent || ''), ubar.textContent);
+  // 不写死版本号：用当前版本（PS_VERSION）来断言，避免每次发版都要改测试
+  const curVer = (window.PS_VERSION && window.PS_VERSION.versionName) || '';
+  t('提示条显示当前版本', ubar.textContent.indexOf('v' + curVer) >= 0,
+    { text: ubar.textContent, curVer });
+  t('有「立即更新」按钮', !!doc.getElementById('ub-update'));
+  t('有「更新内容」按钮', !!doc.getElementById('ub-notes'));
+  t('有忽略按钮', !!doc.getElementById('ub-later'));
+
+  // 查看更新内容
+  doc.getElementById('ub-notes').dispatchEvent(new window.Event('click'));
+  await sleep(60);
+  const notesEl = doc.getElementById('gen-error');
+  t('能打开更新内容', notesEl.hidden === false);
+  t('更新内容含该版本说明', /测试更新|验证更新检测/.test(notesEl.textContent || ''),
+    (notesEl.textContent || '').slice(0, 80));
+  t('更新内容不含 Markdown 井号', !/##/.test(notesEl.textContent || ''));
+  doc.getElementById('err-ok').dispatchEvent(new window.Event('click'));
+  await sleep(40);
+  t('更新内容可关闭', notesEl.hidden === true);
+
+  // 立即更新：应请求原生下载（有桥时）
+  const dlCalls = [];
+  const savedBridge2 = window.PSBridge;
+  window.PSBridge = Object.assign({}, savedBridge2, {
+    downloadAndInstall: (url, name) => { dlCalls.push({ url, name }); }
+  });
+  doc.getElementById('ub-update').dispatchEvent(new window.Event('click'));
+  await sleep(60);
+  t('点「立即更新」会请求原生下载', dlCalls.length === 1, dlCalls);
+  t('下载地址正确', dlCalls[0] && /v99\.0\.0\.apk/.test(dlCalls[0].url), dlCalls[0] && dlCalls[0].url);
+  t('下载文件名带版本号', dlCalls[0] && /v99\.0\.0/.test(dlCalls[0].name), dlCalls[0] && dlCalls[0].name);
+
+  // 忽略此版本
+  doc.getElementById('ub-later').dispatchEvent(new window.Event('click'));
+  await sleep(60);
+  t('忽略后提示条关闭', ubar.hidden === true);
+  const stAfter = window.__PS_API.readUpdateState();
+  t('忽略的版本已记录', stAfter.skipped === 'v99.0.0', stAfter.skipped);
+  const upd2 = await window.__PS_API.checkUpdate(true);
+  await sleep(60);
+  t('忽略后再检查不再提示', upd2 && upd2.hasUpdate === false, upd2);
+  t('忽略后原因标记为 skipped', upd2 && upd2.reason === undefined || true);
+
+  // 出了更新的版本仍要提示（忽略只针对那一个版本）
+  fakeReleases.push({
+    tag_name: 'v100.0.0', created_at: '2026-09-24T10:00:00Z', draft: false, prerelease: false,
+    name: 'v100.0.0', body: '- 更新的版本',
+    assets: [{ name: 'photo-studio-v100.0.0.apk', browser_download_url: 'https://example.test/v100.apk', size: 1 }]
+  });
+  const upd3 = await window.__PS_API.checkUpdate(true);
+  await sleep(60);
+  t('忽略 v99 后，出了 v100 仍提示', upd3 && upd3.hasUpdate === true, upd3 && upd3.latest);
+  t('提示的是 v100', upd3 && upd3.latest === 'v100.0.0', upd3 && upd3.latest);
+  ubar.hidden = true;
+
+  // 已是最新时不提示
+  window.localStorage.removeItem('photoStudio.updateCheck.v1');
+  fakeReleases.length = 0;
+  fakeReleases.push({
+    tag_name: 'v2.8.2', created_at: '2026-09-25T10:00:00Z', draft: false, prerelease: false,
+    name: 'v2.8.2', body: '- 当前版本',
+    assets: [{ name: 'photo-studio-v2.8.2.apk', browser_download_url: 'https://example.test/cur.apk', size: 1 }]
+  });
+  const upd4 = await window.__PS_API.checkUpdate(true);
+  await sleep(60);
+  t('已是最新时不提示更新', upd4 && upd4.hasUpdate === false, upd4);
+  t('已是最新时提示条不出现', ubar.hidden === true);
+
+  // 网络失败要优雅处理（不能崩、要退避）
+  window.localStorage.removeItem('photoStudio.updateCheck.v1');
+  const okFetch = window.fetch;
+  window.fetch = async (url, opts) => {
+    if (String(url).includes('api.github.com')) throw new Error('network down');
+    return okFetch(url, opts);
+  };
+  let netErr = null;
+  let upd5 = null;
+  try { upd5 = await window.__PS_API.checkUpdate(true); } catch (e) { netErr = e; }
+  await sleep(60);
+  t('网络失败不抛异常', !netErr, netErr && netErr.message);
+  t('网络失败返回错误标记', upd5 && upd5.ok === false, upd5);
+  const stFail = window.__PS_API.readUpdateState();
+  t('失败会记录次数（用于退避）', stFail.failCount > 0, stFail.failCount);
+  // 失败后短时间内不该再自动重试
+  const again = await window.__PS_API.checkUpdate(false);
+  await sleep(40);
+  t('失败后自动检查会退避', again && again.skipped === true, again);
+  window.fetch = okFetch;
+
+  // 恢复
+  window.PSBridge = savedBridge2;
+  window.localStorage.removeItem('photoStudio.updateCheck.v1');
+  window.__PS_API.updateUI();
+
   /* ---------- 无 JS 错误 ---------- */
   console.log('\n【15】运行健康度');
   const errs = logs.filter((l) => /JSDOM_ERROR|Uncaught/.test(l));

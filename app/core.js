@@ -2502,6 +2502,145 @@
     return list.map((p) => 'ps-' + String(p));
   }
 
+  /* ====================== 7.01h 检查更新 ====================== */
+
+  /**
+   * 解析版本号成可比较的数字数组。
+   *
+   * 支持 `v2.8.2` / `2.8.2` / `2.8` 这几种写法（tag 常带 v 前缀）。
+   * 非数字后缀（如 `2.8.2-beta.1`）会被忽略 —— 本项目的版本号都是纯数字，
+   * 但接口返回的 tag 可能被人为加过后缀，不能因此崩掉。
+   *
+   * @returns {number[]} 形如 [2,8,2]；无法解析时返回 []
+   */
+  function parseVersion(str) {
+    const s = String(str == null ? '' : str).trim().replace(/^v/i, '');
+    if (!s) return [];
+    // 只取开头的数字段（遇到非数字就停）
+    const m = /^(\d+(?:\.\d+)*)/.exec(s);
+    if (!m) return [];
+    return m[1].split('.').map((x) => parseInt(x, 10)).filter((n) => Number.isFinite(n));
+  }
+
+  /**
+   * 比较两个版本号。
+   * @returns {number} a > b 返回 1，a < b 返回 -1，相等返回 0
+   */
+  function compareVersion(a, b) {
+    const pa = parseVersion(a), pb = parseVersion(b);
+    // 解析失败时退化成字符串比较（至少不会误判成「有更新」）
+    if (!pa.length || !pb.length) {
+      const sa = String(a == null ? '' : a), sb = String(b == null ? '' : b);
+      return sa === sb ? 0 : (sa > sb ? 1 : -1);
+    }
+    const n = Math.max(pa.length, pb.length);
+    for (let i = 0; i < n; i++) {
+      const x = pa[i] || 0, y = pb[i] || 0;
+      if (x !== y) return x > y ? 1 : -1;
+    }
+    return 0;
+  }
+
+  /**
+   * 从 GitHub releases 列表里挑出**真正的最新版**。
+   *
+   * 关键：不能用 `/releases/latest` 接口！
+   *   那个接口按「创建时间」判定最新，而不是按版本号。
+   *   一旦事后补发旧版本的 Release（本项目就发生过：补齐 v1.8.0~v2.2.0 时
+   *   它们的时间戳变成最新），`/releases/latest` 就会返回一个旧版本，
+   *   用户会被提示「更新」到一个更老的版本上。
+   *
+   * 所以这里自己拉列表、按版本号排序、取最高。
+   * 同时排除 draft 与 prerelease。
+   *
+   * @param {Array} releases GitHub API 返回的 release 数组
+   * @returns {object|null} 最高版本；列表为空或都不可用时返回 null
+   */
+  function pickLatestRelease(releases) {
+    const list = (releases || []).filter((r) =>
+      r && !r.draft && !r.prerelease && parseVersion(r.tag_name).length);
+    if (!list.length) return null;
+    let best = null;
+    for (const r of list) {
+      if (!best || compareVersion(r.tag_name, best.tag_name) > 0) best = r;
+    }
+    return best;
+  }
+
+  /**
+   * 判断是否需要提示更新。
+   *
+   * 只做「有新版本」的判断，不做自动下载 —— 装不装由用户决定。
+   *
+   * @param {object} o { current, latest, skipped, dismissed }
+   *        current   当前版本（如 '2.8.2'）
+   *        latest    远程最新版本（如 'v2.9.0'）
+   *        skipped   用户点过「忽略此版本」的版本号
+   * @returns {{hasUpdate:boolean, latest:string, reason:string}}
+   */
+  function planUpdate(o) {
+    const opt = o || {};
+    const cur = String(opt.current || '');
+    const lat = String(opt.latest || '');
+    if (!lat) return { hasUpdate: false, latest: '', reason: 'no-remote' };
+    if (!cur) return { hasUpdate: false, latest: lat, reason: 'no-current' };
+
+    const cmp = compareVersion(lat, cur);
+    if (cmp <= 0) return { hasUpdate: false, latest: lat, reason: 'up-to-date' };
+
+    // 用户明确忽略过这个版本就不再打扰。
+    // 注意：只忽略「那一个版本」，出了更新的版本还要提示 ——
+    // 否则用户忽略一次就永远收不到更新了。
+    if (opt.skipped && compareVersion(opt.skipped, lat) === 0) {
+      return { hasUpdate: false, latest: lat, reason: 'skipped' };
+    }
+    return { hasUpdate: true, latest: lat, reason: 'newer' };
+  }
+
+  /**
+   * 从 release 的附件里挑出 APK 下载地址。
+   *
+   * 优先选名字里带版本号的（本项目发布时用的 `photo-studio-vX.Y.Z.apk`），
+   * 其次任意 .apk。找不到返回空串 —— 调用方据此提示「请到网页下载」。
+   */
+  function pickApkAsset(release) {
+    const assets = (release && release.assets) || [];
+    const apks = assets.filter((a) => a && typeof a.name === 'string' &&
+      /\.apk$/i.test(a.name) && a.browser_download_url);
+    if (!apks.length) return null;
+    const ver = release && release.tag_name ? String(release.tag_name).replace(/^v/i, '') : '';
+    const exact = apks.find((a) => ver && a.name.indexOf(ver) >= 0);
+    return exact || apks[0];
+  }
+
+  /**
+   * 检查更新的触发时机规划。
+   *
+   * 不该每次启动都请求 GitHub（浪费流量、也可能被限流）。
+   * 策略：
+   *   - 距离上次检查不足 `intervalMs` 且用户没手动点 → 跳过
+   *   - 用户手动点「检查更新」→ 总是请求
+   *   - 失败后要退避（避免网络不通时反复重试）
+   *
+   * @param {object} o { now, lastCheck, force, failCount, intervalMs }
+   * @returns {{should:boolean, reason:string, waitMs:number}}
+   */
+  function planUpdateCheck(o) {
+    const opt = o || {};
+    const now = num(opt.now, Date.now());
+    const last = num(opt.lastCheck, 0);
+    const interval = Math.max(60000, num(opt.intervalMs, 12 * 60 * 60 * 1000));  // 默认 12 小时
+    if (opt.force) return { should: true, reason: 'manual', waitMs: 0 };
+    if (!last) return { should: true, reason: 'first', waitMs: 0 };
+
+    // 连续失败时指数退避（最多 4 倍间隔），避免网络不通时反复打扰
+    const fails = Math.max(0, Math.min(4, Math.round(num(opt.failCount, 0))));
+    const eff = interval * Math.pow(2, fails);
+    const elapsed = now - last;
+    if (elapsed >= eff) return { should: true, reason: 'due', waitMs: 0 };
+    return { should: false, reason: 'too-soon', waitMs: eff - elapsed };
+  }
+
   /* ====================== 7.01g 对比视图手势 ====================== */
 
   /**
@@ -3973,6 +4112,8 @@
     planCompat, compatClassNames,
     // 对比视图手势
     planCompareDrag, planCompareDoubleTap, describeCompareZoom, placeCompareSplit,
+    // 检查更新
+    parseVersion, compareVersion, pickLatestRelease, planUpdate, pickApkAsset, planUpdateCheck,
     // 无缝融合（模型输出对齐原图）
     ringMoments, rectMoments, fitLightPlane, planFusion, fuseColor,
     describeEnvironment, environmentClause,

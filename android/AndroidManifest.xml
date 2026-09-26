@@ -19,6 +19,11 @@
     <!-- 申请「忽略电池优化」。各家 OEM 的后台限制不一样，这是唯一通用的申请入口 -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- 应用内更新：下载新版本 APK 后调起系统安装器。
+         Android 8.0+ 需要这条权限才能安装「来自本应用」的 APK，
+         否则系统会直接拒绝（用户看不到任何提示，只是装不上）。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
     <application

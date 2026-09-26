@@ -1113,5 +1113,170 @@ t('estimateCalls', C.estimateCalls({x:0,y:0,w:3000,h:3000},{maxSide:1400,overlap
 
 
 /* ---------- 环境契合提示词 ---------- */
+// ===== 检查更新（测试块） =====
+(() => {
+  // 1) 版本号解析
+  t('解析 v2.8.2', JSON.stringify(C.parseVersion('v2.8.2')) === '[2,8,2]');
+  t('解析不带 v 的', JSON.stringify(C.parseVersion('2.8.2')) === '[2,8,2]');
+  t('解析两段版本号', JSON.stringify(C.parseVersion('2.8')) === '[2,8]');
+  t('忽略后缀（2.8.2-beta.1）', JSON.stringify(C.parseVersion('2.8.2-beta.1')) === '[2,8,2]');
+  t('空值返回空数组', C.parseVersion('').length === 0 && C.parseVersion(null).length === 0);
+  t('纯文字返回空数组', C.parseVersion('abc').length === 0);
+
+  // 2) 版本比较 —— 关键：不能按字符串比（"2.10" < "2.9" 是错的）
+  t('2.8.2 > 2.8.1', C.compareVersion('2.8.2', '2.8.1') === 1);
+  t('2.8.1 < 2.8.2', C.compareVersion('2.8.1', '2.8.2') === -1);
+  t('相同版本为 0', C.compareVersion('2.8.2', '2.8.2') === 0);
+  t('带 v 与不带 v 等价', C.compareVersion('v2.8.2', '2.8.2') === 0);
+  // 这条最容易错：字符串比较会得出 "2.10.0" < "2.9.0"
+  t('2.10.0 > 2.9.0（数字比较而非字符串）', C.compareVersion('2.10.0', '2.9.0') === 1);
+  t('2.9.0 < 2.10.0', C.compareVersion('2.9.0', '2.10.0') === -1);
+  t('段数不同也能比（2.8 == 2.8.0）', C.compareVersion('2.8', '2.8.0') === 0);
+  t('主版本优先', C.compareVersion('3.0.0', '2.99.99') === 1);
+  t('无法解析时退化成字符串比较（不崩）',
+    typeof C.compareVersion('abc', 'def') === 'number');
+
+  // 3) 挑最新版 —— 这是本功能最容易踩的坑
+  //    /releases/latest 按「创建时间」判定，本项目补发旧版后它返回了 v2.2.0
+  const mkRel = (tag, created, extra) => Object.assign({
+    tag_name: tag, created_at: created, draft: false, prerelease: false,
+    name: tag, body: 'notes ' + tag,
+    assets: [{ name: 'photo-studio-' + tag + '.apk', browser_download_url: 'https://x/' + tag + '.apk', size: 100 }]
+  }, extra || {});
+
+  const realWorld = [
+    // 真实情况：补发的旧版本时间戳更新，但版本号低
+    mkRel('v1.8.0', '2026-09-26T10:00:00Z'),
+    mkRel('v2.2.0', '2026-09-26T10:05:00Z'),
+    mkRel('v2.8.2', '2026-09-25T10:00:00Z'),   // 时间更早，但版本最高
+    mkRel('v2.4.0', '2026-09-25T12:00:00Z')
+  ];
+  const best = C.pickLatestRelease(realWorld);
+  t('按版本号挑最新（不受时间戳影响）', best.tag_name === 'v2.8.2', best.tag_name);
+  // 对照：如果按时间排序会选错
+  const byTime = realWorld.slice().sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+  t('确认「按时间挑」会选错（说明必须按版本号）', byTime.tag_name === 'v2.2.0', byTime.tag_name);
+
+  // 4) 排除 draft 与 prerelease
+  const withDraft = realWorld.concat([mkRel('v9.9.9', '2026-09-27T00:00:00Z', { draft: true })]);
+  t('排除 draft', C.pickLatestRelease(withDraft).tag_name === 'v2.8.2');
+  const withPre = realWorld.concat([mkRel('v9.9.9', '2026-09-27T00:00:00Z', { prerelease: true })]);
+  t('排除 prerelease', C.pickLatestRelease(withPre).tag_name === 'v2.8.2');
+
+  // 5) 边界
+  t('空列表返回 null', C.pickLatestRelease([]) === null);
+  t('null 返回 null', C.pickLatestRelease(null) === null);
+  t('全部是 draft 时返回 null',
+    C.pickLatestRelease([mkRel('v1.0.0', 'x', { draft: true })]) === null);
+  t('tag 无法解析的条目被跳过',
+    C.pickLatestRelease([mkRel('nightly', 'x'), mkRel('v2.0.0', 'y')]).tag_name === 'v2.0.0');
+
+  // 6) 是否需要提示更新
+  t('有更新时提示', C.planUpdate({ current: '2.8.2', latest: 'v2.9.0' }).hasUpdate === true);
+  t('已是最新时不提示', C.planUpdate({ current: '2.8.2', latest: 'v2.8.2' }).hasUpdate === false);
+  t('本地比远程新时不提示（不回退）',
+    C.planUpdate({ current: '2.9.0', latest: 'v2.8.2' }).hasUpdate === false);
+  t('远程为空时不提示', C.planUpdate({ current: '2.8.2', latest: '' }).hasUpdate === false);
+  t('远程为空给出原因', C.planUpdate({ current: '2.8.2', latest: '' }).reason === 'no-remote');
+  t('忽略过的版本不再提示',
+    C.planUpdate({ current: '2.8.2', latest: 'v2.9.0', skipped: 'v2.9.0' }).hasUpdate === false);
+  t('忽略后原因标记为 skipped',
+    C.planUpdate({ current: '2.8.2', latest: 'v2.9.0', skipped: 'v2.9.0' }).reason === 'skipped');
+  // 关键：忽略只针对那一个版本，出了更新的还要提示
+  t('忽略 v2.9.0 后，v2.10.0 仍提示',
+    C.planUpdate({ current: '2.8.2', latest: 'v2.10.0', skipped: 'v2.9.0' }).hasUpdate === true);
+  t('planUpdate 对 null 安全', C.planUpdate(null).hasUpdate === false);
+
+  // 7) 挑 APK 附件
+  const rel = {
+    tag_name: 'v2.8.2',
+    assets: [
+      { name: 'RELEASE-NOTES-v2.8.2.md', browser_download_url: 'https://x/n.md' },
+      { name: 'photo-studio-v2.8.2.apk', browser_download_url: 'https://x/a.apk' }
+    ]
+  };
+  t('挑出 APK 附件', C.pickApkAsset(rel).name === 'photo-studio-v2.8.2.apk');
+  t('忽略非 APK 附件', C.pickApkAsset(rel).name.indexOf('.md') < 0);
+  t('多个 APK 时优先带版本号的',
+    C.pickApkAsset({
+      tag_name: 'v2.8.2',
+      assets: [
+        { name: 'other.apk', browser_download_url: 'https://x/o.apk' },
+        { name: 'photo-studio-v2.8.2.apk', browser_download_url: 'https://x/a.apk' }
+      ]
+    }).name === 'photo-studio-v2.8.2.apk');
+  t('没有 APK 时返回 null',
+    C.pickApkAsset({ tag_name: 'v1.0.0', assets: [{ name: 'a.zip', browser_download_url: 'u' }] }) === null);
+  t('pickApkAsset 对 null 安全', C.pickApkAsset(null) === null);
+
+  // 8) 检查时机（不该每次启动都请求）
+  const H = 3600 * 1000;
+  t('首次检查会执行', C.planUpdateCheck({ now: 1000, lastCheck: 0 }).should === true);
+  t('刚检查过则跳过',
+    C.planUpdateCheck({ now: 1000, lastCheck: 999 }).should === false);
+  t('超过间隔会执行',
+    C.planUpdateCheck({ now: 13 * H, lastCheck: 0 }).should === true);
+  t('未到间隔不执行',
+    C.planUpdateCheck({ now: 6 * H, lastCheck: 1 }).should === false);
+  t('手动检查总是执行（忽略间隔）',
+    C.planUpdateCheck({ now: 1000, lastCheck: 999, force: true }).should === true);
+  t('手动检查标记原因为 manual',
+    C.planUpdateCheck({ now: 1000, lastCheck: 999, force: true }).reason === 'manual');
+  // 失败退避：网络不通时不该反复重试
+  t('失败后退避（等待时间变长）',
+    C.planUpdateCheck({ now: 13 * H, lastCheck: 1, failCount: 2 }).should === false);
+  // 退避上限：间隔 12h × 2^4 = 192h（fails 被夹到 4），所以 200h 后必须执行
+  t('退避有上限（不会无限增长）',
+    C.planUpdateCheck({ now: 200 * H, lastCheck: 1, failCount: 99 }).should === true);
+  t('退避不会超过 192 小时（12h × 2^4）',
+    C.planUpdateCheck({ now: 191 * H, lastCheck: 1, failCount: 99 }).should === false);
+  t('返回剩余等待时间',
+    C.planUpdateCheck({ now: 1000, lastCheck: 999 }).waitMs > 0);
+  t('planUpdateCheck 对 null 安全', typeof C.planUpdateCheck(null).should === 'boolean');
+
+  // 9) 接线检查
+  const fs6 = require('fs');
+  const appSrc6 = fs6.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html6 = fs6.readFileSync(__dirname + '/../app/index.html', 'utf8');
+  const act6 = fs6.readFileSync(__dirname + '/../android/src/com/photostudio/app/MainActivity.java', 'utf8');
+  const mf6 = fs6.readFileSync(__dirname + '/../android/AndroidManifest.xml', 'utf8');
+
+  // 根因：不能用 /releases/latest（按创建时间判定，补发旧版后会返回错的）
+  // 注释里提到它是**对的**（说明为什么不用），所以要先去掉注释再查
+  const codeOnly = appSrc6.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  t('代码里没有使用 /releases/latest（注释里说明不算）',
+    !/releases\/latest/.test(codeOnly));
+  t('拉取完整 releases 列表', /releases\?per_page=100/.test(appSrc6));
+  t('用 pickLatestRelease 挑最新', /pickLatestRelease\(/.test(appSrc6));
+
+  t('启动时静默检查（延迟执行）',
+    /setTimeout\(\(\) => \{ checkUpdate\(false\)/.test(appSrc6));
+  t('静默检查失败不打扰用户', /checkUpdate\(false\)\.catch/.test(appSrc6));
+  t('设置里有手动检查', /id="btn-checkupdate"/.test(html6));
+  t('设置里有自动检查开关', /id="set-autocheck"/.test(html6));
+  t('自动检查默认开启', /autoCheckUpdate: true,/.test(appSrc6));
+  t('自动检查开关会持久化', /'autoCheckUpdate'/.test(appSrc6));
+  t('显示上次检查时间与远程版本', /上次检查/.test(appSrc6));
+
+  t('更新提示条有「立即更新」', /id="ub-update"/.test(appSrc6));
+  t('更新提示条有「更新内容」', /id="ub-notes"/.test(appSrc6));
+  t('更新提示条可忽略此版本', /id="ub-later"/.test(appSrc6));
+  t('忽略只影响该版本（注释说明）', /只忽略「这一个版本」/.test(appSrc6));
+
+  // 安卓侧：下载 + 安装
+  t('安卓壳提供下载安装接口', /downloadAndInstall/.test(act6));
+  t('用系统下载管理器', /DownloadManager/.test(act6));
+  t('下载完成会调起安装器', /installDownloadedApk/.test(act6));
+  t('处理「安装未知应用」授权', /checkInstallPermission/.test(act6));
+  t('授权后继续安装（不丢下载结果）', /pendingInstallPath/.test(act6));
+  t('Manifest 声明了安装权限', /REQUEST_INSTALL_PACKAGES/.test(mf6));
+  t('下载完注销广播（防泄漏）', /unregisterDownloadReceiver/.test(act6));
+  t('onDestroy 里清理广播', /onDestroy[\s\S]{0,600}unregisterDownloadReceiver/.test(act6));
+  t('浏览器里退化成打开下载地址', /openExternal\(apk\.browser_download_url\)/.test(appSrc6));
+})();
+// ===== 检查更新块结束 =====
+
+
+/* ---------- 检查更新 ---------- */
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

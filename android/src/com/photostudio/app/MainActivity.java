@@ -6,14 +6,21 @@ import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.DialogInterface;
+import android.app.DownloadManager;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.PowerManager;
 import android.provider.Settings;
+import android.util.Log;
 import android.view.KeyEvent;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -43,6 +50,8 @@ import android.widget.Toast;
  */
 public class MainActivity extends Activity {
 
+    private static final String TAG = "PhotoStudio";
+
     private WebView web;
     private LocalServer server;
     private ValueCallback<Uri[]> fileCallback;
@@ -54,6 +63,14 @@ public class MainActivity extends Activity {
     private boolean keepAliveRunning = false;
     /** 当前这次保活是不是「生成中」触发的（用于判断能否自动停） */
     private boolean keepAliveByGen = false;
+
+    /** 应用内更新的下载 id（0 = 没有进行中的下载） */
+    private long updateDownloadId = 0;
+    /** 下载完成广播接收器（下载结束后调起安装器） */
+    private BroadcastReceiver downloadDoneReceiver = null;
+    /** 等待安装权限时暂存的文件路径 */
+    private String pendingInstallPath = null;
+    private static final int REQ_INSTALL = 1003;
     /** 用户是否开了「一直保活」 */
     private boolean alwaysOn = false;
     private String lastKeepText = "";
@@ -214,6 +231,16 @@ public class MainActivity extends Activity {
                 fileCallback.onReceiveValue(result);
                 fileCallback = null;
             }
+        } else if (requestCode == REQ_INSTALL) {
+            // 用户从「安装未知应用」授权页回来了：拿到权限就继续安装
+            if (checkInstallPermission() && pendingInstallPath != null) {
+                String p = pendingInstallPath;
+                pendingInstallPath = null;
+                doInstall(p);
+            } else if (!checkInstallPermission()) {
+                pendingInstallPath = null;
+                toastOnUi("未获得安装权限，可到「下载」目录手动安装");
+            }
         } else {
             super.onActivityResult(requestCode, resultCode, data);
         }
@@ -236,6 +263,7 @@ public class MainActivity extends Activity {
             KeepAliveService.stop(this);
             keepAliveRunning = false;
         }
+        unregisterDownloadReceiver();   // 避免广播接收器泄漏
         if (server != null) server.stop();
         if (web != null) {
             web.loadUrl("about:blank");
@@ -386,6 +414,168 @@ public class MainActivity extends Activity {
         }
     }
 
+    /* ==================== 应用内更新 ==================== */
+
+    /**
+     * 是否已获得「安装未知应用」授权。
+     *
+     * Android 8.0 起，应用要安装 APK 必须由用户显式授权，
+     * 否则系统会静默拒绝（用户看不到任何提示，只是装不上）。
+     * 8.0 以下没有这个概念，直接视为已授权。
+     */
+    private boolean checkInstallPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return true;
+        try {
+            return getPackageManager().canRequestPackageInstalls();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 跳到系统的「安装未知应用」授权页 */
+    private void ensureInstallPermission() {
+        if (checkInstallPermission()) return;
+        try {
+            Intent i = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES);
+            i.setData(Uri.parse("package:" + getPackageName()));
+            startActivityForResult(i, REQ_INSTALL);
+        } catch (Exception e) {
+            // 个别定制系统没有这个页面，退到应用详情页
+            try {
+                Intent i2 = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                i2.setData(Uri.parse("package:" + getPackageName()));
+                startActivityForResult(i2, REQ_INSTALL);
+            } catch (Exception e2) {
+                toastOnUi("请到系统设置里允许「安装未知应用」");
+            }
+        }
+    }
+
+    /**
+     * 用系统下载管理器下载 APK，完成后自动调起安装器。
+     *
+     * 用 DownloadManager 而不是自己开线程下载：系统会处理断点续传、
+     * 通知栏进度、以及「下载完成后点击安装」的标准交互。
+     */
+    private void startDownload(String url, String fileName) {
+        if (url == null || !(url.startsWith("http://") || url.startsWith("https://"))) {
+            toastOnUi("下载地址无效");
+            return;
+        }
+        String name = (fileName == null || fileName.isEmpty()) ? "update.apk" : fileName;
+
+        try {
+            DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+            if (dm == null) { toastOnUi("系统下载服务不可用"); return; }
+
+            DownloadManager.Request req = new DownloadManager.Request(Uri.parse(url));
+            req.setTitle("修图台更新");
+            req.setDescription("正在下载 " + name);
+            req.setMimeType("application/vnd.android.package-archive");
+            // 下载到外部下载目录，方便用户也能在文件管理器里找到
+            req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name);
+            req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                // Android 10 起这条被忽略（分区存储），低版本上仍需要
+                try { req.allowScanningByMediaScanner(); } catch (Exception ignored) { }
+            }
+
+            updateDownloadId = dm.enqueue(req);
+            registerDownloadReceiver();
+            toastOnUi("开始下载，完成后会自动弹出安装");
+        } catch (Exception e) {
+            Log.w(TAG, "下载失败", e);
+            toastOnUi("下载失败，请稍后在浏览器中下载");
+        }
+    }
+
+    /** 监听下载完成（只注册一次，用完注销） */
+    private void registerDownloadReceiver() {
+        if (downloadDoneReceiver != null) return;
+        downloadDoneReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context ctx, Intent intent) {
+                try {
+                    long id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1);
+                    if (id != updateDownloadId) return;
+                    installDownloadedApk();
+                } catch (Exception e) {
+                    Log.w(TAG, "处理下载完成失败", e);
+                } finally {
+                    unregisterDownloadReceiver();
+                }
+            }
+        };
+        try {
+            IntentFilter f = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(downloadDoneReceiver, f, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(downloadDoneReceiver, f);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "注册下载广播失败", e);
+            downloadDoneReceiver = null;
+        }
+    }
+
+    private void unregisterDownloadReceiver() {
+        if (downloadDoneReceiver == null) return;
+        try { unregisterReceiver(downloadDoneReceiver); } catch (Exception ignored) { }
+        downloadDoneReceiver = null;
+    }
+
+    /** 下载完成 → 调起系统安装器 */
+    private void installDownloadedApk() {
+        String path = null;
+        try {
+            DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+            if (dm != null) {
+                Cursor c = dm.query(new DownloadManager.Query().setFilterById(updateDownloadId));
+                if (c != null) {
+                    if (c.moveToFirst()) {
+                        int idx = c.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI);
+                        if (idx >= 0) path = c.getString(idx);
+                    }
+                    c.close();
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "查询下载结果失败", e);
+        }
+
+        if (path == null || path.isEmpty()) {
+            toastOnUi("下载已完成，请到「下载」目录手动安装");
+            return;
+        }
+
+        // 没有安装权限时先申请，授权回来后接着装
+        if (!checkInstallPermission()) {
+            pendingInstallPath = path;
+            toastOnUi("请允许「安装未知应用」，然后会继续安装");
+            ensureInstallPermission();
+            return;
+        }
+        doInstall(path);
+    }
+
+    /** 真正调起安装界面 */
+    private void doInstall(String pathOrUri) {
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW);
+            Uri uri = pathOrUri.startsWith("content:") || pathOrUri.startsWith("file:")
+                    ? Uri.parse(pathOrUri)
+                    : Uri.fromFile(new java.io.File(pathOrUri));
+            i.setDataAndType(uri, "application/vnd.android.package-archive");
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(i);
+        } catch (Exception e) {
+            Log.w(TAG, "调起安装失败", e);
+            toastOnUi("无法自动安装，请到「下载」目录手动点击安装包");
+        }
+    }
+
     /* ==================== JS 桥 ==================== */
 
     /**
@@ -477,6 +667,41 @@ public class MainActivity extends Activity {
             } catch (Exception e) {
                 return "{}";
             }
+        }
+
+        /**
+         * 下载新版本 APK 并调起系统安装器。
+         *
+         * 为什么交给原生做（而不是让页面下载）：
+         *   · WebView 里下载的文件拿不到可安装的路径
+         *   · Android 8+ 需要「安装未知应用」授权，必须在原生侧申请
+         *   · 下载完要弹系统安装界面，也只有原生能做
+         */
+        @JavascriptInterface
+        public void downloadAndInstall(final String url, final String fileName) {
+            runOnUiThread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        startDownload(url, fileName);
+                    } catch (Exception e) {
+                        toastOnUi("下载失败：" + e.getMessage());
+                    }
+                }
+            });
+        }
+
+        /** 当前是否已获得「安装未知应用」授权 */
+        @JavascriptInterface
+        public boolean canInstallPackages() {
+            return checkInstallPermission();
+        }
+
+        /** 主动申请「安装未知应用」授权 */
+        @JavascriptInterface
+        public void requestInstallPermission() {
+            runOnUiThread(new Runnable() {
+                @Override public void run() { ensureInstallPermission(); }
+            });
         }
     }
 }

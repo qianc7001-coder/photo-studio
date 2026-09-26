@@ -57,6 +57,7 @@
     // 后台保活是否可用（Android 壳里才有 PSBridge）
     keepAliveSupported: false,
     keepAliveState: null, // { on, reason, note }
+    updateRelease: null,  // 检测到的新版本（release 对象）
 
     // 待确认的生成结果
     pending: null,
@@ -113,6 +114,8 @@
     // 环境契合提示词：把测出来的周围特征（亮度/冷暖/反差/光向）写进每次请求，
     // 让模型有可对照的目标。与像素级融合互补：提示词让模型尽量做对，融合兜底。
     envFit: true,
+    // 自动检查更新：从 GitHub 拉取最新版本号（每 12 小时最多一次）
+    autoCheckUpdate: true,
     fusionCenter: 0.35,        // 中心区域保留多少校正（0 = 中心完全不干预）
     fusionGrain: 0.6,          // 颗粒补偿强度（模型输出比真照片平滑）
     keepAliveAlways: false,    // 一直保活（长时间连续修图时有用，代价是常驻通知）
@@ -148,7 +151,7 @@
     'priceOverride', 'usdCny',
     'historyBudgetMB', 'autoSaveSession',
     'keepAlive', 'keepAliveAlways',
-    'fusion', 'fusionCenter', 'fusionGrain', 'envFit'
+    'fusion', 'fusionCenter', 'fusionGrain', 'envFit', 'autoCheckUpdate'
   ];
 
   /**
@@ -260,6 +263,21 @@
     try { localStorage.setItem(LS_KEY_VER, APP_VERSION); } catch (e) { /* ignore */ }
   }
 
+  /** 刷新设置里的「检查更新」状态文案 */
+  function refreshUpdateStateText(override) {
+    const el = $('update-state');
+    if (!el) return;
+    if (override) { el.textContent = override; return; }
+    const st = readUpdateState();
+    if (!st.lastCheck) { el.textContent = '从 GitHub 获取最新版本'; return; }
+    const d = new Date(st.lastCheck);
+    const p = (n) => String(n).padStart(2, '0');
+    const when = p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+    el.textContent = st.latest
+      ? '上次检查 ' + when + ' · 远程最新 ' + st.latest
+      : '上次检查 ' + when;
+  }
+
   /** 展示本次更新内容 */
   function showChangelog() {
     const el = $('gen-error');
@@ -277,6 +295,226 @@
     el.style.borderColor = 'rgba(77,163,255,.4)';
     const c = $('err-close'); if (c) c.onclick = () => { el.hidden = true; el.style.borderColor = ''; };
     const k = $('err-ok'); if (k) k.onclick = () => { el.hidden = true; el.style.borderColor = ''; };
+  }
+
+  /* ============================ 检查更新 ============================ */
+
+  /**
+   * GitHub 仓库地址与 API 端点。
+   *
+   * 注意：**不能用 `/releases/latest`** —— 那个接口按「创建时间」判定最新，
+   * 而我们事后补发过旧版本的 Release（补齐 v1.8.0~v2.2.0 时它们的时间戳
+   * 变成了最新），导致它返回 v2.2.0。所以这里拉完整列表，按版本号自己挑。
+   */
+  const GH_OWNER_REPO = 'qianc7001-coder/photo-studio';
+  const GH_RELEASES_API = 'https://api.github.com/repos/' + GH_OWNER_REPO + '/releases?per_page=100';
+  const GH_RELEASES_PAGE = 'https://github.com/' + GH_OWNER_REPO + '/releases';
+  const LS_KEY_UPDATE = 'photoStudio.updateCheck.v1';
+
+  /** 读取更新检查状态（上次检查时间、失败次数、忽略的版本） */
+  function readUpdateState() {
+    try {
+      const raw = localStorage.getItem(LS_KEY_UPDATE);
+      if (!raw) return { lastCheck: 0, failCount: 0, skipped: '', latest: '', notes: '' };
+      const j = JSON.parse(raw);
+      return {
+        lastCheck: Number(j.lastCheck) || 0,
+        failCount: Number(j.failCount) || 0,
+        skipped: typeof j.skipped === 'string' ? j.skipped : '',
+        latest: typeof j.latest === 'string' ? j.latest : '',
+        notes: typeof j.notes === 'string' ? j.notes : ''
+      };
+    } catch (e) {
+      return { lastCheck: 0, failCount: 0, skipped: '', latest: '', notes: '' };
+    }
+  }
+
+  function writeUpdateState(st) {
+    try { localStorage.setItem(LS_KEY_UPDATE, JSON.stringify(st)); } catch (e) { /* ignore */ }
+  }
+
+  /**
+   * 请求 GitHub 拉取版本列表。
+   *
+   * 走本地代理（同源，无跨域问题）；浏览器直开时 GitHub API 本身允许跨域
+   * （`access-control-allow-origin: *`），所以直接 fetch 也能用。
+   */
+  async function fetchReleases() {
+    if (location.protocol !== 'file:' && S.cfg.netMode !== 'direct') {
+      const r = await fetch('api/generate', {
+        method: 'POST',
+        headers: {
+          'X-Target-Url': GH_RELEASES_API,
+          'X-Target-Content-Type': 'application/json'
+        },
+        body: '{}'
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return await r.json();
+    }
+    const r = await fetch(GH_RELEASES_API, { headers: { Accept: 'application/vnd.github+json' } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return await r.json();
+  }
+
+  /**
+   * 检查更新。
+   * @param {boolean} force 用户手动点「检查更新」时为 true（忽略时间间隔）
+   */
+  async function checkUpdate(force) {
+    const st = readUpdateState();
+    const plan = C.planUpdateCheck({
+      now: Date.now(), lastCheck: st.lastCheck,
+      force: !!force, failCount: st.failCount
+    });
+    if (!plan.should) return { skipped: true, reason: plan.reason };
+
+    let list;
+    try {
+      list = await fetchReleases();
+      st.failCount = 0;                       // 成功就清零退避
+    } catch (e) {
+      st.failCount = Math.min(4, st.failCount + 1);
+      st.lastCheck = Date.now();
+      writeUpdateState(st);
+      if (force) toast('检查更新失败：' + (e && e.message ? e.message : '网络不通'));
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+
+    const best = C.pickLatestRelease(list);
+    st.lastCheck = Date.now();
+    if (!best) {
+      writeUpdateState(st);
+      if (force) toast('没有找到可用的版本信息');
+      return { ok: false, error: 'no-release' };
+    }
+
+    const up = C.planUpdate({
+      current: APP_VERSION, latest: best.tag_name, skipped: st.skipped
+    });
+    st.latest = best.tag_name;
+    st.notes = String(best.body || '').slice(0, 4000);
+    writeUpdateState(st);
+
+    if (force) {
+      if (up.hasUpdate) toast('发现新版本 ' + best.tag_name, 2600);
+      else if (up.reason === 'skipped') toast('已忽略该版本（当前 v' + APP_VERSION + '）', 3000);
+      else toast('已是最新版本 v' + APP_VERSION, 2400);
+    }
+    if (up.hasUpdate) showUpdateBar(best);
+    return { ok: true, hasUpdate: up.hasUpdate, latest: best.tag_name, release: best };
+  }
+
+  /** 显示「有新版本」提示条 */
+  function showUpdateBar(release) {
+    const bar = $('upgrade-bar');
+    if (!bar) return;
+    const apk = C.pickApkAsset(release);
+    const ver = String(release.tag_name || '').replace(/^v/i, '');
+    S.updateRelease = release;
+    bar.innerHTML =
+      '<div class="ub-main">' +
+        '<div class="ub-title">发现新版本 v' + esc(ver) + '</div>' +
+        '<div class="ub-sub">当前 v' + esc(APP_VERSION) +
+          (apk ? ' · 点「立即更新」下载安装包' : ' · 请在浏览器中打开下载页') + '</div>' +
+      '</div>' +
+      (apk ? '<button class="primary small" id="ub-update">立即更新</button>' : '') +
+      '<button class="ghost small" id="ub-notes">更新内容</button>' +
+      '<button class="tb-btn icon" id="ub-later" title="忽略此版本">' +
+        '<svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>' +
+      '</button>';
+    bar.hidden = false;
+    const up = $('ub-update');
+    if (up) up.onclick = () => startUpdate(release);
+    const nt = $('ub-notes');
+    if (nt) nt.onclick = () => showReleaseNotes(release);
+    const lt = $('ub-later');
+    if (lt) lt.onclick = () => {
+      bar.hidden = true;
+      // 只忽略「这一个版本」—— 出了更新版本还要提示，
+      // 否则用户忽略一次就永远收不到更新了
+      const s2 = readUpdateState();
+      s2.skipped = release.tag_name;
+      writeUpdateState(s2);
+      toast('已忽略 v' + ver + '，下次有更新会再提示', 3200);
+    };
+  }
+
+  /** 展示某个 release 的更新内容 */
+  function showReleaseNotes(release) {
+    const el = $('gen-error');
+    if (!el) return;
+    const ver = String(release.tag_name || '').replace(/^v/i, '');
+    // release.body 是 GitHub 的 Markdown，这里做最小处理：按行转列表项
+    const lines = String(release.body || '').split('\n')
+      .map((x) => x.trim())
+      .filter((x) => x && x !== '---' && !/^#{1,6}\s/.test(x))
+      .map((x) => '<li>' + esc(x.replace(/^[-*]\s*/, '')) + '</li>')
+      .join('');
+    el.innerHTML =
+      '<div class="err-head">' +
+        '<div class="err-title" style="color:#cfe4ff">修图台 v' + esc(ver) + ' 更新内容</div>' +
+        '<button class="tb-btn icon err-close" id="err-close">' +
+          '<svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>' +
+        '</button>' +
+      '</div>' +
+      '<ul class="whatsnew">' + (lines || '<li>（该版本没有填写更新说明）</li>') + '</ul>' +
+      '<div class="err-actions">' +
+        '<button class="ghost small" id="err-page">在浏览器打开</button>' +
+        '<button class="primary small" id="err-ok">知道了</button>' +
+      '</div>';
+    el.hidden = false;
+    el.style.borderColor = 'rgba(77,163,255,.4)';
+    const close = () => { el.hidden = true; el.style.borderColor = ''; };
+    const c = $('err-close'); if (c) c.onclick = close;
+    const k = $('err-ok'); if (k) k.onclick = close;
+    const pg = $('err-page');
+    if (pg) pg.onclick = () => { openExternal(GH_RELEASES_PAGE); close(); };
+  }
+
+  /**
+   * 用系统浏览器打开外链。
+   *
+   * 安卓壳里 WebView 会拦截 http(s) 跳转交给系统浏览器；
+   * 浏览器里点一个 target=_blank 的链接即可。
+   */
+  function openExternal(url) {
+    try {
+      const a = document.createElement('a');
+      a.href = url;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { try { a.remove(); } catch (e) { /* ignore */ } }, 0);
+    } catch (e) {
+      try { window.open(url, '_blank'); } catch (e2) { /* ignore */ }
+    }
+  }
+
+  /**
+   * 下载并安装新版本。
+   *
+   * 安卓壳里交给原生下载（能申请「安装未知应用」权限、能调起安装器）；
+   * 浏览器里退化成打开下载地址，由浏览器自己处理。
+   */
+  async function startUpdate(release) {
+    const apk = C.pickApkAsset(release);
+    const ver = String(release.tag_name || '').replace(/^v/i, '');
+    if (!apk) { openExternal(GH_RELEASES_PAGE); return; }
+
+    const b = bridge();
+    if (b && b.downloadAndInstall) {
+      toast('正在下载 v' + ver + '…', 4000);
+      try {
+        b.downloadAndInstall(apk.browser_download_url, '修图台-v' + ver + '.apk');
+      } catch (e) {
+        openExternal(apk.browser_download_url);
+      }
+      return;
+    }
+    openExternal(apk.browser_download_url);
+    toast('已开始下载，完成后请手动安装', 3600);
   }
 
   /* ============================ 提示 ============================ */
@@ -3442,6 +3680,8 @@
     $('set-fusionc').value = Math.round((S.cfg.fusionCenter != null ? S.cfg.fusionCenter : 0.35) * 100);
     $('set-fusiong').value = Math.round((S.cfg.fusionGrain != null ? S.cfg.fusionGrain : 0.6) * 100);
     $('set-envfit').checked = S.cfg.envFit !== false;
+    $('set-autocheck').checked = S.cfg.autoCheckUpdate !== false;
+    refreshUpdateStateText();
     $('set-maxres').value = String(S.cfg.maxRes);
     $('set-tile').value = S.cfg.tile;
     $('set-lang').value = S.cfg.lang;
@@ -3931,6 +4171,13 @@
     });
     // 环境契合提示词：只影响下一次请求，不需要重绘
     bindField('set-envfit', 'envFit', (el) => el.checked);
+    // 检查更新
+    bindField('set-autocheck', 'autoCheckUpdate', (el) => el.checked);
+    const cu = $('btn-checkupdate');
+    if (cu) cu.onclick = () => {
+      refreshUpdateStateText('检查中…');
+      checkUpdate(true).then(() => refreshUpdateStateText());
+    };
     bindField('set-tile', 'tile', (el) => Number(el.value));
     bindField('set-lang', 'lang');
     bindField('set-seed', 'seed');
@@ -4483,6 +4730,11 @@
     const av = $('about-version');
     if (av) av.textContent = 'v' + APP_VERSION + '（' + ((window.PS_VERSION && window.PS_VERSION.versionCode) || '?') + '）';
     checkUpgrade();
+    // 静默检查更新：延迟 3 秒再发（不跟启动时的其它请求抢带宽），
+    // 失败也不打扰用户 —— 只有手动检查时才报错
+    if (S.cfg.autoCheckUpdate !== false) {
+      setTimeout(() => { checkUpdate(false).catch(() => { /* 静默 */ }); }, 3000);
+    }
     // 检查是否有上次未完成的编辑（Android 后台回收很常见）
     if (S.cfg.autoSaveSession !== false) offerSessionRestore();
 
@@ -4550,6 +4802,15 @@
     notifyGenDone,
     applyCompat,
     compat: () => S.compat,
+    // 检查更新（供测试与外部调用）
+    checkUpdate,
+    showUpdateBar,
+    showReleaseNotes,
+    startUpdate,
+    readUpdateState,
+    writeUpdateState,
+    fetchReleases,
+    openExternal,
     // 对比视图（供测试与外部调用）
     compareView: () => cmpView,
     compareSplit: () => cmpSplit,
