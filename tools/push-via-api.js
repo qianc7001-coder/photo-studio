@@ -7,17 +7,22 @@
  *   网络不通时 git push 会失败，而 REST API 仍然能推。
  *
  * 做法（Git Data API）：
- *   1. 读远程分支当前 commit
- *   2. `git diff 远程..本地` 算出改动文件
- *   3. 逐个建 blob → 建 tree → 建 commit → 更新分支引用
+ *   1. 读远程分支当前 commit，拉它的 tree
+ *   2. **逐文件比对内容**（远程 blob sha vs 本地 blob sha），算出还差哪些
+ *   3. 建 blob → 建 tree → 建 commit → 更新分支引用
+ *   4. 再比一次复核，确认真的推上去了
  *
- * 关键点：必须比对**提交**而不是工作区 —— 本地已经 commit 过、工作区是干净的，
- * 只看工作区会误判为「无需推送」。
+ * 为什么比对内容而不是 `git diff <基准> HEAD`：
+ *   基准点一旦记错（某次推送中途失败、但同步点已前进），就会漏推文件，
+ *   而且脚本会**报成功**。这个坑真实踩过：更新功能的提交没推上去，
+ *   后续推送只补了几个工具文件，远程 app.js 一直是旧版。
+ *   直接比内容则无论中间失败多少次都能收敛到一致。
  *
  * 安全约定：
  *   - Token 只从环境变量 GH_TOKEN 读取，绝不写入文件
- *   - 日志不打印 Token
- *   - 只推送 git 已跟踪的改动，密钥与构建产物天然被排除
+ *   - body 走 stdin（不放命令行参数：有长度上限，且失败时 argv 含 token
+ *     会被 Node 挂到错误对象上，一旦打印就泄漏）
+ *   - 自己捕获 curl 异常并脱敏，只报「哪一步失败」
  *
  * 用法：
  *   GH_TOKEN=xxx node tools/push-via-api.js              # 推送本地 HEAD 到远程
@@ -51,11 +56,10 @@ const git = (args) => execFileSync('git', args, {
  *
  * 两个必须注意的点：
  *   1. **body 走 stdin**（`--data-binary @-`），不放命令行参数 ——
- *      app.js 有 190KB，塞进 argv 会超出限制直接失败。
+ *      app.js 有 190KB，塞进 argv 会超限直接失败。
  *   2. **绝不把 argv 打进日志**：argv 里含 Authorization 头。
  *      Node 的 execFileSync 失败时会把整个 args 数组挂在错误对象上，
  *      一旦被 console 打出来 token 就泄漏了（真实踩过）。
- *      所以这里自己捕获异常，只输出脱敏后的信息。
  */
 function api(method, url, body) {
   const a = ['-s', '-X', method,
@@ -65,65 +69,47 @@ function api(method, url, body) {
     a.push('-H', 'Content-Type: application/json', '--data-binary', '@-');
   }
   a.push(url);
-  let out = '';
+  const opts = { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 };
+  if (body !== undefined) opts.input = JSON.stringify(body);
+  let out;
   try {
-    out = execFileSync('curl', a, {
-      encoding: 'utf8',
-      maxBuffer: 64 * 1024 * 1024,
-      input: body === undefined ? undefined : JSON.stringify(body)
-    });
+    out = execFileSync('curl', a, opts);
   } catch (e) {
-    // 只报「哪一步失败」，不报 argv（含 token）
     return { __error: 'curl 调用失败（' + method + ' ' + safeUrl(url) + '）' };
   }
   try { return JSON.parse(out); } catch (e) { return { __raw: out }; }
 }
 
-/** 去掉 URL 里的查询串，避免日志里出现无意义的噪声（也便于比对） */
+/** 去掉查询串，避免日志噪声 */
 function safeUrl(u) {
   const i = String(u).indexOf('?');
   return i > 0 ? String(u).slice(0, i) + '?…' : String(u);
 }
 
 /**
- * 列出「要推送的改动文件」。
- *
- * 基准点的选择很关键：
- *   远程的 commit 可能是通过 API 建的（不在本地对象库里），
- *   直接 `git diff <远程sha> HEAD` 会报 "bad object"。
- *   所以优先用本地记录的上次同步点（.git/ps-last-push），
- *   没有就退回远程 sha，再不行就用「相对 HEAD~1」。
+ * 比对远程 tree 与本地 HEAD，列出内容不一致的文件。
  * 用 -z 输出以 NUL 分隔，避免中文文件名被转义成八进制（踩过的坑）。
  */
-function diffBase(remoteSha) {
-  const marker = path.join(ROOT, '.git', 'ps-last-push');
-  try {
-    const saved = fs.readFileSync(marker, 'utf8').trim();
-    if (saved) {
-      try { git(['cat-file', '-e', saved + '^{commit}']); return saved; } catch (e) { /* 本地没有 */ }
-    }
-  } catch (e) { /* 首次推送 */ }
-  try { git(['cat-file', '-e', remoteSha + '^{commit}']); return remoteSha; } catch (e) { /* 不在本地 */ }
-  try { return git(['rev-parse', 'HEAD~1']).trim(); } catch (e) { return null; }
-}
+function changedFiles(remoteTree) {
+  const remote = new Map();
+  for (const t of (remoteTree && remoteTree.tree) || []) {
+    if (t.type === 'blob') remote.set(t.path, t.sha);
+  }
 
-/** 记下这次同步到哪，供下次 diff 用 */
-function saveSyncPoint(sha) {
-  try { fs.writeFileSync(path.join(ROOT, '.git', 'ps-last-push'), sha + '\n'); } catch (e) { /* 忽略 */ }
-}
-
-function changedFiles(base) {
-  if (!base) return [];
-  const out = git(['diff', '--name-status', '-z', base, 'HEAD']);
-  const parts = out.split('\0').filter((x) => x !== '');
+  const out = git(['ls-tree', '-r', '-z', 'HEAD']);
   const files = [];
-  for (let i = 0; i < parts.length; i++) {
-    const st = parts[i];
-    if (!/^[A-Z]/.test(st)) continue;         // 状态码行（A/M/D/R…）
-    const file = parts[i + 1];
-    if (file === undefined) continue;
-    i++;
-    files.push({ file, deleted: st === 'D' });
+  const localSet = new Set();
+  for (const line of out.split('\0')) {
+    if (!line) continue;
+    const m = /^\d+ blob ([0-9a-f]+)\t(.*)$/.exec(line);
+    if (!m) continue;
+    const sha = m[1], file = m[2];
+    localSet.add(file);
+    if (remote.get(file) !== sha) files.push({ file, deleted: false });
+  }
+  // 远程有、本地没有 → 需要删除（保持一致）
+  for (const p of remote.keys()) {
+    if (!localSet.has(p)) files.push({ file: p, deleted: true });
   }
   return files;
 }
@@ -145,24 +131,35 @@ function main() {
   // 1) 远程分支当前 commit
   const ref = api('GET', `${API}/repos/${REPO}/git/ref/heads/${BRANCH}`);
   if (!ref || !ref.object) {
-    console.error('✗ 读不到分支引用：' + ((ref && (ref.message || ref.__raw)) || '未知'));
+    console.error('✗ 读不到分支引用：' +
+      ((ref && (ref.message || ref.__error || ref.__raw)) || '未知'));
     process.exit(1);
   }
   const remoteSha = ref.object.sha;
 
-  // 2) 算出要推送的改动（基准点见 diffBase 的说明）
-  const base = diffBase(remoteSha);
-  const files = changedFiles(base);
+  // 2) 拉远程 tree，逐文件比对内容
+  const remoteCommit = api('GET', `${API}/repos/${REPO}/git/commits/${remoteSha}`);
+  if (!remoteCommit || !remoteCommit.tree) {
+    console.error('✗ 读不到远程 tree');
+    process.exit(1);
+  }
+  const remoteTree = api('GET', `${API}/repos/${REPO}/git/trees/${remoteCommit.tree.sha}?recursive=1`);
+  if (!remoteTree || !remoteTree.tree) {
+    console.error('✗ 拉取远程 tree 失败：' +
+      ((remoteTree && (remoteTree.message || remoteTree.__error)) || '未知'));
+    process.exit(1);
+  }
+
+  const files = changedFiles(remoteTree);
   if (!files.length) {
-    console.log('本地与远程一致，无需推送（远程 ' + remoteSha.slice(0, 7) + '）');
+    console.log('本地与远程内容一致，无需推送（远程 ' + remoteSha.slice(0, 7) + '）');
     return;
   }
-  console.log(`基准 ${base ? base.slice(0, 7) : '(无)'} → 本地 HEAD，改动 ${files.length} 个文件：`);
-  for (const f of files) console.log('  ' + (f.deleted ? '删除 ' : '修改 ') + f.file);
+  console.log(`远程 ${remoteSha.slice(0, 7)} → 本地 HEAD，有 ${files.length} 个文件内容不一致：`);
+  for (const f of files) console.log('  ' + (f.deleted ? '删除 ' : '更新 ') + f.file);
   if (DRY) { console.log('\n[预览] 未实际推送'); return; }
 
-  const head = api('GET', `${API}/repos/${REPO}/git/commits/${remoteSha}`);
-  const baseTree = head.tree.sha;
+  const baseTree = remoteCommit.tree.sha;
 
   // 3) 逐个建 blob
   const tree = [];
@@ -180,7 +177,8 @@ function main() {
       encoding: bin ? 'base64' : 'utf-8'
     });
     if (!blob || !blob.sha) {
-      console.error(`✗ 创建 blob 失败（${f.file}）：` + ((blob && (blob.message || blob.__raw)) || '未知'));
+      console.error(`✗ 创建 blob 失败（${f.file}）：` +
+        ((blob && (blob.message || blob.__error || blob.__raw)) || '未知'));
       process.exit(1);
     }
     tree.push({ path: f.file, mode: '100644', type: 'blob', sha: blob.sha });
@@ -190,17 +188,19 @@ function main() {
   // 4) 建 tree（基于远程最新 tree，保证不丢别人的提交）
   const newTree = api('POST', `${API}/repos/${REPO}/git/trees`, { base_tree: baseTree, tree });
   if (!newTree || !newTree.sha) {
-    console.error('✗ 创建 tree 失败：' + ((newTree && (newTree.message || newTree.__raw)) || '未知'));
+    console.error('✗ 创建 tree 失败：' +
+      ((newTree && (newTree.message || newTree.__error)) || '未知'));
     process.exit(1);
   }
 
-  // 5) 建 commit（提交信息用本地 HEAD，保持与 git 历史一致）
+  // 5) 建 commit（提交信息用本地 HEAD，与 git 历史一致）
   const msg = git(['log', '-1', '--pretty=%B']).trim();
   const commit = api('POST', `${API}/repos/${REPO}/git/commits`, {
     message: msg, tree: newTree.sha, parents: [remoteSha]
   });
   if (!commit || !commit.sha) {
-    console.error('✗ 创建 commit 失败：' + ((commit && (commit.message || commit.__raw)) || '未知'));
+    console.error('✗ 创建 commit 失败：' +
+      ((commit && (commit.message || commit.__error)) || '未知'));
     process.exit(1);
   }
 
@@ -209,13 +209,24 @@ function main() {
     sha: commit.sha, force: false
   });
   if (!upd || !upd.object) {
-    console.error('✗ 更新分支失败：' + ((upd && (upd.message || upd.__raw)) || '未知'));
+    console.error('✗ 更新分支失败：' +
+      ((upd && (upd.message || upd.__error)) || '未知'));
     process.exit(1);
   }
-  saveSyncPoint(commit.sha);
+
   console.log('');
   console.log('✓ 已推送 ' + commit.sha.slice(0, 7) + ' → ' + BRANCH);
   console.log('  ' + msg.split('\n')[0]);
+
+  // 7) 复核：再比一次，确认真的推上去了
+  const verifyTree = api('GET', `${API}/repos/${REPO}/git/trees/${newTree.sha}?recursive=1`);
+  const still = changedFiles(verifyTree);
+  if (still.length) {
+    console.error('⚠ 推送后仍有 ' + still.length + ' 个文件不一致：' +
+      still.map((x) => x.file).join(', '));
+    process.exit(1);
+  }
+  console.log('  ✓ 复核通过：远程内容与本地 HEAD 一致');
 }
 
 main();
