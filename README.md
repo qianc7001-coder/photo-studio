@@ -277,6 +277,31 @@ WebView 里用 `file://` 打开页面时，跨域请求会被拦截，而且 `lo
 
 ---
 
+## 历史版本
+
+每个版本的安装包都保留在 [Releases](https://github.com/qianc7001-coder/photo-studio/releases)。
+下载任意版本直接安装，**覆盖安装会保留 API 设置与修图记录**。
+
+| 版本 | 主要变化 |
+|---|---|
+| **v2.8.2** | 设置界面改成手机系统设置风格；加 GitHub 入口 |
+| [v2.8.1](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.8.1) | 每次请求附带「周围环境特征」描述 |
+| [v2.8.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.8.0) | 无缝融合：对齐光照渐变/对比度/颗粒 |
+| [v2.7.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.7.0) | 修复对比图无法双击放大 |
+| [v2.6.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.6.0) | 后台保活；兼容 Android 5.0~14 |
+| [v2.5.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.5.0) | 修图记录（跨天作品库） |
+| [v2.4.1](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.4.1) | 关闭大选区分块（避免接缝重影） |
+| [v2.4.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.4.0) | 修图历史时间线（可预览、可跳回） |
+| [v2.3.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.3.0) | 成本预估；工程规范化 |
+| [v2.2.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.2.0) | 导出预设（微信/小红书/印刷…） |
+| [v2.1.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.1.0) | 统一撤销（所有操作可撤销/重做） |
+| [v2.0.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v2.0.0) | 非破坏性编辑（修改记录面板） |
+| [v1.9.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v1.9.0) | 内存上限；编辑进度自动保存 |
+| [v1.8.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v1.8.0) | 保留 EXIF/ICC；修一批关键缺陷 |
+
+> 版本号规则：`version.json` 是唯一来源，构建时自动写入 APK 与页面。
+> 源码改动但版本号未变时，构建脚本会自动递增，避免两个内容不同的包顶着同一版本号。
+
 ## 授权
 
 MIT License，见 [LICENSE](LICENSE)。

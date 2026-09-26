@@ -1834,5 +1834,96 @@ console.log('\n【提示词】每次请求都要带上「测出来的」周围�
 
 /* ---------- 设置界面（系统设置风格） ---------- */
 
+console.log('\n【发布】历史版本必须可下载（README 与归档一致）');
+
+(() => {
+  const fs = require('fs');
+  const path = require('path');
+  const ROOT = path.join(__dirname, '..');
+  const README = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
+  const PUB = fs.readFileSync(path.join(ROOT, 'tools', 'publish-archive.js'), 'utf8');
+  const ver = JSON.parse(fs.readFileSync(path.join(ROOT, 'version.json'), 'utf8'));
+
+  // 1) README 必须有历史版本章节
+  t('README 有历史版本章节', /^## 历史版本/m.test(README));
+  const i = README.indexOf('## 历史版本');
+  const j = README.indexOf('## 授权', i);
+  t('历史版本章节在授权之前', i > 0 && j > i, { i, j });
+  const sec = README.slice(i, j);
+
+  // 2) 当前版本必须在表格里（最新版单独列，不带链接也可）
+  t('表格含当前版本', sec.indexOf('v' + ver.versionName) >= 0, ver.versionName);
+
+  // 3) 每个带链接的版本都要有对应的 tag 链接，且格式统一
+  const links = sec.match(/releases\/tag\/(v[\d.]+)/g) || [];
+  const tags = links.map((l) => l.split('/').pop());
+  t('历史版本链接数量合理（>= 10）', tags.length >= 10, tags.length);
+  // 不能有重复
+  t('历史版本链接不重复', new Set(tags).size === tags.length, tags.length);
+  // 版本号格式必须规范（vX.Y.Z）
+  t('版本号格式规范', tags.every((t) => /^v\d+\.\d+\.\d+$/.test(t)), tags.filter((t) => !/^v\d+\.\d+\.\d+$/.test(t)));
+  // 必须按版本从新到旧排列（用户最关心最新）
+  const nums = tags.map((t) => t.replace(/^v/, '').split('.').map(Number));
+  let desc = true;
+  for (let k = 1; k < nums.length; k++) {
+    const a = nums[k - 1], b = nums[k];
+    let cmp = 0;
+    for (let m = 0; m < 3; m++) {
+      if (a[m] !== b[m]) { cmp = a[m] - b[m]; break; }
+    }
+    if (cmp < 0) { desc = false; break; }
+  }
+  t('按版本从新到旧排列', desc, tags);
+
+  // 4) 说明覆盖安装会保留设置（用户最关心这个）
+  t('说明覆盖安装会保留设置', /覆盖安装/.test(sec) && /保留/.test(sec), sec.slice(0, 120));
+
+  // 5) 发布脚本：这是保证「以后也不会漏」的关键
+  t('有归档发布脚本', fs.existsSync(path.join(ROOT, 'tools', 'publish-archive.js')));
+  t('脚本支持 dry-run（先预览再执行）', /--dry-run/.test(PUB));
+  t('脚本支持只发指定版本', /only\s*=/.test(PUB));
+  t('脚本是幂等的（已存在则跳过）',
+    /existing\.has\(rel\.tag\)/.test(PUB) && /跳过/.test(PUB));
+  t('脚本按版本号排序（不是字符串排序）',
+    /function byVersion/.test(PUB) && /split\('\.'\)\.map\(Number\)/.test(PUB));
+  t('脚本用 ASCII 附件名（GitHub 对中文名支持不好）',
+    /photo-studio-v\$\{rel\.versionName\}\.apk/.test(PUB));
+  t('脚本不把源码塞进 Release（源码在 git 里）',
+    !/uploadAsset\([^)]*\.js/.test(PUB), '不应上传 .js');
+  t('脚本不会打印 token', !/console\.log\([^)]*TOKEN/.test(PUB));
+
+  // 6) 归档目录：本地留档是发布脚本的输入
+  const ARCHIVE = path.join(ROOT, '..', 'photo-studio-archive');
+  if (fs.existsSync(ARCHIVE)) {
+    const dirs = fs.readdirSync(ARCHIVE).filter((d) => /^v\d/.test(d));
+    t('本地归档存在', dirs.length > 0, dirs.length);
+    // 每个归档都要有 version.json 和 APK —— 缺了就没法补发
+    const bad = [];
+    for (const d of dirs) {
+      const dir = path.join(ARCHIVE, d);
+      const hasVer = fs.existsSync(path.join(dir, 'version.json'));
+      const hasApk = fs.readdirSync(dir).some((f) => f.endsWith('.apk'));
+      if (!hasVer || !hasApk) bad.push(d + (!hasVer ? '(缺version.json)' : '') + (!hasApk ? '(缺APK)' : ''));
+    }
+    t('每个归档都含 version.json 与 APK', bad.length === 0, bad);
+    // 归档里绝不能有签名密钥（复制归档时最容易带进去）
+    const leaked = dirs.filter((d) => fs.existsSync(path.join(ARCHIVE, d, 'android', 'keystore.jks')));
+    t('归档里没有签名密钥', leaked.length === 0, leaked);
+    // 双向一致：README 列的版本都要有归档；归档里的版本也都要在 README 里列出
+    // （只查单向的话，「README 漏写一个历史版本」这种问题查不出来）
+    const archVers = dirs.map((d) => d.replace(/^v/, ''));
+    const missingArch = tags.map((t) => t.replace(/^v/, '')).filter((v) => archVers.indexOf(v) < 0);
+    t('README 列的版本都有本地归档', missingArch.length === 0, missingArch);
+    // 当前版本单独成行（不带链接），所以比对时要把它也算上
+    const listed = tags.map((t) => t.replace(/^v/, '')).concat([ver.versionName]);
+    const missingDoc = archVers.filter((v) => listed.indexOf(v) < 0);
+    t('归档里的每个版本都写进了 README', missingDoc.length === 0, missingDoc);
+  } else {
+    t('本地归档存在（本次跳过：不在开发机）', true);
+  }
+})();
+
+
+/* ---------- 历史版本保留 ---------- */
 console.log(`\n合计 ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
