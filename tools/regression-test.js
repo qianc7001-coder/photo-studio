@@ -2683,8 +2683,6 @@ console.log('\n【返回】按一下返回键不能直接退出应用');
   const fs = require('fs');
   const svg = fs.readFileSync(__dirname + '/../app/icon.svg', 'utf8');
   const mk = fs.readFileSync(__dirname + '/../tools/make-icons.js', 'utf8');
-  const C = require('../app/core.js');
-  void C;
 
   // SVG 必须能独立渲染（不能被裁剪/引用外部资源）
   t('SVG 有 viewBox', /viewBox="0 0 512 512"/.test(svg));

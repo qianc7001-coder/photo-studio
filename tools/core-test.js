@@ -2320,13 +2320,11 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
 
   /* ---------- 但面向用户的文案里不该再有旧名字 ---------- */
 
-  const userFacing = [html, manifest, strings];
   const oldName = /修图台/;
   // 说明性注释里可以保留（比如「原名修图台」），只看真正会显示出来的部分
   t('页面标题里没有旧名字', !oldName.test((/<title>([^<]*)<\/title>/.exec(html) || [])[1] || ''));
   t('安卓应用名里没有旧名字', !oldName.test((/<string name="app_name">([^<]*)<\/string>/.exec(strings) || [])[1] || ''));
   t('PWA 名字里没有旧名字', !oldName.test((/"name":\s*"([^"]*)"/.exec(manifest) || [])[1] || ''));
-  void userFacing;
 
   /* ---------- 启动脚本也跟着改名 ---------- */
   t('启动脚本已改名', fs9.existsSync(__dirname + '/../启动枫叶修图.sh'));
