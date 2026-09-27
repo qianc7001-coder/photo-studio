@@ -83,9 +83,9 @@ function main() {
   // 找 APK 与版本说明
   const dist = path.join(ROOT, 'dist');
   const files = fs.existsSync(dist) ? fs.readdirSync(dist) : [];
-  const apkName = files.find((f) => f === `修图台-v${ver}.apk`) || files.find((f) => f.endsWith('.apk'));
+  const apkName = files.find((f) => f === `枫叶修图-v${ver}.apk`) || files.find((f) => f.endsWith('.apk'));
   const apk = apkName ? path.join(dist, apkName) : null;
-  const notesPath = '/sdcard/Download/修图台-版本说明.md';
+  const notesPath = '/sdcard/Download/枫叶修图-版本说明.md';
   const notes = fs.existsSync(notesPath) ? notesPath : null;
 
   console.log(`版本：v${ver}（versionCode ${vj.versionCode}）`);
@@ -102,7 +102,7 @@ function main() {
   }
 
   // 建 release，并**显式声明它是 latest**
-  const body = ['## 修图台 v' + ver, '']
+  const body = ['## 枫叶修图 v' + ver, '']
     .concat(vj.changelog.map((c) => '- ' + c)).join('\n');
   const r = api('POST', `${API}/repos/${REPO}/releases`, {
     tag_name: tag,

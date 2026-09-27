@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# 修图台 · APK 构建脚本（全部使用本机可执行的 arm64 工具）
+# 枫叶修图 · APK 构建脚本（全部使用本机可执行的 arm64 工具）
 #   aapt(1) 打包资源 + javac 编译 + d8 转 dex + zipalign 对齐 + apksigner 签名
 # =============================================================================
 set -euo pipefail
@@ -95,8 +95,8 @@ mkdir -p "$ROOT/dist"
 # 注意：apksigner 是 Java 程序，非 ASCII 输出名会按平台默认字符集写坏，
 # 因此先签成 ASCII 名，再用 node（保证 UTF-8）改名成中文。
 APK_TMP="$OUT/photostudio-signed.apk"
-APK="$ROOT/dist/修图台-v$VERSION_NAME.apk"
-APK_LATEST="$ROOT/dist/修图台.apk"
+APK="$ROOT/dist/枫叶修图-v$VERSION_NAME.apk"
+APK_LATEST="$ROOT/dist/枫叶修图.apk"
 APKSIGNER sign \
   --ks "$KS" --ks-key-alias photostudio \
   --ks-pass pass:photostudio --key-pass pass:photostudio \

@@ -1,6 +1,6 @@
 {
-  "name": "修图台 · Photo Studio",
-  "short_name": "修图台",
+  "name": "枫叶修图 · Photo Studio",
+  "short_name": "枫叶修图",
   "description": "框选照片任意位置，交给生图模型修改，结果自动贴回原处",
   "start_url": "./index.html",
   "scope": "./",

@@ -1123,7 +1123,9 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('返回层级表存在', Array.isArray(C.BACK_LAYERS) && C.BACK_LAYERS.length >= 8, C.BACK_LAYERS.length);
   // 顺序必须与 z-index 一致：后开的浮层压在上面，返回时先关它。
   // 顺序错了会出现「关掉了看不见的那个面板」这种怪事。
-  t('作品预览在最前（z-index 最高）', C.BACK_LAYERS[0].id === 'workPreview', C.BACK_LAYERS[0].id);
+  // 顶栏「更多」下拉是 z-index 最高的一层（必须盖住所有面板，否则点不到）
+  t('更多菜单在最前（z-index 最高）', C.BACK_LAYERS[0].id === 'moremenu', C.BACK_LAYERS[0].id);
+  t('作品预览次之', C.BACK_LAYERS[1].id === 'workPreview', C.BACK_LAYERS[1].id);
   t('层级表按 z-index 降序',
     C.BACK_LAYERS.every((L, i) => i === 0 || C.BACK_LAYERS[i - 1].z >= L.z),
     C.BACK_LAYERS.map((L) => L.id + ':' + L.z));
@@ -1915,7 +1917,9 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('顶栏有照片信息按钮', /id="btn-photoinfo"/.test(html7));
   t('有照片信息面板', /id="photoinfo"/.test(html7));
   t('没照片时按钮禁用', /piBtn\.disabled = !S\.img;/.test(appSrc7));
-  t('按钮绑定打开面板', /\$\('btn-photoinfo'\)\.onclick = openPhotoInfo;/.test(appSrc7));
+  // 绑定里会先 closeMoreMenu() 再打开面板（点完菜单项菜单要收起来），
+  // 所以只断言「这个按钮最终会调用 openPhotoInfo」
+  t('按钮绑定打开面板', /\$\('btn-photoinfo'\)\.onclick = [^\n]*openPhotoInfo\(\)/.test(appSrc7));
   t('面板可关闭', /#photoinfo \[data-close\]/.test(appSrc7));
   t('用 describePhotoInfo 渲染', /C\.describePhotoInfo\(/.test(appSrc7));
 
@@ -2155,6 +2159,283 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
 })();
 // ===== 检查更新块结束 =====
 
+
+/* ---------- 顶栏溢出修复：低频入口收进「更多」菜单 ---------- */
+// 症状：360px 机型上文件名只剩 8px（等于没有），320px 机型上按钮直接溢出屏幕右边。
+// 原因：顶栏 7 个按钮的最小占宽加起来就 286px，加间距和内边距 352px > 视口宽度，
+//      按钮有 min-width 不能压缩，于是被挤出屏幕。
+// 修法：把「照片信息 / 修图记录 / 设置」三个低频入口收进「更多」下拉。
+(() => {
+  const fs8 = require('fs');
+  const appSrc = fs8.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html = fs8.readFileSync(__dirname + '/../app/index.html', 'utf8');
+  const css = fs8.readFileSync(__dirname + '/../app/style.css', 'utf8');
+
+  /* ---------- 顶栏固定占宽必须在最窄机型上也放得下 ---------- */
+
+  // 视口最窄按 320px 算（小屏 + 大字体缩放后的实际 CSS 宽度）
+  const VIEWPORT = 320;
+  // 从 CSS 里抠出真实数值，避免「改了样式但测试还在验旧数字」
+  // .tb-btn 的 min-width 是「打开」这种带文字的按钮，.tb-btn.icon 是纯图标按钮
+  const barW = (() => {
+    const m = /(^|\n)\.tb-btn\s*\{([\s\S]*?)\}/.exec(css);
+    const mm = m && /min-width:\s*(\d+)px/.exec(m[2]);
+    return mm ? parseInt(mm[1], 10) : null;
+  })();
+  const iconW = (() => {
+    const m = /(^|\n)\.tb-btn\.icon\s*\{([\s\S]*?)\}/.exec(css);
+    const mm = m && /min-width:\s*(\d+)px/.exec(m[2]);
+    return mm ? parseInt(mm[1], 10) : null;
+  })();
+
+  t('CSS 里能读到「打开」按钮宽度', barW !== null, barW);
+  t('CSS 里能读到图标按钮宽度', iconW !== null, iconW);
+  t('图标按钮比文字按钮窄', iconW !== null && barW !== null && iconW < barW, [iconW, barW]);
+
+  // 顶栏里直接可见的按钮（#moremenu 里的不算，它们在浮层里）
+  const barTop = html.slice(html.indexOf('id="topbar"'), html.indexOf('id="moremenu"'));
+  const visibleBtns = (barTop.match(/class="tb-btn/g) || []).length;
+  t('顶栏可见按钮数量已收敛', visibleBtns <= 5, visibleBtns);
+  t('顶栏有 1 个带文字的按钮 + 4 个图标按钮', visibleBtns === 5, visibleBtns);
+
+  if (barW && iconW) {
+    // 打开(46) + 4 个图标按钮(40) = 206，间距 5×6 = 30，左右内边距 8+8 = 16
+    const fixed = barW + (visibleBtns - 1) * iconW + visibleBtns * 6 + 16;
+    t('顶栏固定占宽 < 320px（最窄机型也放得下）', fixed < VIEWPORT, fixed);
+    // 剩下的宽度要够显示一截文件名，否则「文件名可见」这个修复就没意义
+    t('留给文件名的宽度 >= 60px', VIEWPORT - fixed >= 60, VIEWPORT - fixed);
+    // 反证：搬走三个按钮前是放不下的（否则这个修复本身没意义）
+    const before = barW + 6 * iconW + 7 * 6 + 16;
+    t('收进菜单前确实会溢出（说明修复有效）', before > VIEWPORT, before);
+  }
+
+  /* ---------- 三个入口都还在（只是搬进菜单，功能没丢） ---------- */
+
+  t('「更多」按钮存在', /id="btn-more"/.test(html));
+  t('「更多」按钮是顶栏可见按钮',
+    /<button[^>]*class="tb-btn[^"]*"[^>]*id="btn-more"/.test(html));
+  t('「更多」按钮带 aria-expanded（无障碍/测试用）', /id="btn-more"[\s\S]{0,200}aria-expanded/.test(html));
+  t('菜单容器存在且默认收起', /id="moremenu"[^>]*hidden/.test(html));
+  t('菜单有 role=menu', /id="moremenu"[^>]*role="menu"/.test(html));
+
+  for (const [id, label] of [['btn-photoinfo', '照片信息'], ['btn-library', '修图记录'], ['btn-settings', '设置']]) {
+    t(`菜单里有「${label}」`, new RegExp('id="' + id + '"').test(html));
+    // 必须在 moremenu 里，不能在顶栏里 —— 搬回顶栏就等于没修
+    const mi = html.indexOf('id="moremenu"');
+    t(`「${label}」已移出顶栏（在菜单容器内）`, html.indexOf('id="' + id + '"') > mi);
+    t(`「${label}」用 .more-item 排版`, new RegExp('class="more-item"[^>]*id="' + id + '"').test(html)
+      || new RegExp('id="' + id + '"[^>]*class="more-item"').test(html));
+    // 齿轮图标的 path 很长，窗口要开够（1200 字符内必须出现文字标签）
+    t(`「${label}」有可见文字标签`, new RegExp('id="' + id + '"[\\s\\S]{0,1200}?' + label + '</span>').test(html));
+  }
+
+  /* ---------- 交互：点开 / 收起 / 点外面收起 ---------- */
+
+  t('openMoreMenu 已定义', /function openMoreMenu\(\)/.test(appSrc));
+  t('closeMoreMenu 已定义', /function closeMoreMenu\(\)/.test(appSrc));
+  t('toggleMoreMenu 已定义', /function toggleMoreMenu\(\)/.test(appSrc));
+  t('moreMenuOpen 已定义', /function moreMenuOpen\(\)/.test(appSrc));
+  t('开关只改 hidden 属性', /function openMoreMenu\(\)[\s\S]{0,200}m\.hidden = false/.test(appSrc)
+    && /function closeMoreMenu\(\)[\s\S]{0,200}m\.hidden = true/.test(appSrc));
+  t('开关同步 aria-expanded', /aria-expanded', 'true'/.test(appSrc) && /aria-expanded', 'false'/.test(appSrc));
+  t('toggle 依据当前状态取反', /function toggleMoreMenu\(\)[\s\S]{0,160}moreMenuOpen\(\)|function toggleMoreMenu\(\)[\s\S]{0,160}m\.hidden/.test(appSrc));
+  t('「更多」按钮绑定了切换', /\$\('btn-more'\)\.onclick = [^\n]*toggleMoreMenu\(\)/.test(appSrc));
+  t('点按钮不会同时触发「点外面关闭」', /\$\('btn-more'\)\.onclick = [^\n]*stopPropagation\(\)/.test(appSrc));
+
+  // 点菜单项要顺手关菜单，否则面板关了菜单还浮在画布上
+  t('点「设置」后菜单收起', /\$\('btn-settings'\)\.onclick = [^\n]*closeMoreMenu\(\)/.test(appSrc));
+  t('点「照片信息」后菜单收起', /\$\('btn-photoinfo'\)\.onclick = [^\n]*closeMoreMenu\(\)/.test(appSrc));
+  t('点「修图记录」后菜单收起', /\$\('btn-library'\)\.onclick = [^\n]*closeMoreMenu\(\)/.test(appSrc));
+
+  // 点菜单外面任意位置也要关
+  t('点了菜单外面会收起菜单',
+    /document\.addEventListener\('click'[\s\S]{0,400}closeMoreMenu\(\)/.test(appSrc));
+  t('用捕获阶段处理（先于业务点击）',
+    /addEventListener\('click',[\s\S]{0,400}\}, true\)/.test(appSrc));
+  t('点在菜单内部不收起', /m\.contains\(e\.target\)\) return/.test(appSrc));
+  t('点「更多」按钮本身不收起', /b\.contains\(e\.target\)\) return/.test(appSrc));
+  t('菜单没开时不做无谓处理', /if \(!moreMenuOpen\(\)\) return/.test(appSrc));
+
+  /* ---------- 返回键：先关菜单，再关面板 ---------- */
+
+  t('返回时把菜单状态交给 planBackAction', /moremenu: moreMenuOpen\(\),/.test(appSrc));
+  t('返回键能关掉菜单', /case 'moremenu': closeMoreMenu\(\);/.test(appSrc));
+  t('菜单在返回层级表里排第一', C.BACK_LAYERS[0].id === 'moremenu');
+  t('菜单 z-index 高于所有面板',
+    C.BACK_LAYERS.slice(1).every((L) => C.BACK_LAYERS[0].z > L.z),
+    C.BACK_LAYERS.map((L) => L.id + ':' + L.z));
+
+  /* ---------- 样式：不能挡住别的层 ---------- */
+
+  t('菜单是绝对定位（不占顶栏空间）', /#moremenu\s*\{[\s\S]{0,200}position:\s*absolute/.test(css));
+  t('菜单从顶栏底部展开', /#moremenu\s*\{[\s\S]{0,300}top:\s*100%/.test(css));
+  t('菜单右对齐（窄屏不会被裁掉）', /#moremenu\s*\{[\s\S]{0,300}right:\s*calc\(8px \+ var\(--sar\)\)/.test(css));
+  t('菜单 z-index 与层级表一致', /#moremenu\s*\{[\s\S]{0,400}z-index:\s*130/.test(css));
+  t('顶栏是菜单的定位父级', /#topbar\s*\{[\s\S]{0,120}position:\s*relative/.test(css));
+  t('菜单项是横向排列', /\.more-item\s*\{[\s\S]{0,160}display:\s*flex/.test(css));
+  t('禁用态有视觉反馈', /\.more-item:disabled\s*\{[\s\S]{0,80}opacity/.test(css));
+  // 横屏顶栏很矮，菜单往右展开才放得下
+  t('横屏改成右侧弹出', /@media[^{]*orientation:\s*landscape[\s\S]{0,400}#moremenu\s*\{[\s\S]{0,200}left:\s*100%/.test(css));
+
+  /* ---------- 导出给测试/安卓壳 ---------- */
+  t('菜单开关已导出', /openMoreMenu,/.test(appSrc) && /closeMoreMenu,/.test(appSrc));
+})();
+// ===== 顶栏溢出修复块结束 =====
+
+/* ---------- 改名：修图台 → 枫叶修图 ---------- */
+// 硬约束：只改「显示名」。包名 / localStorage 键 / 资源名 / 签名 一律不动 ——
+// 改包名等于装出一个新 App（设置和历史全丢），改 localStorage 键等于把用户数据孤立。
+(() => {
+  const fs9 = require('fs');
+  const appSrc = fs9.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html = fs9.readFileSync(__dirname + '/../app/index.html', 'utf8');
+  const manifest = fs9.readFileSync(__dirname + '/../app/manifest.json', 'utf8');
+  const strings = fs9.readFileSync(__dirname + '/../android/res/values/strings.xml', 'utf8');
+
+  /* ---------- 显示名已改 ---------- */
+
+  t('页面标题是枫叶修图', /<title>[^<]*枫叶修图/.test(html));
+  t('安卓应用名是枫叶修图', /<string name="app_name">枫叶修图<\/string>/.test(strings));
+  t('PWA 名字是枫叶修图', /"name":\s*"[^"]*枫叶修图/.test(manifest));
+  t('PWA 短名是枫叶修图', /"short_name":\s*"[^"]*枫叶修图/.test(manifest));
+
+  /* ---------- 状态相关的标识符一个都没动 ---------- */
+
+  // 包名：改了就是另一个 App，设置、历史、签名全部失效
+  t('包名没改（仍是 com.photostudio.app）',
+    /com\.photostudio\.app/.test(fs9.readFileSync(__dirname + '/../android/src/com/photostudio/app/MainActivity.java', 'utf8'))
+    && /com\.photostudio\.app/.test(fs9.readFileSync(__dirname + '/../android/AndroidManifest.xml', 'utf8')));
+  t('Manifest 里没有出现新包名', !/com\.fengye/.test(fs9.readFileSync(__dirname + '/../android/AndroidManifest.xml', 'utf8')));
+
+  // localStorage 键：改了用户的设置 / 历史 / 会话就全读不到了
+  t('localStorage 前缀仍是 photoStudio.', /photoStudio\./.test(appSrc));
+  t('没有出现新的存储前缀', !/fengye|maple/i.test(appSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')));
+
+  // 通知图标资源名：改名会导致通知栏图标丢失
+  t('通知图标资源名没改',
+    /ic_stat_photostudio/.test(fs9.readFileSync(__dirname + '/../android/src/com/photostudio/app/KeepAliveService.java', 'utf8')));
+
+  // WebView 桥名：改了 JS 调不到原生
+  t('JS 桥名没改（仍是 PSBridge）', /PSBridge/.test(appSrc));
+
+  /* ---------- 但面向用户的文案里不该再有旧名字 ---------- */
+
+  const userFacing = [html, manifest, strings];
+  const oldName = /修图台/;
+  // 说明性注释里可以保留（比如「原名修图台」），只看真正会显示出来的部分
+  t('页面标题里没有旧名字', !oldName.test((/<title>([^<]*)<\/title>/.exec(html) || [])[1] || ''));
+  t('安卓应用名里没有旧名字', !oldName.test((/<string name="app_name">([^<]*)<\/string>/.exec(strings) || [])[1] || ''));
+  t('PWA 名字里没有旧名字', !oldName.test((/"name":\s*"([^"]*)"/.exec(manifest) || [])[1] || ''));
+  void userFacing;
+
+  /* ---------- 启动脚本也跟着改名 ---------- */
+  t('启动脚本已改名', fs9.existsSync(__dirname + '/../启动枫叶修图.sh'));
+  t('旧启动脚本已删除', !fs9.existsSync(__dirname + '/../启动修图台.sh'));
+})();
+// ===== 改名块结束 =====
+
+/* ---------- 枫叶图标 ---------- */
+// 图标是纯 Node 零依赖生成的（构建环境里没有 SVG 光栅化器），
+// 所以叶子几何以「展平后的 42 点多边形」内联在生成器里。
+// 这里校验的是「SVG 和生成器描述的是同一片叶子」——两边不一致就会出现
+// 网页图标和安装后图标长得不一样。
+(() => {
+  const fs10 = require('fs');
+  const svg = fs10.readFileSync(__dirname + '/../app/icon.svg', 'utf8');
+  const mkSrc = fs10.readFileSync(__dirname + '/../tools/make-icons.js', 'utf8');
+  const html = fs10.readFileSync(__dirname + '/../app/index.html', 'utf8');
+  const manifest = fs10.readFileSync(__dirname + '/../app/manifest.json', 'utf8');
+
+  /* ---------- 配色：饱和红底 + 白叶（小尺寸下对比度最高） ---------- */
+
+  const palette = ['#ff7048', '#dc2318', '#8a0d0a'];
+  t('SVG 用饱和红底（枫叶配色）',
+    palette.every((h) => svg.toLowerCase().indexOf(h) >= 0), palette.filter((h) => svg.toLowerCase().indexOf(h) < 0));
+  t('生成器用同一套红底',
+    palette.every((h) => mkSrc.toLowerCase().indexOf(h) >= 0));
+  t('SVG 叶子是白色', /linearGradient id="leaf"/.test(svg) && /#ffffff/.test(svg));
+  t('SVG 用圆角底', /rx="114"/.test(svg));
+  t('SVG 有叶周光晕与顶部高光', /radialGradient/.test(svg) && /id="hl"/.test(svg));
+
+  /* ---------- 叶子形状：SVG 里是贝塞尔路径，生成器里是多边形 ---------- */
+
+  t('SVG 含标准枫叶路径', /M201 232/.test(svg));
+  t('生成器内联了展平后的枫叶多边形', /const LEAF = \[\[/.test(mkSrc));
+
+  const leafArr = /const LEAF = (\[\[[\s\S]*?\]\]);/.exec(mkSrc);
+  t('能解析出叶子多边形', !!leafArr);
+  if (leafArr) {
+    const pts = JSON.parse(leafArr[1].replace(/,\s*\]/g, ']'));
+    t('叶子点数 = 42（展平精度）', pts.length === 42, pts.length);
+    // 顶点必须是归一化坐标（生成器按高度=1 存放，绘制时再乘比例）
+    t('叶子顶点已归一化到 [0,1]',
+      pts.every((p) => p.length === 2 && p[0] >= -1e-6 && p[0] <= 1 + 1e-6 && p[1] >= -1e-6 && p[1] <= 1 + 1e-6));
+    const xs = pts.map((p) => p[0]);
+    const ys = pts.map((p) => p[1]);
+    t('叶子高正好占满 0..1', Math.abs(Math.min(...ys)) < 1e-6 && Math.abs(Math.max(...ys) - 1) < 1e-6,
+      [Math.min(...ys), Math.max(...ys)]);
+    t('叶子宽高比 ≈ 0.916（加拿大枫叶比例）',
+      Math.abs((Math.max(...xs) - Math.min(...xs)) - 0.91613) < 0.001,
+      Math.max(...xs) - Math.min(...xs));
+
+    // 面积/包围盒比值：太低说明画成了一条线，太高说明画成了一个方块
+    const ratio = (() => {
+      let a = 0;
+      for (let i = 0; i < pts.length; i++) {
+        const p = pts[i], q = pts[(i + 1) % pts.length];
+        a += p[0] * q[1] - q[0] * p[1];
+      }
+      return Math.abs(a / 2) / ((Math.max(...xs) - Math.min(...xs)) * (Math.max(...ys) - Math.min(...ys)));
+    })();
+    t('叶子面积占比合理（真叶子约 0.43）', ratio > 0.36 && ratio < 0.50, ratio.toFixed(4));
+
+    // 自交会让扫描线填充出空洞，叶子会看起来「破」了
+    const seg = (i, j) => {
+      const p1 = pts[i], p2 = pts[(i + 1) % pts.length], p3 = pts[j], p4 = pts[(j + 1) % pts.length];
+      const d = (a, b, c) => (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+      const d1 = d(p3, p4, p1), d2 = d(p3, p4, p2), d3 = d(p1, p2, p3), d4 = d(p1, p2, p4);
+      return ((d1 > 0) !== (d2 > 0)) && ((d3 > 0) !== (d4 > 0));
+    };
+    let cross = 0;
+    for (let i = 0; i < pts.length; i++) {
+      for (let j = i + 1; j < pts.length; j++) {
+        if (j === i || (j + 1) % pts.length === i || (i + 1) % pts.length === j) continue;
+        if (seg(i, j)) cross++;
+      }
+    }
+    t('叶子多边形无自交', cross === 0, cross);
+  }
+
+  t('生成器记下了叶子宽高比常量', /const LEAF_AR = 0\.91613/.test(mkSrc));
+
+  /* ---------- SVG 与生成器必须是同一片叶子（尺寸/比例一致） ---------- */
+
+  const sc = /scale\(([\d.]+)\)/.exec(svg);
+  t('能解析出 SVG 里的叶子缩放', !!sc);
+  if (sc) {
+    // 源路径高 279px，缩放后应占画布 512 的 60%
+    t('SVG 叶高 = 画布 60%', Math.abs(279 * parseFloat(sc[1]) - 512 * 0.6) < 2,
+      (279 * parseFloat(sc[1])).toFixed(1));
+  }
+  const arGen = parseFloat((/const LEAF_AR = ([\d.]+)/.exec(mkSrc) || [])[1]);
+  t('SVG 与生成器的叶形宽高比一致', Math.abs(255.6 / 279 - arGen) < 0.001,
+    (255.6 / 279).toFixed(5) + ' vs ' + arGen);
+
+  /* ---------- 叶子在自适应图标安全区内 ---------- */
+
+  // 自适应图标只有中间 66.7% 是保证可见的，叶子超出就会被系统裁掉
+  const leafH = parseFloat((/function adaptiveForeground[\s\S]{0,400}leafH:\s*([\d.]+)/.exec(mkSrc) || [])[1]
+    || (/leafH\s*=\s*([\d.]+)/.exec(mkSrc) || [])[1] || '0');
+  t('自适应图标叶子高度 <= 66.7% 安全区', leafH > 0 && leafH <= 0.667, leafH);
+
+  /* ---------- 图标资源齐备 ---------- */
+
+  t('页面引用了图标', /icon\.svg|icon-192/.test(html));
+  t('PWA 清单引用了 192 图标', /icon-192\.png/.test(manifest));
+  t('PWA 清单引用了 512 图标', /icon-512\.png/.test(manifest));
+  t('清单声明了 maskable/any 用途', /"purpose"/.test(manifest));
+})();
+// ===== 枫叶图标块结束 =====
 
 /* ---------- 检查更新 ---------- */
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -3272,6 +3272,10 @@ async function run() {
     await sleep(60);
 
     // ---- 笔迹随会话保存 ----
+    // 会话保存是防抖的（1.2s），而这里距最后一次编辑只有几百毫秒 ——
+    // 直接读 localStorage 会读到空，是测试的时序问题，不是保存坏了。
+    // 等过防抖窗口再断言（真机上用户不会在这个时间点查存档）。
+    await sleep(1500);
     const sess31 = JSON.parse(window.localStorage.getItem('photoStudio.session.v1') || 'null');
     t('笔迹写进了会话存档', !!(sess31 && sess31.guides && sess31.guides.length === 1),
       sess31 && sess31.guides && sess31.guides.length);
@@ -3934,6 +3938,124 @@ async function run() {
     // 临时破坏一个依赖，验证 handleBack 会放行（返回 false → 系统退出）
     const savedDollar = window.PSCore;
     t('handleBack 始终返回布尔值', typeof window.__PS_API.handleBack() === 'boolean');
+  }
+
+  /* ---------- 顶栏「更多」菜单（窄屏溢出修复） ---------- */
+  console.log('\n【36】顶栏「更多」菜单：低频入口收起来，窄屏不再挤爆');
+  {
+    const menu = doc.getElementById('moremenu');
+    const btnMore = doc.getElementById('btn-more');
+
+    // 先回到编辑页（前面「返回键」那节结束时在首页）
+    t('先确保在编辑页', window.__PS_API.isHomeVisible() === false || (window.__PS_API.goHome(), true));
+
+    // ---- a) 默认收起 ----
+    t('默认是收起的', menu.hidden === true);
+    t('按钮 aria-expanded=false', btnMore.getAttribute('aria-expanded') === 'false');
+    t('初始状态下菜单项点不到（hidden）', menu.hidden === true);
+
+    // ---- b) 点「更多」展开 ----
+    btnMore.dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    t('点一下展开', menu.hidden === false);
+    t('展开后 aria-expanded=true', btnMore.getAttribute('aria-expanded') === 'true');
+    t('展开后能看到「设置」', !!doc.getElementById('btn-settings'));
+
+    // ---- c) 再点一下收起（toggle） ----
+    btnMore.dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    t('再点一下收起', menu.hidden === true);
+    t('收起后 aria-expanded=false', btnMore.getAttribute('aria-expanded') === 'false');
+
+    // ---- d) 点菜单外面收起 ----
+    btnMore.dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    t('重新展开', menu.hidden === false);
+    // 点画布（菜单和按钮之外的区域）
+    doc.getElementById('cv').dispatchEvent(new window.Event('click', { bubbles: true }));
+    await sleep(80);
+    t('点菜单外面会收起', menu.hidden === true);
+
+    // ---- e) 点菜单里的「设置」：面板打开 + 菜单收起 ----
+    btnMore.dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    doc.getElementById('btn-settings').dispatchEvent(new window.Event('click'));
+    await sleep(120);
+    t('点「设置」后设置面板打开', doc.getElementById('settings').hidden === false);
+    t('点「设置」后菜单收起（不会浮在面板上）', menu.hidden === true);
+
+    // ---- f) 返回键：菜单开着时先关菜单，不关面板 ----
+    doc.getElementById('settings').dispatchEvent(new window.Event('click')); // 确保面板开着
+    window.__PS_API.closeSettings ? window.__PS_API.closeSettings() : null;
+    await sleep(60);
+    // 打开设置面板 + 展开菜单，两者同时存在
+    doc.getElementById('btn-library').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    doc.getElementById('btn-settings').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    btnMore.dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    const bothOpen = doc.getElementById('settings').hidden === false && menu.hidden === false;
+    t('设置面板与菜单可以同时存在（构造场景）', bothOpen,
+      [doc.getElementById('settings').hidden, menu.hidden]);
+
+    if (bothOpen) {
+      const handled36 = window.__PS_API.handleBack();
+      await sleep(80);
+      t('返回键先关菜单', menu.hidden === true);
+      t('返回键没顺手关掉设置面板', doc.getElementById('settings').hidden === false);
+      t('这次返回被处理了（没退出应用）', handled36 === true);
+      // 再按一次才关面板
+      const handled36b = window.__PS_API.handleBack();
+      await sleep(80);
+      t('再按一次才关设置面板', doc.getElementById('settings').hidden === true);
+      t('第二次返回也被处理', handled36b === true);
+    } else {
+      t('返回键先关菜单（场景未构造成功，跳过）', true);
+      t('返回键没顺手关掉设置面板（跳过）', true);
+      t('这次返回被处理了（跳过）', true);
+      t('再按一次才关设置面板（跳过）', true);
+      t('第二次返回也被处理（跳过）', true);
+    }
+
+    // 清理：关掉可能还开着的面板
+    if (doc.getElementById('library').hidden === false) {
+      window.__PS_API.handleBack();
+      await sleep(80);
+    }
+    if (menu.hidden === false) { btnMore.dispatchEvent(new window.Event('click')); await sleep(60); }
+
+    // ---- g) 三个入口都还在（只是换了位置） ----
+    t('「照片信息」入口还在', !!doc.getElementById('btn-photoinfo'));
+    t('「修图记录」入口还在', !!doc.getElementById('btn-library'));
+    t('「设置」入口还在', !!doc.getElementById('btn-settings'));
+
+    // ---- h) 没照片时「照片信息」仍禁用 ----
+    const hadImg36 = !!S.img;
+    if (hadImg36) {
+      t('有照片时「照片信息」可点', doc.getElementById('btn-photoinfo').disabled === false);
+    } else {
+      t('没照片时「照片信息」禁用', doc.getElementById('btn-photoinfo').disabled === true);
+    }
+
+    // ---- i) 顶栏里不该再有那三个按钮（它们必须在菜单里） ----
+    const topbar = doc.getElementById('topbar');
+    const inMenu = (el) => menu.contains(el);
+    t('「照片信息」不在顶栏（在菜单里）', inMenu(doc.getElementById('btn-photoinfo')));
+    t('「修图记录」不在顶栏（在菜单里）', inMenu(doc.getElementById('btn-library')));
+    t('「设置」不在顶栏（在菜单里）', inMenu(doc.getElementById('btn-settings')));
+    t('顶栏里只有 5 个可见按钮',
+      topbar.querySelectorAll(':scope > .tb-btn').length === 5,
+      topbar.querySelectorAll(':scope > .tb-btn').length);
+
+    // ---- j) 菜单是浮层：展开时不该把顶栏撑高（否则画布会跳） ----
+    const barHBefore = topbar.getBoundingClientRect().height;
+    btnMore.dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    const barHAfter = topbar.getBoundingClientRect().height;
+    t('展开菜单不改变顶栏高度', Math.abs(barHAfter - barHBefore) < 1,
+      [barHBefore, barHAfter]);
+    if (menu.hidden === false) { btnMore.dispatchEvent(new window.Event('click')); await sleep(60); }
   }
 
 

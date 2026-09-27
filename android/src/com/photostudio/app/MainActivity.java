@@ -38,7 +38,7 @@ import android.widget.FrameLayout;
 import android.widget.Toast;
 
 /**
- * 修图台 · Android 外壳
+ * 枫叶修图 · Android 外壳
  *
  * 架构：内置一个只监听 127.0.0.1 的极简 HTTP 服务（LocalServer），
  * WebView 通过 http://127.0.0.1:PORT 打开页面。
@@ -510,7 +510,7 @@ public class MainActivity extends Activity {
             if (dm == null) { toastOnUi("系统下载服务不可用"); return; }
 
             DownloadManager.Request req = new DownloadManager.Request(Uri.parse(url));
-            req.setTitle("修图台更新");
+            req.setTitle("枫叶修图更新");
             req.setDescription("正在下载 " + name);
             req.setMimeType("application/vnd.android.package-archive");
             // 下载到外部下载目录，方便用户也能在文件管理器里找到

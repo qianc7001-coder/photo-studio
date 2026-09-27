@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /* =============================================================================
- * 修图台 · 本地服务
+ * 枫叶修图 · 本地服务
  *   - 提供静态页面（手机浏览器打开 http://127.0.0.1:8788 即可使用）
  *   - 提供 /api/generate 同源代理：把生图请求转发给服务商，避免浏览器跨域限制
  *   - 提供 /api/health 健康检查
@@ -252,10 +252,10 @@ const server = http.createServer(async (req, res) => {
 
 // 最后一层保险：任何未捕获异常都不应该让服务退出
 process.on('uncaughtException', (e) => {
-  console.error('[修图台] 未捕获异常（已忽略，服务继续运行）：', e && e.message);
+  console.error('[枫叶修图] 未捕获异常（已忽略，服务继续运行）：', e && e.message);
 });
 process.on('unhandledRejection', (e) => {
-  console.error('[修图台] 未处理的 Promise 拒绝（已忽略）：', e && (e.message || e));
+  console.error('[枫叶修图] 未处理的 Promise 拒绝（已忽略）：', e && (e.message || e));
 });
 
 server.listen(PORT, HOST, () => {
@@ -268,7 +268,7 @@ server.listen(PORT, HOST, () => {
   }
   console.log('');
   console.log('  ┌─────────────────────────────────────────────┐');
-  console.log('  │            修图台 · 本地服务已启动            │');
+  console.log('  │            枫叶修图 · 本地服务已启动            │');
   console.log('  └─────────────────────────────────────────────┘');
   console.log('');
   console.log(`   本机访问：  http://127.0.0.1:${PORT}`);

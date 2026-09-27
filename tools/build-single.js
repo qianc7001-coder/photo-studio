@@ -67,7 +67,7 @@ for (let i = 0; i < blocks.length; i++) {
 }
 
 fs.mkdirSync(OUT, { recursive: true });
-const outFile = path.join(OUT, '修图台.html');
+const outFile = path.join(OUT, '枫叶修图.html');
 fs.writeFileSync(outFile, html, 'utf8');
 console.log('✓ 单文件已生成：' + outFile);
 console.log('  体积：' + (Buffer.byteLength(html, 'utf8') / 1024).toFixed(1) + ' KB');

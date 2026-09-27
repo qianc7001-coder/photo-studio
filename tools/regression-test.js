@@ -1433,9 +1433,46 @@ console.log('\n【图标】桌面图标必须清晰可辨（对比度 + 自适�
   t('SVG 图标存在（矢量源）', fs.existsSync(path.join(APP, 'icon.svg')));
   const svg = fs.readFileSync(path.join(APP, 'icon.svg'), 'utf8');
   // SVG 是设计源，必须与 PNG 同一套配色（避免两处各画各的）
-  t('SVG 用亮蓝底（与 PNG 一致）', /#5ab0ff|#2b7fe0|#1a5cbf/i.test(svg), svg.match(/#[0-9a-f]{6}/i));
-  t('SVG 含虚线选区（本应用的核心语义）', /stroke-dasharray/.test(svg));
-  t('SVG 含四角手柄', (svg.match(/<circle/g) || []).length >= 4, (svg.match(/<circle/g) || []).length);
+  // 改名「枫叶修图」后图标重做成枫叶。SVG 是设计源，make-icons.js 是各平台
+  // PNG 的实现 —— 两边必须同色同形，否则网页版和 APK 里会是两个不同的图标
+  // （这正是这条测试原本要防的：mipmap 曾经是手工放的死文件，改 SVG 完全没效果）。
+  const mkSrc = fs.readFileSync(path.join(__dirname, '..', 'tools', 'make-icons.js'), 'utf8');
+  const svgHex = (svg.match(/#[0-9a-fA-F]{6}/g) || []).map((h) => h.toLowerCase());
+  t('SVG 用饱和红底（枫叶配色）',
+    ['#ff7048', '#dc2318', '#8a0d0a'].every((h) => svgHex.includes(h)), svgHex.slice(0, 5));
+  t('SVG 叶子是白色', svgHex.includes('#ffffff'), svgHex.slice(0, 5));
+  t('SVG 有叶周光晕与顶部高光（小尺寸下叶子不糊底）',
+    /radialGradient/.test(svg) && /id="hl"/.test(svg));
+  t('SVG 用圆角底（贴合启动器遮罩）', /rx="114"/.test(svg));
+  // 叶形：SVG 用官方枫叶路径，生成器用它的展平多边形
+  t('SVG 含标准枫叶路径', /M201 232/.test(svg));
+  t('生成器内联了展平后的枫叶多边形', /const LEAF = \[\[/.test(mkSrc));
+  const leafArr = /const LEAF = (\[\[[\s\S]*?\]\]);/.exec(mkSrc);
+  t('生成器的枫叶是 42 点（与真实路径 IoU 0.986）',
+    !!leafArr && JSON.parse(leafArr[1]).length === 42,
+    leafArr ? JSON.parse(leafArr[1]).length : 'missing');
+  // 叶形必须是「宽 < 高」的枫叶比例（0.916），不能是正方形或圆
+  if (leafArr) {
+    const pts = JSON.parse(leafArr[1]);
+    const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+    const w = Math.max(...xs) - Math.min(...xs), h = Math.max(...ys) - Math.min(...ys);
+    t('生成器的叶形宽高比正确（枫叶 0.916）', Math.abs(w / h - 0.9161) < 0.002, +(w / h).toFixed(4));
+    t('生成器的叶形顶点归一化到 [0,1]',
+      Math.min(...xs) === 0 && Math.min(...ys) === 0 && Math.abs(Math.max(...ys) - 1) < 0.002);
+  }
+  // 配色一致性：生成器必须用与 SVG 完全相同的色值
+  t('生成器用同一套红底', ['#ff7048', '#dc2318', '#8a0d0a'].every((h) => mkSrc.includes(h)));
+  t('生成器用同一套叶色', mkSrc.includes('#ffffff') && mkSrc.includes('#fff0dd'));
+  // 叶形缩放一致性：SVG 里 279（原路径叶高）× scale 应等于「画布 60%」，
+  // 也就是生成器 icon() 里的 leafH —— 两边叶高不一致会让 PNG 和 SVG 大小对不上
+  const sc = /scale\(([\d.]+)\)/.exec(svg);
+  t('SVG 含叶形缩放', !!sc, sc ? sc[1] : null);
+  if (sc) {
+    const leafPx = 279 * parseFloat(sc[1]);
+    t('SVG 叶高 = 画布 60%（与生成器 leafH 一致）', Math.abs(leafPx - 512 * 0.6) < 2, Math.round(leafPx));
+  }
+  const arGen = parseFloat((/const LEAF_AR = ([\d.]+)/.exec(mkSrc) || [])[1]);
+  t('SVG 与生成器的叶形宽高比一致', Math.abs(255.6 / 279 - arGen) < 0.001, [255.6 / 279, arGen]);
 
   // 7) 构建流程必须会生成图标 —— 否则改了 SVG 也不会进 APK
   //    （这正是本次的问题：mipmap 是手工放的死文件，改 SVG 完全没效果）
@@ -2076,7 +2113,7 @@ console.log('\n【照片信息】修图前必须先看清这张照片是什么')
   })());
 
   // 2) 界面接线
-  t('顶栏按钮打开照片信息', /\$\('btn-photoinfo'\)\.onclick = openPhotoInfo/.test(appSrc));
+  t('顶栏按钮打开照片信息', /\$\('btn-photoinfo'\)\.onclick = [^\n]*openPhotoInfo\(\)/.test(appSrc));
   t('打开面板时无需重新读文件（用导入时缓存的 meta）',
     /function openPhotoInfo[\s\S]{0,900}S\.meta/.test(appSrc));
   t('信息面板分「文件」组', /push\('文件'/.test(fs3.readFileSync(__dirname + '/../app/core.js', 'utf8')));
@@ -2523,6 +2560,192 @@ console.log('\n【返回】按一下返回键不能直接退出应用');
   t('首页按返回仍能退出应用', C.planBackAction({ editing: false, mode: 'select' }).handled === false);
 })();
 /* ---------- 返回键 ---------- */
+
+/* ---------- 顶栏溢出（回归） ---------- */
+/*
+ * 缺陷现象：顶栏把文件名挤没了，窄屏上按钮还溢出屏幕。
+ * 根因：可见按钮的最小宽度之和 > 视口宽度，而按钮不能压缩（有 min-width），
+ *      只能把 #file-info 挤到 0，再挤就溢出。
+ * 回归点：只要有人往顶栏里加回按钮 / 把入口从菜单搬回去，就必须失败。
+ */
+(() => {
+  const fs = require('fs');
+  const html = fs.readFileSync(__dirname + '/../app/index.html', 'utf8');
+  const css = fs.readFileSync(__dirname + '/../app/style.css', 'utf8');
+  const appSrc = fs.readFileSync(__dirname + '/../app/app.js', 'utf8');
+
+  const barTop = html.slice(html.indexOf('id="topbar"'), html.indexOf('id="moremenu"'));
+  const inBar = (id) => new RegExp('<button[^>]*id="' + id + '"').test(barTop);
+
+  // 这三个是「搬进菜单」的入口：搬回去 = 缺陷复现
+  t('照片信息不在顶栏里（否则窄屏又溢出）', !inBar('btn-photoinfo'));
+  t('修图记录不在顶栏里（否则窄屏又溢出）', !inBar('btn-library'));
+  t('设置不在顶栏里（否则窄屏又溢出）', !inBar('btn-settings'));
+
+  // 用真实 CSS 数值算一遍：只要顶栏按钮再多一个就会溢出
+  const barW = (() => {
+    const m = /(^|\n)\.tb-btn\s*\{([\s\S]*?)\}/.exec(css);
+    const mm = m && /min-width:\s*(\d+)px/.exec(m[2]);
+    return mm ? parseInt(mm[1], 10) : 0;
+  })();
+  const iconW = (() => {
+    const m = /(^|\n)\.tb-btn\.icon\s*\{([\s\S]*?)\}/.exec(css);
+    const mm = m && /min-width:\s*(\d+)px/.exec(m[2]);
+    return mm ? parseInt(mm[1], 10) : 0;
+  })();
+  const n = (barTop.match(/class="tb-btn/g) || []).length;
+  const fixed = barW + (n - 1) * iconW + n * 6 + 16;
+  t('顶栏固定占宽留有余量（320px 机型）', fixed <= 320 - 60, fixed);
+  // 再加一个图标按钮就该溢出 —— 说明现在的余量不是「碰巧够」
+  t('再加一个按钮就会溢出（余量是设计出来的）', fixed + iconW + 6 > 320 - 60, fixed + iconW + 6);
+
+  // 文件名必须真的能显示：容器要能收缩但不能为 0
+  t('文件名容器可收缩', /#file-info\s*\{[\s\S]{0,120}min-width:\s*0/.test(css));
+  t('文件名过长省略号', /#file-name\s*\{[\s\S]{0,200}text-overflow:\s*ellipsis/.test(css));
+  t('文件名不换行（换行会把顶栏撑高）', /#file-name\s*\{[\s\S]{0,200}white-space:\s*nowrap/.test(css));
+
+  // 菜单本身不能把顶栏撑宽
+  t('菜单绝对定位（不参与顶栏布局）', /#moremenu\s*\{[\s\S]{0,160}position:\s*absolute/.test(css));
+
+  // 顶栏不能靠 overflow 藏住溢出的按钮（那只是把问题盖住，按钮点不到）
+  const tbRule = /(^|\n)#topbar\s*\{([\s\S]*?)\}/.exec(css);
+  t('顶栏没有用 overflow:hidden 掩盖溢出',
+    !tbRule || !/overflow\s*:\s*hidden/.test(tbRule[2]), tbRule && tbRule[2]);
+
+  // 点外面关闭要挂在 document 上（挂 topbar 上点画布就不会关）
+  t('点外面关闭挂在 document 上',
+    /document\.addEventListener\('click'[\s\S]{0,400}closeMoreMenu\(\)/.test(appSrc));
+  // 关菜单不能顺手把面板也关了
+  const closeBody = (() => {
+    const i = appSrc.indexOf('function closeMoreMenu()');
+    return i < 0 ? '' : appSrc.slice(i, i + 400);
+  })();
+  t('关闭菜单不误关面板', closeBody.length > 0 && !/closeAllSheets|closePanel|hideAll/.test(closeBody));
+  // 关菜单也不该清掉用户的编辑状态
+  t('关闭菜单不动编辑状态', closeBody.length > 0 && !/S\.(img|rect|strokes)\s*=/.test(closeBody));
+})();
+/* ---------- 顶栏溢出（回归） ---------- */
+
+/* ---------- 改名（回归） ---------- */
+/*
+ * 缺陷风险：改名改到「状态标识符」上会让用户丢数据 ——
+ *   改包名 → 系统当成新 App，设置/历史/会话全没了，还会签名冲突
+ *   改 localStorage 键 → 老数据读不出来，等于清空
+ *   改通知图标资源名 → 通知栏图标丢失
+ *   改 JS 桥名 → 网页调不到原生（下载安装、返回键、保活全废）
+ * 这里逐个锁死。
+ */
+(() => {
+  const fs = require('fs');
+  const appSrc = fs.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const mf = fs.readFileSync(__dirname + '/../android/AndroidManifest.xml', 'utf8');
+  const act = fs.readFileSync(__dirname + '/../android/src/com/photostudio/app/MainActivity.java', 'utf8');
+  const keep = fs.readFileSync(__dirname + '/../android/src/com/photostudio/app/KeepAliveService.java', 'utf8');
+
+  /* 包名 */
+  t('包名仍是 com.photostudio.app', /package="com\.photostudio\.app"/.test(mf));
+  t('Manifest 里没有别的包名', (mf.match(/package="([^"]+)"/g) || []).length === 1, mf.match(/package="[^"]+"/g));
+  t('Java 包声明没改', /^package com\.photostudio\.app;/m.test(act));
+  t('保活服务的包声明没改', /^package com\.photostudio\.app;/m.test(keep));
+
+  /* localStorage：所有持久化键都必须还是 photoStudio.* */
+  const keys = Array.from(new Set((appSrc.match(/['"]photoStudio\.[A-Za-z0-9_.]+['"]/g) || []).map((s) => s.slice(1, -1))));
+  t('还能扫到持久化键（防止正则失效后假装通过）', keys.length >= 5, keys.length);
+  t('持久化键全部还是 photoStudio.*', keys.every((k) => k.indexOf('photoStudio.') === 0), keys);
+
+  /* 通知 / 桥 / 日志 TAG */
+  t('通知图标资源名没改', /ic_stat_photostudio/.test(keep));
+  t('JS 桥名没改（PSBridge）', /PSBridge/.test(appSrc) && /PSBridge/.test(act));
+  t('日志 TAG 没改（PhotoStudio）', /"PhotoStudio"/.test(act));
+
+  /* 显示名确实改了（否则「改名」这件事没做到） */
+  const strings = fs.readFileSync(__dirname + '/../android/res/values/strings.xml', 'utf8');
+  t('安卓显示名是枫叶修图', /<string name="app_name">枫叶修图<\/string>/.test(strings));
+  t('网页标题是枫叶修图', /<title>[^<]*枫叶修图/.test(fs.readFileSync(__dirname + '/../app/index.html', 'utf8')));
+
+  /* 改名不能顺手改坏路径：启动脚本、构建脚本引用的文件都得在 */
+  const root = __dirname + '/..';
+  for (const f of ['app/index.html', 'app/app.js', 'app/core.js', 'app/style.css', 'app/manifest.json', 'app/icon.svg']) {
+    t('文件仍在：' + f, fs.existsSync(root + '/' + f));
+  }
+  t('启动脚本改名后仍存在', fs.existsSync(root + '/启动枫叶修图.sh'));
+})();
+/* ---------- 改名（回归） ---------- */
+
+/* ---------- 枫叶图标（回归） ---------- */
+/*
+ * 缺陷风险：网页图标（icon.svg）和安装后图标（生成器产出的 PNG）不一致 ——
+ * 用户在浏览器里看到一片叶子，装完变成另一片。
+ * 根因是两套几何：SVG 用贝塞尔路径，生成器用展平多边形。
+ * 这里用「叶形宽高比 + 叶高占画布比例」把两边绑在一起。
+ */
+(() => {
+  const fs = require('fs');
+  const svg = fs.readFileSync(__dirname + '/../app/icon.svg', 'utf8');
+  const mk = fs.readFileSync(__dirname + '/../tools/make-icons.js', 'utf8');
+  const C = require('../app/core.js');
+  void C;
+
+  // SVG 必须能独立渲染（不能被裁剪/引用外部资源）
+  t('SVG 有 viewBox', /viewBox="0 0 512 512"/.test(svg));
+  t('SVG 不引用外部文件', !/xlink:href|<image/.test(svg));
+  t('SVG 尺寸声明完整', /width="512"/.test(svg) && /height="512"/.test(svg));
+
+  // 两边的叶形比例必须一致
+  const arGen = parseFloat((/const LEAF_AR = ([\d.]+)/.exec(mk) || [])[1]);
+  const arSvg = 255.6 / 279; // 源路径包围盒
+  t('生成器有叶形比例常量', !isNaN(arGen), arGen);
+  t('SVG 与生成器的叶形比例一致', Math.abs(arGen - arSvg) < 0.001, [arGen, arSvg]);
+
+  // 叶高占画布比例一致（决定了图标里叶子多大）
+  const sc = parseFloat((/scale\(([\d.]+)\)/.exec(svg) || [])[1]);
+  const svgLeafH = 279 * sc / 512;
+  t('SVG 叶高占画布 60%', Math.abs(svgLeafH - 0.6) < 0.01, svgLeafH.toFixed(4));
+
+  // 生成器里几个关键尺寸不能乱改（改了图标在系统里会被裁）
+  const num = (name) => {
+    const m = new RegExp('const ' + name + '\\s*=\\s*([\\d.]+)').exec(mk);
+    return m ? parseFloat(m[1]) : NaN;
+  };
+  t('启动图标叶高 60%', num('leafH') === 0.6, num('leafH'));
+
+  // 自适应图标只有中间 66.7% 保证可见，叶子超出就会被厂商遮罩裁掉
+  const afBody = (() => {
+    const i = mk.indexOf('function adaptiveForeground(');
+    return i < 0 ? '' : mk.slice(i, i + 500);
+  })();
+  const afLeafH = (() => {
+    const m = /const leafH\s*=\s*([\d.]+)/.exec(afBody);
+    return m ? parseFloat(m[1]) : NaN;
+  })();
+  t('自适应前景叶高不超过 66.7% 安全区', afLeafH > 0 && afLeafH <= 0.667, afLeafH);
+  // 前景不能自带光晕/背景：超出安全区会被裁，而且背景由系统层叠
+  t('自适应前景不含光晕', afBody.length > 0 && !/glow/i.test(afBody));
+
+  // 图标生成是零依赖的：构建机上没有 SVG 光栅化器，引了依赖就会构建失败
+  const deps = (mk.match(/require\((['"])([^'"]+)\1\)/g) || []).map((s) => s.replace(/require\((['"])([^'"]+)\1\)/, '$2'));
+  t('图标生成器零依赖（只 require 内置模块）',
+    deps.every((d) => d.indexOf('.') !== 0 && ['fs', 'path', 'zlib', 'os'].indexOf(d) >= 0),
+    deps);
+
+  // 生成的图标要真的写进两处（网页 + 安卓资源）
+  const files = ['app/icon-192.png', 'app/icon-512.png'];
+  for (const f of files) {
+    const p = __dirname + '/../' + f;
+    t('图标已生成：' + f, fs.existsSync(p) && fs.statSync(p).size > 200, fs.existsSync(p) ? fs.statSync(p).size : 0);
+  }
+  const res = __dirname + '/../android/res';
+  for (const d of ['mipmap-mdpi', 'mipmap-hdpi', 'mipmap-xhdpi', 'mipmap-xxhdpi', 'mipmap-xxxhdpi']) {
+    const p = res + '/' + d + '/ic_launcher.png';
+    t('安卓启动图标已生成：' + d, fs.existsSync(p) && fs.statSync(p).size > 100,
+      fs.existsSync(p) ? fs.statSync(p).size : 0);
+  }
+  t('有自适应图标前景', fs.existsSync(res + '/mipmap-xxxhdpi/ic_launcher_foreground.png'));
+  t('有自适应图标配置', fs.existsSync(res + '/mipmap-anydpi-v26/ic_launcher.xml'));
+  t('有自适应图标背景', fs.existsSync(res + '/drawable/ic_launcher_bg.xml'));
+  t('通知栏小图标已生成', fs.existsSync(res + '/drawable-xxhdpi/ic_stat_photostudio.png'));
+})();
+/* ---------- 枫叶图标（回归） ---------- */
 
 console.log(`\n合计 ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

@@ -1,5 +1,5 @@
 /* =============================================================================
- * 修图台 · 样式（移动优先，深色专业修图界面）
+ * 枫叶修图 · 样式（移动优先，深色专业修图界面）
  * ========================================================================== */
 
 :root {
@@ -64,6 +64,8 @@ button:disabled { opacity: .38; cursor: default; }
   display: flex;
   align-items: center;
   gap: 6px;
+  /* 更多菜单要相对顶栏定位 */
+  position: relative;
   padding: calc(6px + var(--sat)) calc(8px + var(--sar)) 6px calc(8px + var(--sal));
   background: linear-gradient(#1b2029, #161a21);
   border-bottom: 1px solid var(--line);
@@ -83,6 +85,40 @@ button:disabled { opacity: .38; cursor: default; }
 .tb-btn:hover, .tb-btn:active { background: #262d3a; color: var(--text); }
 .tb-btn.icon { min-width: 40px; }
 .tb-btn.icon svg { width: 21px; height: 21px; }
+/* 「更多」的三个点是实心圆：全局 svg 规则是 fill:none + stroke，这里必须覆盖 */
+#btn-more svg.dots { fill: currentColor; stroke: none; }
+
+/* 更多菜单：从顶栏右下展开，承载低频入口（照片信息/修图记录/设置） */
+#moremenu {
+  position: absolute;
+  top: 100%;
+  right: calc(8px + var(--sar));
+  z-index: 130;
+  min-width: 184px;
+  padding: 6px;
+  margin-top: -2px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  box-shadow: var(--sh);
+  animation: menuIn .14s ease-out;
+}
+@keyframes menuIn {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: none; }
+}
+.more-item {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; padding: 11px 12px;
+  border-radius: var(--r-sm);
+  color: var(--text); font-size: 13.5px;
+  text-align: left;
+  transition: background .15s;
+}
+.more-item:hover, .more-item:active { background: var(--panel-2); }
+.more-item:disabled { opacity: .38; }
+.more-item svg { width: 19px; height: 19px; flex: 0 0 auto; color: var(--text-dim); }
+.more-item .mi-label { flex: 1 1 auto; }
 
 #file-info { flex: 1 1 auto; min-width: 0; padding: 0 4px; }
 #file-name { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -658,6 +694,8 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
     width: 68px;
   }
   #file-info { display: none; }
+  /* 横屏顶栏变成左侧竖条，下拉菜单要改成「向右展开」而不是「向下展开」 */
+  #moremenu { top: auto; bottom: 10px; right: auto; left: 100%; margin: 0 0 0 2px; }
   #bottombar { width: 340px; border-top: 0; border-left: 1px solid var(--line); }
   #tools { flex-wrap: wrap; }
   .tool { min-width: 62px; }
@@ -747,12 +785,13 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 
 /* 顶栏入口的计数角标 */
 #btn-library { position: relative; }
+/* 角标：菜单项是横向布局，所以不用绝对定位，直接排在文字后面 */
 #btn-library b {
-  position: absolute; top: 1px; right: 2px;
-  min-width: 16px; height: 16px; padding: 0 4px;
-  border-radius: 8px;
+  flex: 0 0 auto;
+  min-width: 18px; height: 18px; padding: 0 5px;
+  border-radius: 9px;
   background: var(--accent); color: #fff;
-  font-size: 10px; font-weight: 700; line-height: 16px;
+  font-size: 10.5px; font-weight: 700; line-height: 18px;
   text-align: center;
 }
 
@@ -854,6 +893,7 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 /* ---- 无 flex gap：用 margin 模拟 ---- */
 .ps-no-flex-gap #topbar > * + * { margin-left: 6px; }
 .ps-no-flex-gap .tb-btn > * + * { margin-top: 2px; }
+.ps-no-flex-gap .more-item > * + * { margin-left: 10px; }
 .ps-no-flex-gap #hud .hud-group + .hud-group { margin-left: 8px; }
 .ps-no-flex-gap .hud-group > * + * { margin-left: 4px; }
 .ps-no-flex-gap #sel-info > * + * { margin-left: 5px; }

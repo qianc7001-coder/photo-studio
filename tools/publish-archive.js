@@ -89,7 +89,7 @@ function readArchive(dir) {
 
   // APK：优先精确命名，其次任意 .apk
   const files = fs.readdirSync(path.join(ARCHIVE, dir));
-  const apkName = files.find((f) => f === `修图台-v${vj.versionName}.apk`)
+  const apkName = files.find((f) => f === `枫叶修图-v${vj.versionName}.apk`)
     || files.find((f) => f.endsWith('.apk'));
   const notesName = files.find((f) => /版本说明|RELEASE-NOTES/i.test(f) && f.endsWith('.md'));
 
@@ -120,7 +120,7 @@ function titleOf(rel) {
 
 function bodyOf(rel) {
   const lines = [];
-  lines.push(`## 修图台 v${rel.versionName}（versionCode ${rel.versionCode}）`);
+  lines.push(`## 枫叶修图 v${rel.versionName}（versionCode ${rel.versionCode}）`);
   lines.push('');
   lines.push('> 这是历史版本，建议使用最新版：https://github.com/' + REPO + '/releases/latest');
   lines.push('');

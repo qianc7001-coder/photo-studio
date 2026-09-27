@@ -82,7 +82,7 @@ public class KeepAliveService extends Service {
             String body = (text == null || text.isEmpty()) ? "生成完成，点开查看效果" : text;
             Notification n = builder(ctx, CHANNEL_DONE)
                     .setSmallIcon(R.drawable.ic_stat_photostudio)
-                    .setContentTitle("修图台")
+                    .setContentTitle("枫叶修图")
                     .setContentText(body)
                     .setAutoCancel(true)
                     .setContentIntent(contentIntent(ctx))
@@ -173,7 +173,7 @@ public class KeepAliveService extends Service {
     private Notification build(String text) {
         Notification.Builder b = builder(this, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_stat_photostudio)
-                .setContentTitle("修图台")
+                .setContentTitle("枫叶修图")
                 .setContentText(text)
                 .setOngoing(true)          // 不可滑动清除：它代表「正在跑」
                 .setShowWhen(false)

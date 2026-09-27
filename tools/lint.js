@@ -69,7 +69,7 @@ if (!errors) ok('所有 JS 源码干净');
 
 /* ---------- 3. 单文件产物结构 ---------- */
 console.log('\n【3】单文件产物结构');
-const single = path.join(ROOT, 'dist', '修图台.html');
+const single = path.join(ROOT, 'dist', '枫叶修图.html');
 if (fs.existsSync(single)) {
   const h = fs.readFileSync(single, 'utf8');
   const bodyN = (h.match(/<\/body>/g) || []).length;

@@ -151,11 +151,11 @@ async function main() {
   const commitMsg = (() => {
     try {
       const v = JSON.parse(fs.readFileSync(path.join(ROOT, 'version.json'), 'utf8'));
-      return '发布 修图台 v' + v.versionName + '\n\n' +
+      return '发布 枫叶修图 v' + v.versionName + '\n\n' +
         '给摄影师用的局部修图工具：框选照片任意区域交给生图模型修改，结果自动贴回原位置。\n' +
         '包含 ' + files.length + ' 个文件、699 项测试。';
     } catch (e) {
-      return '发布 修图台';
+      return '发布 枫叶修图';
     }
   })();
 

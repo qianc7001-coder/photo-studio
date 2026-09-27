@@ -1,14 +1,14 @@
-# 修图台 · Photo Studio
+# 枫叶修图 · Photo Studio
 
 [![CI](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-2407%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-2592%20passed-brightgreen.svg)](#测试)
 
 给摄影师用的**局部修图**工具：在照片上框选任意区域，交给生图模型修改，结果自动贴回原位置。
 
 **核心特点**：结果无缝融合，非破坏性可调，保留拍摄信息。
 
-> 最新版本 **v3.4.0** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
+> 最新版本 **v3.5.0** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
 
 ---
 
@@ -16,7 +16,7 @@
 
 传统流程：导出照片 → 用别的工具涂涂抹抹 → 再导入 → 手动对齐 → 接缝对不上。
 
-修图台的做法：
+枫叶修图的做法：
 
 ```
 打开照片 → 框选要改的地方 → 写一句要求 → 生成 → 自动贴回原位置
@@ -38,6 +38,13 @@
 - **工具栏高度可自由调节**：拖动底栏手柄拉到任意高度，轻点手柄或箭头收起/展开；
   高度会被记住，换图、重启都沿用
 - 工具提示（画笔/引导线怎么用）**只显示一次**，第二次进入不再弹出
+
+### 顶栏
+- 顶栏只留 5 个高频入口：**打开 / 撤销 / 重做 / 导出 / 更多**
+- 「照片信息 / 修图记录 / 设置」收进右上角**「更多」菜单** ——
+  原来 7 个按钮的固定占宽是 344px，360px 的手机上文件名被压到只剩几个像素，
+  320px 的机器上按钮还会溢出屏幕右边缘；收起来后降到 252px，任何机型都放得下
+- 点菜单外面任意位置、或按返回键都会收起菜单；点菜单里的一项会先收起菜单再打开面板
 
 ### 编辑
 - **自由框选**：任意位置、任意大小，支持拖拽手柄调整、锁定比例
@@ -162,7 +169,7 @@
 
 ### 方式一：安装 APK（推荐）
 
-1. 安装 `修图台.apk`（Android 7.0+）
+1. 安装 `枫叶修图.apk`（Android 7.0+）
 2. 打开应用 → 右上角「设置」
 3. 填「接口地址」和「API Key」
 4. 点「自动检测可用模型」，选一个标着**可编辑**的模型
@@ -185,7 +192,7 @@ node app/server.js 8788
 # 然后用手机浏览器打开 http://127.0.0.1:8788
 ```
 
-或直接打开 `dist/修图台.html`（单文件版，离线可用）。
+或直接打开 `dist/枫叶修图.html`（单文件版，离线可用）。
 
 ---
 
@@ -212,9 +219,9 @@ node tools/bump-version.js
 ```
 
 产物：
-- `dist/修图台.apk` — 安装包
-- `dist/修图台-v<版本>.apk` — 带版本号的副本
-- `dist/修图台.html` — 单文件网页版
+- `dist/枫叶修图.apk` — 安装包
+- `dist/枫叶修图-v<版本>.apk` — 带版本号的副本
+- `dist/枫叶修图.html` — 单文件网页版
 
 ### 版本号管理
 
@@ -236,7 +243,7 @@ node tools/migrate-test.js     # 配置迁移（模拟老用户升级路径）
 node tools/e2e-test.js         # 端到端（jsdom + 真实 canvas，逐像素校验）
 ```
 
-当前规模：**1695 项**（530 单元 + 724 回归 + 14 配置迁移 + 427 端到端）。
+当前规模：**2592 项**（959 单元 + 914 回归 + 17 配置迁移 + 702 端到端）。
 
 端到端测试会：
 - 启动一个假生图模型服务器
@@ -256,12 +263,15 @@ app/
   style.css      样式
   server.js      本地服务（静态托管 + 同源代理，解决跨域）
   version.js     版本号（构建时自动生成，勿手改）
+  icon.svg       应用图标（网页/PWA）
+  icon-192.png / icon-512.png  PWA 图标
 android/
   src/           Android 外壳（WebView + 内置 HTTP 服务）
-  res/           图标与主题
+  res/           图标与主题（含各密度启动图标、自适应图标、通知栏图标）
 tools/
   build-apk.sh   构建 APK
   build-single.js 打包单文件 HTML
+  make-icons.js  零依赖生成全部图标（含内联的枫叶多边形）
   bump-version.js 版本号自增守卫
   core-test.js / regression-test.js / e2e-test.js  测试
   insert-block.js 幂等插入测试块（避免重复插入）
@@ -292,6 +302,20 @@ WebView 里用 `file://` 打开页面时，跨域请求会被拦截，而且 `lo
 2. **边缘羽化**：选区边界做平滑过渡，不是硬切
 3. **接缝色彩匹配**：采样选区内外一圈像素，算出色差，在边缘附近渐进补偿
 4. **精确坐标映射**：模型返回的尺寸和比例往往与选区不同，按「盖满 + 居中裁切」取回，**不会拉伸变形**
+
+### 图标为什么是一片白枫叶配红底
+
+图标要在 24px（通知栏）到 192px（桌面）之间都看得清，所以做了两个取舍：
+
+1. **白叶 + 饱和红底**：在 6 套配色里实测「叶子与底色的亮度比」，
+   这套在 48 / 32 / 24px 上分别是 2.73 / 2.74 / 2.84，是全部候选里最高的 ——
+   小尺寸下最不容易糊成一片。底色用三段渐变（`#ff7048` → `#dc2318` → `#8a0d0a`）避免死板。
+2. **叶子占画布高度 60%**：自适应图标只有中间 66.7% 是保证可见的，
+   留出余量才不会被厂商的圆形/方形遮罩裁掉花瓣。
+
+叶形用的是标准加拿大枫叶路径，展平成 42 点多边形后内联在 `tools/make-icons.js` 里 ——
+构建环境没有 SVG 光栅化器，所以图标生成是**纯 Node 零依赖**的。
+网页版 `icon.svg` 用贝塞尔原路径，与生成器的多边形实测叶子掩膜 IoU 0.996，两边看起来是同一片叶子。
 
 ### 为什么调参不用重新生成
 
@@ -335,7 +359,8 @@ WebView 里用 `file://` 打开页面时，跨域请求会被拦截，而且 `lo
 
 | 版本 | 主要变化 |
 |---|---|
-| **v3.4.0** | 修复按一下返回键就退出应用；返回键改为逐级退（浮层 → 生成 → 工具 → 首页） |
+| **v3.5.0** | 改名「枫叶修图」+ 手绘枫叶图标；修复顶栏溢出（低频入口收进「更多」菜单） |
+| [v3.4.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.4.0) | 修复按一下返回键就退出应用；返回键改为逐级退（浮层 → 生成 → 工具 → 首页） |
 | [v3.3.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.3.0) | 修复应用内「检查更新」永远失败（代理只支持 POST / 缺 UA / 不回退直连） |
 | [v3.2.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.2.0) | 彻底删除大选区分块；工具栏高度可自由调节；工具提示只显示一次 |
 | [v3.1.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.1.0) | 引导线支持自由绘制（笔迹画进图片，模型照着走向生成）；笔迹颜色可选 |

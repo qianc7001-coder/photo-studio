@@ -1,5 +1,5 @@
 /* =============================================================================
- * 修图台 · 应用主体
+ * 枫叶修图 · 应用主体
  *  交互：框选 / 画笔掩膜 / 平移缩放 / 生成 / 对比 / 应用 / 撤销重做 / 导出
  * ========================================================================== */
 (function () {
@@ -360,7 +360,7 @@
     if (!el) return;
     el.innerHTML =
       '<div class="err-head">' +
-        '<div class="err-title" style="color:#cfe4ff">修图台 v' + APP_VERSION + ' 更新内容</div>' +
+        '<div class="err-title" style="color:#cfe4ff">枫叶修图 v' + APP_VERSION + ' 更新内容</div>' +
         '<button class="tb-btn icon err-close" id="err-close">' +
           '<svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>' +
         '</button>' +
@@ -562,7 +562,7 @@
       .join('');
     el.innerHTML =
       '<div class="err-head">' +
-        '<div class="err-title" style="color:#cfe4ff">修图台 v' + esc(ver) + ' 更新内容</div>' +
+        '<div class="err-title" style="color:#cfe4ff">枫叶修图 v' + esc(ver) + ' 更新内容</div>' +
         '<button class="tb-btn icon err-close" id="err-close">' +
           '<svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>' +
         '</button>' +
@@ -616,7 +616,7 @@
     if (b && b.downloadAndInstall) {
       toast('正在下载 v' + ver + '…', 4000);
       try {
-        b.downloadAndInstall(apk.browser_download_url, '修图台-v' + ver + '.apk');
+        b.downloadAndInstall(apk.browser_download_url, '枫叶修图-v' + ver + '.apk');
       } catch (e) {
         openExternal(apk.browser_download_url);
       }
@@ -920,7 +920,7 @@
       }
       return out;
     } catch (e) {
-      console.warn('[修图台] 读取元数据失败（不影响使用）', e);
+      console.warn('[枫叶修图] 读取元数据失败（不影响使用）', e);
       return out;
     }
   }
@@ -2574,7 +2574,7 @@
         // 切走后失败更要通知：否则用户回来只看到界面恢复原样，不知道发生了什么
         if (document.hidden) notifyGenDone('生成失败，点开查看原因');
       }
-      console.error('[修图台] 生成失败', err);
+      console.error('[枫叶修图] 生成失败', err);
     } finally {
       S.aborter = null;
       $('btn-generate').disabled = !S.img || !S.rect;
@@ -2868,7 +2868,7 @@
       // 归一化并丢掉没有 id 的脏条目
       return list.map(C.normalizeWork).filter((e) => e.id);
     } catch (e) {
-      console.warn('[修图台] 作品库读取失败，将从空开始', e);
+      console.warn('[枫叶修图] 作品库读取失败，将从空开始', e);
       return [];
     }
   }
@@ -2904,7 +2904,7 @@
         localStorage.setItem(LS_KEY_LIBRARY, JSON.stringify({ v: 1, items: S.library }));
         return true;
       } catch (e2) {
-        console.warn('[修图台] 作品库保存失败（空间不足）', e2);
+        console.warn('[枫叶修图] 作品库保存失败（空间不足）', e2);
         return false;
       }
     }
@@ -3433,6 +3433,8 @@
   function handleBack() {
     try {
       const open = {
+        // 更多菜单是最「临时」的一层：它一关就没了，所以排在返回链最前面
+        moremenu: moreMenuOpen(),
         workPreview: !!$('work-preview') && !$('work-preview').hidden,
         settings: !!$('settings') && !$('settings').hidden,
         library: !!$('library') && !$('library').hidden,
@@ -3451,6 +3453,7 @@
       switch (plan.action) {
         case 'close':
           switch (plan.target) {
+            case 'moremenu': closeMoreMenu(); break;
             case 'workPreview': $('work-preview').hidden = true; break;
             case 'settings': closeSettings(); break;
             case 'library': closeLibrary(); break;
@@ -3481,9 +3484,45 @@
       return true;
     } catch (e) {
       // 处理失败时宁可让系统退出，也不要让用户卡在按返回没反应的界面里
-      console.warn('[修图台] 返回键处理失败', e);
+      console.warn('[枫叶修图] 返回键处理失败', e);
       return false;
     }
+  }
+
+  /* ---------- 顶栏「更多」菜单 ---------- */
+
+  /**
+   * 更多菜单（照片信息 / 修图记录 / 设置）。
+   *
+   * 为什么要有：顶栏原本 7 个按钮 + 文件名，最小占宽 344px ——
+   * 360px 的手机上文件名只剩 8px（等于没有），320px 的机器上按钮直接溢出屏幕。
+   * 把三个低频入口收进菜单后固定占宽降到 252px，任何机型都不会再挤爆。
+   *
+   * 交互上要注意两点：
+   *   1. 点菜单里的一项后必须关菜单，否则面板关掉后菜单还浮在上面
+   *   2. 点菜单外面任何地方也要关 —— 菜单是浮层，不关会挡住画布
+   */
+  function openMoreMenu() {
+    const m = $('moremenu');
+    if (!m || !m.hidden) return;
+    m.hidden = false;
+    const b = $('btn-more');
+    if (b) b.setAttribute('aria-expanded', 'true');
+  }
+  function closeMoreMenu() {
+    const m = $('moremenu');
+    if (!m || m.hidden) return;
+    m.hidden = true;
+    const b = $('btn-more');
+    if (b) b.setAttribute('aria-expanded', 'false');
+  }
+  function toggleMoreMenu() {
+    const m = $('moremenu');
+    if (m && !m.hidden) closeMoreMenu(); else openMoreMenu();
+  }
+  function moreMenuOpen() {
+    const m = $('moremenu');
+    return !!m && !m.hidden;
   }
 
   /** 工具栏展开 / 收起（供外部与旧代码调用） */
@@ -4482,7 +4521,7 @@
         }
         if (r.notes && r.notes.length) metaNote = r.notes.join('；');
       } catch (e) {
-        console.warn('[修图台] 写入元数据失败（不影响导出）', e);
+        console.warn('[枫叶修图] 写入元数据失败（不影响导出）', e);
       }
     }
 
@@ -4792,7 +4831,7 @@
     const netTip = $('net-tip');
     const isFile = location.protocol === 'file:';
     netTip.textContent = isFile
-      ? '当前是本地文件方式打开，浏览器直连即可（若接口不开放跨域，请用「启动修图台」脚本以本地服务方式打开）。'
+      ? '当前是本地文件方式打开，浏览器直连即可（若接口不开放跨域，请用「启动枫叶修图」脚本以本地服务方式打开）。'
       : '通过本地服务打开时，请求走同源代理，没有跨域限制，Key 只在本机使用。';
   }
 
@@ -5045,9 +5084,10 @@
     $('btn-pick').onclick = () => $('file-input').click();
     $('btn-home-pick').onclick = () => $('file-input').click();
     $('btn-demo').onclick = useDemoImage;
-    $('btn-settings').onclick = openSettings;
+    $('btn-more').onclick = (e) => { e.stopPropagation(); toggleMoreMenu(); };
+    $('btn-settings').onclick = () => { closeMoreMenu(); openSettings(); };
     $('btn-save').onclick = openExportPanel;
-    $('btn-photoinfo').onclick = openPhotoInfo;
+    $('btn-photoinfo').onclick = () => { closeMoreMenu(); openPhotoInfo(); };
     document.querySelectorAll('#photoinfo [data-close]').forEach((el) => { el.onclick = closePhotoInfo; });
     document.querySelectorAll('#exportpanel [data-close]').forEach((el) => { el.onclick = closeExportPanel; });
     $('exp-do').onclick = async () => {
@@ -5112,7 +5152,7 @@
     document.querySelectorAll('#history [data-close]').forEach((el) => { el.onclick = closeHistory; });
     $('hist-preview-off').onclick = () => cancelHistoryPreview();
     $('hist-jump').onclick = commitHistoryJump;
-    $('btn-library').onclick = openLibrary;
+    $('btn-library').onclick = () => { closeMoreMenu(); openLibrary(); };
     document.querySelectorAll('#library [data-close]').forEach((el) => { el.onclick = closeLibrary; });
     $('btn-fit').onclick = fitToScreen;
     $('btn-reset-sel').onclick = () => {
@@ -5123,6 +5163,16 @@
       S.guides = []; updateGuideBadge();
       snapRectToModel(); draw(); updateUI();
     };
+
+    // 点菜单外任意位置关闭。用捕获阶段：菜单项自己的 onclick 里已经关过菜单，
+    // 这里只负责「点在别处」的情况，避免菜单一直浮在画布上。
+    document.addEventListener('click', (e) => {
+      if (!moreMenuOpen()) return;
+      const m = $('moremenu'), b = $('btn-more');
+      if (m && m.contains(e.target)) return;
+      if (b && b.contains(e.target)) return;
+      closeMoreMenu();
+    }, true);
 
     // 缩放
     $('zoom-in').onclick = () => zoomCenter(1.35);
@@ -5580,7 +5630,7 @@
     } catch (e) {
       // 空间不足：清掉会话，避免影响正常使用
       try { localStorage.removeItem(LS_KEY_SESSION); } catch (e2) { /* ignore */ }
-      console.warn('[修图台] 会话保存失败（可能空间不足）', e);
+      console.warn('[枫叶修图] 会话保存失败（可能空间不足）', e);
     }
   }
 
@@ -5712,7 +5762,7 @@
     if (fatalShown) return;
     fatalShown = true;
     const msg = (err && (err.message || err.reason && err.reason.message)) || String(err);
-    console.error('[修图台] 致命错误 @' + where, err);
+    console.error('[枫叶修图] 致命错误 @' + where, err);
     try {
       const el = document.getElementById('gen-error');
       if (!el) return;
@@ -5811,7 +5861,7 @@
     if (plan.patches.length) {
       const root = document.documentElement;
       for (const cls of C.compatClassNames(plan.patches)) root.classList.add(cls);
-      console.log('[修图台] 已启用兼容模式：' + plan.patches.join(', '));
+      console.log('[枫叶修图] 已启用兼容模式：' + plan.patches.join(', '));
     }
     S.compat = plan;
     return plan;
@@ -5858,7 +5908,7 @@
     if (S.keepAliveSupported && S.cfg.keepAliveAlways === true) askNotificationPermission();
 
     // 老内核兼容提示：不弹窗打扰，只在控制台留痕 + 升级条里说明
-    if (S.compat && S.compat.warn) console.warn('[修图台] ' + S.compat.warn);
+    if (S.compat && S.compat.warn) console.warn('[枫叶修图] ' + S.compat.warn);
 
     // 切回前台时重新同步一次：应用在后台期间保活状态可能与实际不符
     document.addEventListener('visibilitychange', () => {
@@ -5871,7 +5921,7 @@
     // 若通过本地服务打开，探测代理是否可用
     if (location.protocol !== 'file:') {
       fetch('api/health').then((r) => r.ok ? r.json() : null).then((j) => {
-        if (j && j.ok) console.log('[修图台] 本地代理可用');
+        if (j && j.ok) console.log('[枫叶修图] 本地代理可用');
       }).catch(() => { });
     }
   }
@@ -5938,6 +5988,7 @@
     toolbarHeight: () => S.toolbarHeight,
     toolbarFull: () => S.toolbarFull,
     handleBack,
+    openMoreMenu, closeMoreMenu, toggleMoreMenu, moreMenuOpen,
     goHome,
     openPhotoInfo,
     closePhotoInfo,
