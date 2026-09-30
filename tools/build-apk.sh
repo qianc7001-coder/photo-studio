@@ -113,6 +113,33 @@ cp "$APK" "$VERIFY"
 APKSIGNER verify --verbose --print-certs "$VERIFY" 2>&1 | head -8
 aapt dump badging "$VERIFY" 2>&1 | grep -E "package:|application-label|launchable-activity|sdkVersion|uses-permission" | head -8
 rm -f "$VERIFY"
+
+# ---------------------------------------------------------------------------
+# 归档快照（源码 + APK + 版本说明），供 publish-archive.js 发布历史版本用。
+# 必须排除签名密钥：.gitignore 只管仓库，归档是另一条路径 ——
+# v2.4.0 / v2.4.1 就曾经把 keystore.jks 一起拷进归档，
+# 所以 lint.js 里专门有一条检查盯着这件事，这里直接把它排除掉，从源头断掉。
+# ---------------------------------------------------------------------------
+ARCHIVE_ROOT="${ARCHIVE_DIR:-$(cd "$ROOT/.." && pwd)/photo-studio-archive}"
+ARCHIVE="$ARCHIVE_ROOT/v$VERSION_NAME"
+echo ""
+echo "> 归档快照 → $ARCHIVE"
+rm -rf "$ARCHIVE"
+mkdir -p "$ARCHIVE"
+cp -r "$ROOT/app" "$ROOT/android" "$ROOT/tools" "$ARCHIVE"/
+for f in CHANGELOG.md README.md LICENSE version.json package.json 版本说明.md; do
+  [ -f "$ROOT/$f" ] && cp "$ROOT/$f" "$ARCHIVE"/
+done
+cp "$APK" "$ARCHIVE"/
+# 密钥、构建残留、依赖目录一律不进归档
+rm -f "$ARCHIVE/android/keystore.jks"
+find "$ARCHIVE" \( -name node_modules -o -name dist -o -name '*.jks' -o -name '*.keystore' \) \
+  -prune -exec rm -rf {} + 2>/dev/null || true
+if find "$ARCHIVE" -name '*.jks' -o -name '*.keystore' | grep -q .; then
+  echo "  ✗ 归档里仍有签名密钥，已中止（请检查排除规则）"; exit 1
+fi
+echo "  ✓ 已归档（未含签名密钥）"
+
 echo ""
 echo "构建完成：$APK"
 echo "体积：$(du -h "$APK" | cut -f1)"

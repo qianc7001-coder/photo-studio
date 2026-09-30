@@ -4,6 +4,7 @@ import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.app.DownloadManager;
@@ -14,11 +15,13 @@ import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Color;
+import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.PowerManager;
+import android.provider.MediaStore;
 import android.provider.Settings;
 import android.util.Log;
 import android.view.ViewGroup;
@@ -36,6 +39,13 @@ import android.webkit.ValueCallback;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.widget.Toast;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.util.Locale;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 枫叶修图 · Android 外壳
@@ -74,6 +84,15 @@ public class MainActivity extends Activity {
     /** 用户是否开了「一直保活」 */
     private boolean alwaysOn = false;
     private String lastKeepText = "";
+
+    /* ----- 导出保存 ----- */
+    private static final String APP_FOLDER = "枫叶修图";
+    private static final int REQ_SAVE_AS = 1004;
+    private static final int REQ_STORAGE = 1005;
+    private volatile CountDownLatch saveAsLatch = null;
+    private volatile Uri saveAsTarget = null;
+    private volatile byte[] saveAsData = null;
+    private volatile String saveAsName = null;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -194,6 +213,12 @@ public class MainActivity extends Activity {
 
         // 启动内置服务后再加载页面
         server = new LocalServer(this);
+        server.setSaver(new LocalServer.Saver() {
+            @Override
+            public String save(byte[] data, String name, String where) {
+                return saveImage(data, name, where);
+            }
+        });
         server.start(new LocalServer.Ready() {
             @Override
             public void onReady(final int port, final String error) {
@@ -241,6 +266,10 @@ public class MainActivity extends Activity {
                 pendingInstallPath = null;
                 toastOnUi("未获得安装权限，可到「下载」目录手动安装");
             }
+        } else if (requestCode == REQ_SAVE_AS) {
+            saveAsTarget = (resultCode == RESULT_OK && data != null) ? data.getData() : null;
+            CountDownLatch l = saveAsLatch;
+            if (l != null) l.countDown();
         } else {
             super.onActivityResult(requestCode, resultCode, data);
         }
@@ -617,6 +646,195 @@ public class MainActivity extends Activity {
         }
     }
 
+    /* ==================== 导出图片保存 ==================== */
+
+    /**
+     * 保存导出的图片。三个位置：
+     *   gallery   → 系统相册（Pictures/枫叶修图）
+     *   downloads → 下载目录（Download/枫叶修图）
+     *   ask       → 弹系统文件选择器让用户自己挑（SAF）
+     *
+     * Android 10+ 用 MediaStore 不需要权限；9 及以下需要 WRITE_EXTERNAL_STORAGE。
+     */
+    private String saveImage(byte[] data, String name, String where) {
+        try {
+            String safe = sanitizeFileName(name);
+            if ("ask".equals(where)) return saveViaPicker(data, safe);
+            boolean gallery = !"downloads".equals(where);
+            if (Build.VERSION.SDK_INT >= 29) return saveScoped(data, safe, gallery);
+            return saveLegacy(data, safe, gallery);
+        } catch (Exception e) {
+            Log.w(TAG, "保存失败", e);
+            return "{\"ok\":false,\"error\":" + jsonQuote(String.valueOf(e.getMessage())) + "}";
+        }
+    }
+
+    /** Android 10+：MediaStore 分区存储，不需要权限 */
+    private String saveScoped(byte[] data, String name, boolean gallery) throws Exception {
+        ContentValues v = new ContentValues();
+        v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+        v.put(MediaStore.MediaColumns.MIME_TYPE, mimeOfName(name));
+        String rel = (gallery ? Environment.DIRECTORY_PICTURES : Environment.DIRECTORY_DOWNLOADS)
+                + "/" + APP_FOLDER;
+        v.put(MediaStore.MediaColumns.RELATIVE_PATH, rel);
+        if (!gallery) v.put(MediaStore.MediaColumns.IS_PENDING, 1);
+        Uri coll = gallery
+                ? MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                : MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+        Uri item = getContentResolver().insert(coll, v);
+        if (item == null) throw new IOException("系统拒绝了写入请求");
+        OutputStream os = null;
+        try {
+            os = getContentResolver().openOutputStream(item);
+            if (os == null) throw new IOException("无法写入目标文件");
+            os.write(data);
+            os.flush();
+        } finally {
+            if (os != null) try { os.close(); } catch (Exception ignored) { }
+        }
+        if (!gallery) {
+            ContentValues done = new ContentValues();
+            done.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            getContentResolver().update(item, done, null, null);
+        }
+        String path = (gallery ? "相册/" : "下载/") + APP_FOLDER + "/" + name;
+        return "{\"ok\":true,\"path\":" + jsonQuote(path)
+                + ",\"where\":" + jsonQuote(gallery ? "gallery" : "downloads") + "}";
+    }
+
+    /** Android 9 及以下：直接写公共目录，需要 WRITE_EXTERNAL_STORAGE */
+    private String saveLegacy(byte[] data, String name, boolean gallery) throws Exception {
+        if (!hasWriteStorage()) {
+            requestWriteStorage();
+            return "{\"ok\":false,\"needPermission\":true,\"error\":"
+                    + jsonQuote("需要存储权限，已弹出授权请求，请允许后再导出一次") + "}";
+        }
+        File base = Environment.getExternalStoragePublicDirectory(
+                gallery ? Environment.DIRECTORY_PICTURES : Environment.DIRECTORY_DOWNLOADS);
+        File dir = new File(base, APP_FOLDER);
+        if (!dir.exists() && !dir.mkdirs()) throw new IOException("无法创建目录 " + dir.getAbsolutePath());
+        File f = uniqueFile(dir, name);
+        FileOutputStream fo = new FileOutputStream(f);
+        try { fo.write(data); fo.flush(); } finally { try { fo.close(); } catch (Exception ignored) { } }
+        try {
+            MediaScannerConnection.scanFile(this, new String[]{f.getAbsolutePath()}, null, null);
+        } catch (Exception ignored) { }
+        String path = (gallery ? "相册/" : "下载/") + APP_FOLDER + "/" + f.getName();
+        return "{\"ok\":true,\"path\":" + jsonQuote(path)
+                + ",\"where\":" + jsonQuote(gallery ? "gallery" : "downloads") + "}";
+    }
+
+    /** SAF：弹系统文件选择器，让用户自己挑目录和文件名 */
+    private String saveViaPicker(final byte[] data, final String name) throws Exception {
+        final CountDownLatch latch = new CountDownLatch(1);
+        saveAsData = data;
+        saveAsName = name;
+        saveAsTarget = null;
+        saveAsLatch = latch;
+        runOnUiThread(new Runnable() {
+            @Override public void run() {
+                try {
+                    Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                    i.addCategory(Intent.CATEGORY_OPENABLE);
+                    i.setType(mimeOfName(saveAsName));
+                    i.putExtra(Intent.EXTRA_TITLE, saveAsName);
+                    startActivityForResult(i, REQ_SAVE_AS);
+                } catch (Exception e) {
+                    saveAsTarget = null;
+                    saveAsLatch = null;
+                    latch.countDown();
+                }
+            }
+        });
+        boolean done = latch.await(5, TimeUnit.MINUTES);
+        saveAsLatch = null;
+        byte[] d = saveAsData; saveAsData = null;
+        Uri target = saveAsTarget; saveAsTarget = null;
+        if (!done) return "{\"ok\":false,\"error\":" + jsonQuote("等待选择位置超时") + "}";
+        if (target == null) return "{\"ok\":false,\"canceled\":true,\"error\":"
+                + jsonQuote("已取消") + "}";
+        OutputStream os = null;
+        try {
+            os = getContentResolver().openOutputStream(target);
+            if (os == null) throw new IOException("无法写入所选位置");
+            os.write(d);
+            os.flush();
+        } finally {
+            if (os != null) try { os.close(); } catch (Exception ignored) { }
+        }
+        return "{\"ok\":true,\"path\":" + jsonQuote(name) + ",\"where\":\"ask\"}";
+    }
+
+    private boolean hasWriteStorage() {
+        if (Build.VERSION.SDK_INT >= 29) return true;
+        if (Build.VERSION.SDK_INT < 23) return true;
+        return checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void requestWriteStorage() {
+        if (Build.VERSION.SDK_INT >= 29 || Build.VERSION.SDK_INT < 23) return;
+        runOnUiThread(new Runnable() {
+            @Override public void run() {
+                try {
+                    requestPermissions(new String[]{android.Manifest.permission.WRITE_EXTERNAL_STORAGE},
+                            REQ_STORAGE);
+                } catch (Exception ignored) { }
+            }
+        });
+    }
+
+    private static File uniqueFile(File dir, String name) {
+        File f = new File(dir, name);
+        if (!f.exists()) return f;
+        String base = name, ext = "";
+        int d = name.lastIndexOf('.');
+        if (d > 0) { base = name.substring(0, d); ext = name.substring(d); }
+        for (int i = 2; i < 1000; i++) {
+            File g = new File(dir, base + "-" + i + ext);
+            if (!g.exists()) return g;
+        }
+        return new File(dir, base + "-" + System.currentTimeMillis() + ext);
+    }
+
+    private static String sanitizeFileName(String name) {
+        String n = name == null ? "" : name;
+        n = n.replace('/', '_').replace('\\', '_').replace(':', '_')
+             .replace('*', '_').replace('?', '_').replace('"', '_')
+             .replace('<', '_').replace('>', '_').replace('|', '_').trim();
+        while (n.startsWith(".")) n = n.substring(1);
+        if (n.isEmpty()) n = "retouched.jpg";
+        if (n.length() > 80) {
+            String ext = "";
+            int d = n.lastIndexOf('.');
+            if (d > 0) { ext = n.substring(d); n = n.substring(0, d); }
+            n = n.substring(0, Math.max(1, 80 - ext.length())) + ext;
+        }
+        return n;
+    }
+
+    private static String mimeOfName(String n) {
+        String s = n == null ? "" : n.toLowerCase(Locale.ROOT);
+        if (s.endsWith(".png")) return "image/png";
+        if (s.endsWith(".webp")) return "image/webp";
+        return "image/jpeg";
+    }
+
+    private static String jsonQuote(String s) {
+        if (s == null) return "\"\"";
+        StringBuilder sb = new StringBuilder("\"");
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '"' || c == '\\') sb.append('\\').append(c);
+            else if (c == '\n') sb.append("\\n");
+            else if (c == '\r') sb.append("\\r");
+            else if (c == '\t') sb.append("\\t");
+            else if (c < 0x20) sb.append(String.format(Locale.ROOT, "\\u%04x", (int) c));
+            else sb.append(c);
+        }
+        return sb.append('"').toString();
+    }
+
     /* ==================== JS 桥 ==================== */
 
     /**
@@ -630,6 +848,12 @@ public class MainActivity extends Activity {
         /** 当前环境是否支持保活（浏览器里没有这个对象，所以用它判断） */
         @JavascriptInterface
         public boolean supported() {
+            return true;
+        }
+
+        /** 是否支持「选保存位置」的导出（浏览器里走不了原生保存） */
+        @JavascriptInterface
+        public boolean saveSupported() {
             return true;
         }
 

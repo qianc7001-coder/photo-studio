@@ -1246,7 +1246,9 @@ console.log('\n【对比】放大查看与分割线拖拽必须共存');
   // 6) 关闭对比视图必须清掉缩放状态，否则下次进来带着上次的偏移
   t('关闭对比视图统一走 closeCompare', /function closeCompare\(\)/.test(appSrc));
   t('closeCompare 会清缩放状态', /function closeCompare\(\)[\s\S]{0,300}cmpView = null/.test(appSrc));
-  t('应用结果时走 closeCompare', /closeCompare\(\);\s*\n\s*updateUI\(\);\s*\n\s*draw\(\);\s*\n\s*toast/.test(appSrc));
+  // 贴回后还会自动打开调色工具（见「基础调色」一节），所以 toast 不再紧跟 draw()。
+  // 断言改成「先关对比层、再刷界面」这个真正要保证的顺序。
+  t('应用结果时走 closeCompare', /closeCompare\(\);\s*\n\s*updateUI\(\);\s*\n\s*draw\(\);/.test(appSrc));
   t('放弃结果时走 closeCompare', /function discardPending\(\)[\s\S]{0,200}closeCompare\(\)/.test(appSrc));
   t('进入对比视图时重置缩放', /cmpView = null;\s*\/\/ 每次进入都从「适应窗口」开始/.test(appSrc));
 
@@ -1951,8 +1953,17 @@ console.log('\n【发布】历史版本必须可下载（README 与归档一致�
     const archVers = dirs.map((d) => d.replace(/^v/, ''));
     const missingArch = tags.map((t) => t.replace(/^v/, '')).filter((v) => archVers.indexOf(v) < 0);
     t('README 列的版本都有本地归档', missingArch.length === 0, missingArch);
-    // 当前版本单独成行（不带链接），所以比对时要把它也算上
-    const listed = tags.map((t) => t.replace(/^v/, '')).concat([ver.versionName]);
+    // 表格里还有一类「**vX.Y.Z**」的加粗行：版本已写好说明、也留了归档，
+    // 但**故意不带链接** —— 因为它还没发到 GitHub（例如只在本机测过）。
+    // 这类行也必须算「写进了 README」，否则每次本地攒版本都会误报。
+    // 注意：带链接的行仍然必须真的能下载（上面那条断言管着），两类不能混。
+    const boldVers = (sec.match(/\|\s*\*\*(v[\d.]+)\*\*\s*\|/g) || [])
+      .map((r) => r.match(/v[\d.]+/)[0].replace(/^v/, ''));
+    t('加粗行（未发布版本）与链接行不重叠',
+      boldVers.every((v) => tags.indexOf('v' + v) < 0), boldVers);
+    const listed = tags.map((t) => t.replace(/^v/, ''))
+      .concat(boldVers)
+      .concat([ver.versionName]);
     const missingDoc = archVers.filter((v) => listed.indexOf(v) < 0);
     t('归档里的每个版本都写进了 README', missingDoc.length === 0, missingDoc);
   } else {
@@ -2136,11 +2147,14 @@ console.log('\n【引导线】位置必须精确传到模型，且不能把线�
 
   // 1) 提示词里必须明确「线只是说明位置，不要画出来」
   //    不写这句的话，模型有相当概率把引导线当成画面内容画进去（实测过）
-  const d = C.describeGuides({ guides: [{ kind: 'horizon', x1: 0, y1: .6, x2: 1, y2: .6 }], isZh: true });
-  t('要求不要画出线条', /不要.*画出任何线条/.test(d), d);
+  const d = C.describeGuides({ guides: [{ kind: 'line', x1: 0, y1: .6, x2: 1, y2: .6 }], isZh: true });
+  // 引导线现在**真的画进了请求图**（这次改动的核心），所以「别把线画出来」这句
+  // 比以前更关键：模型看得见线，不说清楚它就会当成画面内容照着生成
+  t('要求不要画出线条', /不要把任何一条彩色线条画进最终画面/.test(d), d);
+  t('说明了线是标注、不是画面内容', /不是照片里真实存在的东西/.test(d));
   t('英文版也有对应约束',
-    /do not draw any lines/i.test(C.describeGuides({
-      guides: [{ kind: 'horizon', x1: 0, y1: .6, x2: 1, y2: .6 }], isZh: false
+    /never draw any of these colored lines/i.test(C.describeGuides({
+      guides: [{ kind: 'line', x1: 0, y1: .6, x2: 1, y2: .6 }], isZh: false
     })));
 
   // 2) 坐标换算：外扩上下左右各 12% 时，位置误差必须为 0
@@ -2168,7 +2182,8 @@ console.log('\n【引导线】位置必须精确传到模型，且不能把线�
     /planStrokeOverlay\(\{/.test(imgBuild) && /isFreehandGuide/.test(
       fs3.readFileSync(__dirname + '/../app/core.js', 'utf8')));
   t('笔迹进图受开关控制', /S\.cfg\.guideStrokeOverlay !== false/.test(imgBuild));
-  t('引导线只画在屏幕预览上', /if \(S\.guides\.length && S\.rect\) drawGuides\(/.test(appSrc));
+  // 没有框选时引导线画在整张图上（见 effectiveRect），所以不能再要求 S.rect
+  t('引导线只画在屏幕预览上', /if \(S\.guides\.length\) drawGuides\(/.test(appSrc));
 
   // 4) 引导线相对选区存储 → 换选区/换图必须清空，否则位置全错
   t('换选区清空引导线', /S\.guides = \[\];\s*\n\s*updateGuideBadge\(\);/.test(appSrc));
@@ -2288,20 +2303,29 @@ console.log('\n【笔迹】手绘走向必须真的送到模型，且不能被�
         只说要生成 → 模型把线画进画面；只说别画线 → 模型忽略笔迹。 */
   const d = C.describeGuides({
     guides: [{ kind: 'freehand', points: [{ x: .2, y: .3 }, { x: .8, y: .4 }] }],
-    isZh: true, strokeColorZh: '红色'
+    isZh: true
   });
   t('提示词要求沿笔迹生成', /沿着笔迹生成/.test(d));
-  t('提示词禁止把线画进画面', /绝对不要把红色线条本身画进画面/.test(d));
+  t('提示词禁止把线画进画面', /绝对不要把任何一条彩色线条画进最终画面/.test(d));
   t('提示词强调最终画面不能有线条', /不能出现任何线条/.test(d));
-  // 颜色名必须和实际画进图的颜色一致，否则模型会去找不存在的颜色
-  t('颜色名与设置一致', (() => {
-    for (const id of ['red', 'magenta', 'cyan']) {
-      const c = C.getStrokeColor(id);
-      const s2 = C.describeGuides({
-        guides: [{ kind: 'freehand', points: [{ x: .2, y: .3 }, { x: .8, y: .4 }] }],
-        isZh: true, strokeColorZh: c.zh
-      });
+  // 颜色名必须和实际画进图的颜色一致（同一个取色函数），
+  // 否则模型会去找一条根本不存在的颜色。这里逐条比对三处的取值。
+  t('颜色名与实际画进图的颜色一致', (() => {
+    const guides = [
+      { kind: 'line', x1: 0, y1: .2, x2: 1, y2: .2 },
+      { kind: 'line', x1: 0, y1: .5, x2: 1, y2: .5 },
+      { kind: 'line', x1: 0, y1: .8, x2: 1, y2: .8 }
+    ];
+    const s2 = C.describeGuides({ guides, isZh: true });
+    const painted = C.planStrokeOverlay({
+      guides, rect: { x: 0, y: 0, w: 100, h: 100 },
+      ctxRect: { x: 0, y: 0, w: 100, h: 100 }
+    });
+    // 提示词里出现的每种颜色名，都要能在实际绘制的颜色里找到同一个 hex
+    for (let i = 0; i < guides.length; i++) {
+      const c = C.guideColorAt(i);
       if (s2.indexOf(c.zh) < 0) return false;
+      if (painted.draw[i].color !== c.hex) return false;
     }
     return true;
   })());
@@ -2316,11 +2340,16 @@ console.log('\n【笔迹】手绘走向必须真的送到模型，且不能被�
   t('有开关能关掉笔迹进图', /id="set-strokeimg"/.test(html));
   t('开关默认开', /guideStrokeOverlay: true,/.test(appSrc));
   t('关掉后不调用绘制', (() => {
-    const seg = appSrc.slice(appSrc.indexOf('let strokeNote'), appSrc.indexOf('lastStrokeNote = strokeNote'));
-    return /S\.cfg\.guideStrokeOverlay !== false/.test(seg);
+    // 从「开关从哪来」到「画在哪」整段一起看：strokeOn 在 let strokeNote 之前定义
+    const seg = appSrc.slice(appSrc.indexOf('const jobGuides ='),
+      appSrc.indexOf('lastStrokeNote = strokeNote'));
+    // 开关现在从调用方传入（快照化）：`strokeOn` 就是那次的开关状态
+    return /if \(strokeOn && jobGuides\.length\)/.test(seg) &&
+      /const strokeOn = \(strokeOverlay === undefined/.test(seg);
   })());
   t('关掉后仍作为文字说明（不是彻底失效）', (() => {
-    const seg = appSrc.slice(appSrc.indexOf('const sc = C.getStrokeColor'), appSrc.indexOf('const req = C.buildImageRequest'));
+    const seg = appSrc.slice(appSrc.indexOf('const selGuides ='),
+      appSrc.indexOf('const req = C.buildImageRequest'));
     return /describeGuides/.test(seg);
   })());
   t('界面提示了怎么应对线被画出来', /关掉/.test(html) && /画进/.test(html));
@@ -2332,9 +2361,11 @@ console.log('\n【笔迹】手绘走向必须真的送到模型，且不能被�
   })());
 
   /* 8) 界面接线 */
-  t('有颜色选择条', /id="guide-colors"/.test(html));
+  // 颜色选择条**故意移除**：颜色按序号自动分配。
+  // 让用户自己选色会直接毁掉提示词的指代能力 —— 两条红线时「红线」这个词就废了。
+  t('没有颜色选择条（颜色按序号自动分配）', !/id="guide-colors"/.test(html));
   t('有自由绘制专用提示', /id="guide-tip-free"/.test(html));
-  t('切到自由绘制才显示颜色条', /cb\.hidden = !\(inGuide && free\)/.test(appSrc));
+  t('颜色条相关代码已彻底移除', !/guide-colors/.test(appSrc));
   // 提示文案随类型切换，且只在第一次进这个工具时显示。
   // 用 tipDecision 而不是直接查 shouldShowHint：进入工具的那一次点击里
   // 本函数会被调用两次，直接查会让提示出现又立刻消失（用户看不到，记录却已写）。
@@ -2508,10 +2539,19 @@ console.log('\n【返回】按一下返回键不能直接退出应用');
     /function goHome[\s\S]{0,400}touchWork\(\)/.test(appSrc));
   t('存档失败不挡住返回', /catch \(e\) \{ \/\* 作品库失败不该挡住返回 \*\/ \}/.test(appSrc));
 
-  /* 回归点 6：卸载文档必须作废在途生成，否则结果会贴到已卸载的文档上 */
-  t('卸载时作废在途生成',
-    /function goHome[\s\S]{0,900}S\.genToken\+\+/.test(appSrc) &&
-    /function goHome[\s\S]{0,600}S\.aborter\.abort\(\)/.test(appSrc));
+  /* 回归点 6：卸载文档必须让「当前文档」的操作序列作废。
+     **但不再中止请求** —— 后台生成的核心就是「回首页后任务继续跑，
+     结果落进那件作品的记录」。作废的是「把结果贴进当前文档」这条路，
+     由 docVersion / genToken 保证，而不是靠 abort 把请求掐死。
+     用 abort 掐死的代价是：上游已经出图、钱已经花了，结果却收不到。 */
+  t('卸载时作废当前文档的操作序列',
+    /function goHome[\s\S]{0,900}S\.genToken\+\+/.test(appSrc));
+  t('卸载时不再中止请求（任务转后台继续跑）',
+    !/function goHome[\s\S]{0,900}S\.aborter\.abort\(\)/.test(appSrc));
+  t('换图仍会取消当前这张的任务（结果已无处可落）',
+    /function setImage[\s\S]{0,600}cancelJobsForCurrentDoc\(/.test(appSrc));
+  t('取消只针对当前文档（别的照片的任务照常跑）',
+    /function cancelJobsForCurrentDoc[\s\S]{0,600}j\.docVersion !== docVer/.test(appSrc));
 
   /* 回归点 7：处理失败不能让用户卡住 —— 返回 false 交给系统退出 */
   t('handleBack 异常时放行退出',
@@ -2744,6 +2784,1330 @@ console.log('\n【返回】按一下返回键不能直接退出应用');
   t('通知栏小图标已生成', fs.existsSync(res + '/drawable-xxhdpi/ic_stat_photostudio.png'));
 })();
 /* ---------- 枫叶图标（回归） ---------- */
+
+/* ---------- 导出保存位置（回归） ---------- */
+/*
+ * 缺陷现象：点了「导出」提示「已导出」，但手机上找不到文件。
+ * 根因：Android WebView 既没实现 navigator.share，也没实现文件下载
+ *      （没有 DownloadListener，点 <a download> 什么都不会发生），
+ *      而提示是无条件弹的 —— 用户被「成功」骗了。
+ * 回归点：壳里必须走原生保存；三个位置都要有对应实现。
+ */
+(() => {
+  const fs = require('fs');
+  const appSrc = fs.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html = fs.readFileSync(__dirname + '/../app/index.html', 'utf8');
+  const core = fs.readFileSync(__dirname + '/../app/core.js', 'utf8');
+  const act = fs.readFileSync(__dirname + '/../android/src/com/photostudio/app/MainActivity.java', 'utf8');
+  const srv = fs.readFileSync(__dirname + '/../android/src/com/photostudio/app/LocalServer.java', 'utf8');
+  const mf = fs.readFileSync(__dirname + '/../android/AndroidManifest.xml', 'utf8');
+
+  /* ---------- 原生侧：三个位置都要真的写盘 ---------- */
+
+  t('本地服务有保存接口', /"\/api\/save"\.equals\(path\)/.test(srv));
+  t('保存接口收二进制（不是 base64）',
+    /private void handleSave\(OutputStream out, String rawPath, byte\[\] body\)/.test(srv));
+  t('保存接口能取文件名与位置', /queryParam\(rawPath, "name"\)/.test(srv) && /queryParam\(rawPath, "where"\)/.test(srv));
+  t('Saver 接口已定义', /public interface Saver \{/.test(srv));
+  t('Saver 已由 Activity 注入', /server\.setSaver\(new LocalServer\.Saver\(\)/.test(act));
+
+  // 相册 / 下载 / 每次询问 三条路径都要在
+  t('保存入口按位置分派', /private String saveImage\(byte\[\] data, String name, String where\)/.test(act));
+  t('相册走系统媒体库', /MediaStore\.Images\.Media\.EXTERNAL_CONTENT_URI/.test(act));
+  t('下载走系统媒体库', /MediaStore\.Downloads\.EXTERNAL_CONTENT_URI/.test(act));
+  t('每次询问走系统文件选择器', /Intent\.ACTION_CREATE_DOCUMENT/.test(act));
+  t('选完位置能拿到结果', /requestCode == REQ_SAVE_AS/.test(act));
+  t('取消选择不会当成失败崩溃', /canceled/.test(act));
+
+  // 分区存储：10+ 不需要权限，9- 才要
+  t('按系统版本选写入方式', /Build\.VERSION\.SDK_INT >= 29\) return saveScoped/.test(act));
+  t('低版本有降级写入路径', /private String saveLegacy\(/.test(act));
+  t('低版本会通知相册刷新', /MediaScannerConnection\.scanFile/.test(act));
+  t('低版本才申请存储权限', /requestWriteStorage\(\)/.test(act));
+  t('Manifest 声明了存储权限且限低版本',
+    /WRITE_EXTERNAL_STORAGE[\s\S]{0,80}maxSdkVersion="28"/.test(mf));
+
+  // 文件名不能带路径分隔符（否则能写到别处去）
+  t('文件名做了安全处理', /private static String sanitizeFileName/.test(act));
+  t('剥掉路径分隔符', /replace\('\/', '_'\)/.test(act));
+  t('同名文件不覆盖', /private static File uniqueFile/.test(act));
+  t('写入失败会回滚（避免留半个文件）', /IS_PENDING, 1/.test(act) && /IS_PENDING, 0/.test(act));
+
+  /* ---------- 网页侧：能力探测 + 走原生 ---------- */
+
+  t('有原生保存能力探测', /function nativeSaveAvailable\(\)/.test(appSrc));
+  t('探测走桥（浏览器里没有 PSBridge）', /saveSupported/.test(appSrc));
+  t('桥方法已暴露', /public boolean saveSupported\(\)/.test(act));
+  t('通过本地服务保存', /function nativeSave\(blob, name, where\)/.test(appSrc));
+  t('保存请求打到 /api/save', /'\/api\/save' \+ q/.test(appSrc));
+  t('导出优先走原生保存', /if \(nativeSaveAvailable\(\)\) \{[\s\S]{0,200}await nativeSave\(/.test(appSrc));
+  // 关键：保存成功要用**真实路径**提示，而不是笼统的「已导出」
+  t('提示显示真实保存路径', /toast\('已保存到 ' \+ r\.path/.test(appSrc));
+  t('原生失败会退回分享/下载（不让用户白等）',
+    /保存失败'\) \+ ' · 改用分享'/.test(appSrc) || /改用分享/.test(appSrc));
+  t('用户取消时不报成功', /if \(r\.canceled\) \{ toast\('已取消导出'\)/.test(appSrc));
+
+  /* ---------- 设置项 ---------- */
+
+  t('core 里有三个保存位置', /const SAVE_LOCATIONS = \[/.test(core));
+  for (const id of ['gallery', 'downloads', 'ask']) {
+    t('保存位置含 ' + id, new RegExp("id: '" + id + "'").test(core));
+  }
+  t('保存位置已导出', /SAVE_LOCATIONS,/.test(core));
+  t('配置里有默认值', /expSaveWhere: 'gallery'/.test(appSrc));
+  t('配置会持久化', /'expSaveWhere',/.test(appSrc));
+  // 脏数据不能让导出存到不存在的位置
+  t('脏数据会回落到相册', /if \(!C\.isSaveLocation\(c\.expSaveWhere\)\) c\.expSaveWhere = 'gallery'/.test(appSrc));
+  t('回落逻辑是纯函数（可单测）', /function isSaveLocation\(id\)/.test(core) && /function getSaveLocation\(id\)/.test(core));
+  t('两个纯函数都已导出', /isSaveLocation, getSaveLocation,/.test(core));
+
+  /* ---------- 界面 ---------- */
+
+  t('导出面板有保存位置容器', /id="exp-saves"/.test(html));
+  t('导出面板有保存位置分组', /id="exp-save-group"/.test(html));
+  t('有位置说明文字', /id="exp-save-hint"/.test(html));
+  t('渲染三个位置选项', /C\.SAVE_LOCATIONS\.map\(\(L\) =>/.test(appSrc));
+  t('点了会记住', /S\.cfg\.expSaveWhere = b\.dataset\.save/.test(appSrc));
+  // 浏览器里下载目录由浏览器决定，这一组要藏起来（否则点了没用）
+  t('浏览器里隐藏这一组', /svGroup\.hidden = !nativeSaveAvailable\(\)/.test(appSrc));
+  // 说明小字样式不能只在设置页生效
+  t('说明小字样式覆盖导出面板',
+    /#exportpanel \.st-desc-inline/.test(fs.readFileSync(__dirname + '/../app/style.css', 'utf8')));
+})();
+/* ---------- 导出保存位置（回归） ---------- */
+
+/* ---------- 后台生成任务（回归） ---------- */
+console.log('\n【后台生成】一张图进 AI 生图后，可以放到后台去处理下一张');
+
+(() => {
+  const fs = require('fs');
+  const path = require('path');
+  const C2 = require(path.join(__dirname, '..', 'app', 'core.js'));
+  const appSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'app', 'index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'app', 'style.css'), 'utf8');
+
+  /* ---------- 1) 核心回归：离开照片**不再中止**请求 ---------- */
+  // 旧实现：goHome / setImage 无条件 S.aborter.abort() →
+  // 用户回首页 = 这次生成白花钱（上游已出图，结果收不到）。
+  t('goHome 不再中止在途请求',
+    !/function goHome[\s\S]{0,1200}S\.aborter\.abort\(\)/.test(appSrc));
+  t('goHome 明确注释了「任务继续跑」',
+    /function goHome[\s\S]{0,900}在途任务\*\*继续跑\*\*/.test(appSrc));
+  // 但当前文档的操作序列仍要作废（防旧回调写 UI / 贴错图）
+  t('goHome 仍作废当前文档的操作序列',
+    /function goHome[\s\S]{0,1200}S\.genToken\+\+/.test(appSrc));
+
+  /* ---------- 2) 取消只针对当前文档 ---------- */
+  t('有「只取消当前文档任务」的函数', /function cancelJobsForCurrentDoc\(/.test(appSrc));
+  t('取消时按 docVersion 过滤',
+    /function cancelJobsForCurrentDoc[\s\S]{0,700}j\.docVersion !== docVer/.test(appSrc));
+  t('换图会取消当前文档的任务',
+    /function setImage[\s\S]{0,700}cancelJobsForCurrentDoc\(/.test(appSrc));
+  t('恢复作品会取消当前文档的任务',
+    /async function restoreSession[\s\S]{0,900}cancelJobsForCurrentDoc\(/.test(appSrc));
+  t('返回键取消当前文档的任务',
+    /case 'cancel-gen':[\s\S]{0,300}cancelJobsForCurrentDoc\(/.test(appSrc));
+  t('取消按钮取消当前文档的任务',
+    /\$\('btn-cancel'\)\.onclick[\s\S]{0,150}cancelJobsForCurrentDoc\(/.test(appSrc));
+  // 关键：取消不能牵连别的照片的任务（那是用户已经花的钱）
+  t('取消不牵连别的照片（明确注释）',
+    /刻意不动别的照片的任务/.test(appSrc));
+
+  /* ---------- 3) 三个失败模式都要防住 ---------- */
+  // (a) 结果落到错的照片上 → 任务自带归属 + 落地前双重校验
+  t('任务自带归属信息（workId + docVersion）',
+    /workId: S\.workId,\s*\n\s*docVersion: S\.docVersion,/.test(appSrc));
+  t('落地走纯函数决策（可单测）', /C\.planJobLanding\(/.test(appSrc));
+  t('决策同时看作品 id 与文档版本',
+    /function planJobLanding[\s\S]{0,900}curDocVersion === opt\.jobDocVersion/.test(
+      fs.readFileSync(path.join(__dirname, '..', 'app', 'core.js'), 'utf8')));
+  // 发起时固化全部输入 —— 之后用户换图/改选区都不影响这次请求
+  t('请求输入在发起时固化成任务快照', /function prepareJob\(\)/.test(appSrc));
+  t('快照里存了选区', /rect,\s*\n\s*mask,\s*\n\s*built,/.test(appSrc));
+  t('快照里存了请求体', /req,/.test(appSrc));
+  t('快照里存了掩膜', /mask,\s*\n\s*built,/.test(appSrc));
+  // 引导线/开关/颜色也显式传进去（不能读模块状态）
+  t('引导线按快照传给组图函数',
+    /buildRequestImage\(rect, mask, rect, S\.guides\.slice\(\), S\.cfg\.guideStrokeOverlay\)/.test(appSrc));
+
+  // (b) 结果静默丢失 → 落不进当前文档就落进作品库
+  t('有「把结果存进作品库」的函数', /function stashJobResult\(/.test(appSrc));
+  t('结果存进**任务自己那件**作品的记录',
+    /function stashJobResult[\s\S]{0,400}S\.library\.find\(\(e\) => e\.id === job\.workId\)/.test(appSrc));
+  t('结果存了 patch 与选区',
+    /bgResult = \{[\s\S]{0,400}rect: \{[\s\S]{0,200}patch: patchUrl/.test(appSrc));
+  t('结果存了掩膜（画笔排除的地方贴回时也不动）',
+    /mask: job\.mask \? C\.packMask\(job\.mask\) : null/.test(appSrc));
+  t('存不进去时明确报失败（不假装成功）',
+    /if \(ok\) \{[\s\S]{0,400}\} else \{[\s\S]{0,400}job\.status = 'failed'/.test(appSrc));
+  // 用户回到那张照片时自动贴回 —— 这是闭环
+  t('回到作品时自动贴回后台结果', /async function applyStashedResult\(/.test(appSrc));
+  t('continueWork 里调用了贴回', /async function continueWork[\s\S]{0,1600}applyStashedResult\(w\)/.test(appSrc));
+  t('贴回后清掉暂存（不重复贴）', /rec\.bgResult = null;/.test(appSrc));
+  t('贴回进撤销栈（可撤销）',
+    /async function applyStashedResult[\s\S]{0,2600}recordUndo\(/.test(appSrc));
+
+  // (c) UI 假装在忙 → busy 只反映当前这张照片
+  t('busy 由纯函数按当前文档判定', /C\.planBusyForCurrent\(/.test(appSrc));
+  t('busy 判定只看当前文档的任务',
+    /function planBusyForCurrent[\s\S]{0,700}j\.docVersion === opt\.curDocVersion/.test(
+      fs.readFileSync(path.join(__dirname, '..', 'app', 'core.js'), 'utf8')));
+  t('没有打开照片时不显示 busy',
+    /function planBusyForCurrent[\s\S]{0,400}if \(!opt\.hasPhoto\) return \{ busy: false, count: 0 \}/.test(
+      fs.readFileSync(path.join(__dirname, '..', 'app', 'core.js'), 'utf8')));
+
+  /* ---------- 4) 用户要能看到进度（否则不敢离开） ---------- */
+  t('有任务角标元素', /id="job-badge"/.test(html));
+  t('角标有样式', /#job-badge \{/.test(css));
+  t('全部完成时角标变绿（有结果可看）', /#job-badge\.ok/.test(css));
+  t('角标文案来自纯函数', /C\.planJobBadge\(S\.jobs\)/.test(appSrc));
+  // 角标刻意不放顶栏：顶栏为「文件名可见」收敛过一次
+  t('角标不放顶栏（避免挤掉文件名）',
+    !/id="job-badge"[\s\S]{0,80}tb-btn/.test(html));
+  t('角标有「为什么放这里」的注释', /刻意不放进顶栏/.test(html));
+  t('首页条目标出后台状态', /C\.jobTagFor\(w\.id, S\.jobs\)/.test(appSrc));
+  t('作品库条目标出后台状态', /C\.jobTagFor\(w\.id, S\.jobs\)/.test(appSrc));
+  t('已完成的结果在首页有专门标记',
+    /w\.bgResult && !jt[\s\S]{0,200}有生成结果待贴回/.test(appSrc));
+  t('状态标有样式区分', /\.home-tag\.job-done/.test(css) && /\.home-tag\.job-running/.test(css));
+  // 发起时明确告知「可以走」——这是这个功能存在的意义
+  t('发起后提示可以切到别的照片',
+    /已开始生成 · 可以切到别的照片，好了会通知你/.test(appSrc));
+  t('后台完成时发原生通知', /notifyGenDone\('后台生成完成/.test(appSrc));
+
+  /* ---------- 5) 任务表不落盘（应用被杀时请求也断了） ---------- */
+  t('任务表在内存里', /jobs: \[\],/.test(appSrc));
+  t('任务表不写 localStorage', !/LS_KEY_JOBS/.test(appSrc));
+  t('注释说明了为什么不落盘', /应用被系统杀掉时 HTTP 请求也断了/.test(appSrc));
+  // 任务表要能收敛（否则长会话会越积越多）
+  t('有清理函数', /function pruneJobs\(\)/.test(appSrc));
+  t('已完成且看过的会被清掉',
+    /function pruneJobs[\s\S]{0,300}j\.status === 'running' \|\| !j\.seen/.test(appSrc));
+  t('失败/取消后也会清理',
+    /function cancelJob[\s\S]{0,500}pruneJobs\(\);/.test(appSrc) &&
+    /catch \(err\) \{[\s\S]{0,1400}pruneJobs\(\);/.test(appSrc));
+
+  /* ---------- 6) 失败处理的细节 ---------- */
+  // 用户已经换到别的照片时，不该往他脸上弹上一张的报错
+  t('只有还在看这张时才弹错误面板',
+    /const stillHere = job\.docVersion === S\.docVersion && !!S\.img;/.test(appSrc));
+  t('不在看这张时改成 toast', /else toast\('后台生成失败：'/.test(appSrc));
+  t('切走后失败也发通知',
+    /document\.hidden[\s\S]{0,120}notifyGenDone\('生成失败/.test(appSrc));
+
+  /* ---------- 7) 「准备」与「执行」分离（各自好测好读） ---------- */
+  t('有 prepareJob（同步，会抛本地自检错）', /function prepareJob\(\)/.test(appSrc));
+  t('有 runJob（异步，发请求 + 出 patch）', /async function runJob\(job\)/.test(appSrc));
+  t('本地自检失败就地报错（不白等一次）',
+    /try \{\s*return prepareJob\(\);\s*\} catch \(err\) \{[\s\S]{0,400}showGenError/.test(appSrc));
+  t('runJob 用任务自己的 aborter',
+    /await callModel\(job\.req, job\.aborter\)/.test(appSrc));
+  // callModel 必须接收 aborter 参数，不能读全局的 S.aborter
+  t('callModel 收 aborter 参数', /async function callModel\(body, aborter\)/.test(appSrc));
+  t('callModel 不再读全局 aborter',
+    !/async function callModel\(body, aborter\)[\s\S]{0,4000}S\.aborter/.test(appSrc));
+  t('注释说明了「每个任务各自一个取消器」',
+    /必须是\*\*每个任务各自一个\*\*/.test(appSrc));
+
+  /* ---------- 8) 保活：后台期间也要钉住进程 ---------- */
+  // 保活看的是「有没有任务在跑」，不能只看 busy ——
+  // 用户在首页时 busy 是 false，但后台任务还需要保活
+  t('保活按「有没有任务在跑」决定',
+    /function syncKeepAlive[\s\S]{0,1400}hasRunningJobs/.test(appSrc));
+  t('首页时后台任务仍在保活',
+    /const keepNeeded = !!S\.busy \|\| hasRunningJobs;/.test(appSrc));
+  // 注释必须说明「为什么不能只看 busy」——否则以后很容易被「简化」掉
+  t('注释说明了为什么不能只看 busy',
+    /保活看的是「有没有生成在跑」，\*\*不能只看 busy\*\*/.test(appSrc));
+  // 任务跑完时要释放保活（否则留下一条不该有的常驻通知）
+  t('busy 未变时也同步保活',
+    /else syncKeepAlive\(\);/.test(appSrc));
+})();
+/* ---------- 后台生成任务（回归） ---------- */
+
+/* ---------- 基础调色（回归） ---------- */
+console.log('\n【调色】基础调色工具：作用在框选区域、可预览、可撤销、不花钱');
+
+(() => {
+  const fs = require('fs');
+  const path = require('path');
+  const C2 = require(path.join(__dirname, '..', 'app', 'core.js'));
+  const appSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'app', 'index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'app', 'style.css'), 'utf8');
+
+  /* ---------- 1) 像素数学在 core（可单测），不在 DOM 里内联 ---------- */
+  t('core 有 gradePixels', typeof C2.gradePixels === 'function');
+  t('core 有参数定义', Array.isArray(C2.GRADE_PARAMS) && C2.GRADE_PARAMS.length >= 5);
+  t('core 有描述函数', typeof C2.describeGrade === 'function');
+  t('core 有归一化函数', typeof C2.normalizeGrade === 'function');
+  t('core 有全零判定', typeof C2.isGradeEmpty === 'function');
+  t('全部已导出', /gradePixels, describeGrade/.test(fs.readFileSync(
+    path.join(__dirname, '..', 'app', 'core.js'), 'utf8')));
+  // 五项必须齐备（用户明确要求的最低集合）
+  for (const k of ['exposure', 'contrast', 'saturation', 'temperature', 'tint']) {
+    t('参数含 ' + k, C2.GRADE_PARAMS.some((p) => p.key === k));
+  }
+  // 曝光必须是「线性光里乘系数」，不是 sRGB 加减 —— 后者暗部变化远大于亮部
+  t('曝光在线性光里做', /gradeExposureFactor/.test(fs.readFileSync(
+    path.join(__dirname, '..', 'app', 'core.js'), 'utf8')));
+  t('转线性光用的是项目里已有的 srgbToLinear',
+    /let r = srgbToLinear\(r0\)/.test(fs.readFileSync(path.join(__dirname, '..', 'app', 'core.js'), 'utf8')));
+
+  /* ---------- 2) 作用范围：只动框选区域，框外一个像素都不动 ---------- */
+  // 这是用户明确要求的「对框选区域进行色调微调」，也是这个应用的核心承诺
+  // 整张图调色时羽化按 0 处理：羽化会让最外一圈权重趋近 0，
+  // 变成「整张图调色、但四周留一圈没调」，那是一个可见的框
+  t('app 里调色走 layerAlphaMap 算权重',
+    /function applyGradeInto\([\s\S]{0,1600}C\.layerAlphaMap\(whole \? Object\.assign\(\{\}, edit, \{ feather: 0 \}\) : edit, r\.w, r\.h\)/.test(appSrc));
+  t('调色按选区裁剪像素',
+    /function applyGradeInto\(targetCtx, edit, id\)[\s\S]{0,400}const r = edit\.rect;/.test(appSrc));
+  // 掩膜/羽化让边界平滑（不然选区边界会有可见的色块分界）
+  t('掩膜与羽化都参与权重',
+    /C\.layerAlphaMap\(whole \? Object\.assign\(\{\}, edit, \{ feather: 0 \}\) : edit/.test(appSrc) &&
+    /feather/.test(appSrc));
+  t('调色图层沿用画笔掩膜（画笔排除的地方调色也不动）',
+    /function makeGradeEdit[\s\S]{0,600}mask: S\.strokes\.length \? maskFromStrokes\(rect\) : null/.test(appSrc));
+
+  /* ---------- 3) 独立合成路径：不与「模型生成块」那套混在一起 ---------- */
+  t('调色有独立的合成分支',
+    /if \(edit\.grade && !edit\.patch\) \{[\s\S]{0,200}applyGradeInto\(targetCtx, edit, id\)/.test(appSrc));
+  // 调色不引入外来色差，不该跑色彩匹配/无缝融合
+  t('调色不跑色彩匹配（不需要）',
+    /colorMatch: 0, *\/\/ 调色不引入外来色差/.test(appSrc) ||
+    /grade: C\.normalizeGrade\(grade\),[\s\S]{0,200}colorMatch: 0/.test(appSrc));
+  // 图层开关关闭时不能合成
+  t('调色图层受图层开关控制',
+    /function applyGradeInto[\s\S]{0,400}if \(!L\.enabled \|\| L\.opacity <= 0\) return;/.test(appSrc));
+  t('调色图层受图层不透明度控制',
+    /applyGradeInto[\s\S]{0,400}layerAlphaMap/.test(appSrc));
+
+  /* ---------- 4) 非破坏性 + 可撤销 ---------- */
+  t('调色记录进 S.edits（非破坏性）', /function applyGrade[\s\S]{0,2000}S\.edits\.push\(edit\)/.test(appSrc));
+  t('调色可撤销（记进撤销栈）', /function applyGrade[\s\S]{0,2200}recordUndo\(\{[\s\S]{0,200}'add-layer'/.test(appSrc));
+  t('撤销标签说明改了什么颜色',
+    /label: '调色：' \+ C\.describeGrade\(g\)/.test(appSrc));
+  // 撤销 = 删掉这个图层，重做 = 加回来（复用已有的 add-layer 命令）
+  t('调色复用 add-layer 命令（撤销/重做天然可用）',
+    /type: 'add-layer', layer: edit, index: S\.edits\.length - 1/.test(appSrc));
+  // 调色要能被「修改记录」面板管（开关、删除、调参）
+  t('调色图层能被开关/删除',
+    /toggle-layer/.test(appSrc) && /remove-layer/.test(appSrc));
+  t('修改记录面板显示调色的色调描述',
+    /if \(e\.grade\) \{[\s\S]{0,300}C\.describeGrade\(e\.grade\)/.test(appSrc));
+  t('修改记录面板为调色图层渲染五个滑块',
+    /if \(e\.grade\) \{[\s\S]{0,400}for \(const gp of C\.GRADE_PARAMS\)/.test(appSrc));
+
+  /* ---------- 5) 会话持久化：调色参数要能存下来（不然「继续编辑」就丢了） ---------- */
+  const coreSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'core.js'), 'utf8');
+  t('会话里存了 grade 参数',
+    /grade: e\.grade \? normalizeGrade\(e\.grade\) : null/.test(coreSrc));
+  t('恢复时能还原调色图层',
+    /if \(it\.grade && !it\.patch\) \{[\s\S]{0,400}grade: C\.normalizeGrade\(it\.grade\)/.test(appSrc));
+  // 调色图层没有 patch，内存整理不能因为读 patch.width 而崩
+  t('内存整理跳过没有 patch 的图层',
+    /for \(const e of list\) used \+= e\.patch \? patchMemory\(e\.patch\.width, e\.patch\.height\) : 0;/.test(coreSrc));
+  t('降采样跳过没有 patch 的图层',
+    /if \(!e\.patch\) continue; *\/\/ 调色图层没有可降采样的 patch/.test(coreSrc));
+  t('app 侧降采样也跳过', /if \(!e \|\| !e\.patch \|\| e\.patch\.__halved\) continue;/.test(appSrc));
+  // 接缝评分对没有 patch 的图层要返回 null（不能崩）
+  t('接缝评分对调色图层返回 null', /if \(!edit \|\| !edit\.patch \|\| !S\.docCanvas\) return null;/.test(appSrc));
+
+  /* ---------- 6) 实时预览 + 只在「应用」时记一条 ---------- */
+  t('有实时预览函数', /function previewGrade\(\)/.test(appSrc));
+  t('预览不写历史（拖滑块不产生上百条撤销）',
+    /function previewGrade[\s\S]{0,900}rebuildViewCanvas\(\)/.test(appSrc) &&
+    !/function previewGrade[\s\S]{0,900}recordUndo/.test(appSrc));
+  t('预览与「应用」用同一套参数合成（所见即所得）',
+    /function previewGrade[\s\S]{0,700}makeGradeEdit\(rect, g\)/.test(appSrc) &&
+    /function applyGrade[\s\S]{0,600}makeGradeEdit\(rect, g\)/.test(appSrc) &&
+    /function previewGrade[\s\S]{0,700}const rect = effectiveRect\(\)/.test(appSrc) &&
+    /function applyGrade[\s\S]{0,600}const rect = effectiveRect\(\)/.test(appSrc));
+  // 预览时 viewCanvas 已含草稿，应用前必须重建干净底子，否则调色会叠加两次
+  t('应用前重建底子（避免调色叠加两次）',
+    /function applyGrade[\s\S]{0,900}rebuildViewCanvas\(\)/.test(appSrc));
+  t('应用后草稿归零（再次调色不会叠加）',
+    /function applyGrade[\s\S]{0,1800}gradeDraft = C\.emptyGrade\(\);/.test(appSrc));
+  t('有归零按钮的处理', /\$\('grade-reset'\)\.onclick = resetGradeDraft;/.test(appSrc));
+  t('有应用按钮的处理', /\$\('grade-apply'\)\.onclick = applyGrade;/.test(appSrc));
+  t('参数全零时不记录（避免产生没意义的记录）',
+    /function applyGrade[\s\S]{0,300}if \(C\.isGradeEmpty\(g\)\) \{ toast\('还没有调整任何参数'\); return; \}/.test(appSrc));
+
+  /* ---------- 7) 不花钱：调色不调用模型 ---------- */
+  t('调色路径里没有 callModel', !/function applyGrade[\s\S]{0,2500}callModel/.test(appSrc));
+  t('预览路径里没有 callModel', !/function previewGrade[\s\S]{0,900}callModel/.test(appSrc));
+  t('界面上说明了不花钱', /不调用模型、不花钱/.test(html));
+  t('修改记录里也说明了不花钱', /调色不调用模型，改参数立即生效、不花钱/.test(appSrc));
+
+  /* ---------- 8) 界面：工具入口 + 参数栏 + 提示 ---------- */
+  t('工具行有调色入口', /data-mode="grade"/.test(html));
+  t('入口有图标与文字', /id="btn-grade"[\s\S]{0,300}调色/.test(html));
+  t('入口有已调色数量角标', /id="grade-count"/.test(html));
+  t('有参数栏容器', /id="grade-bar"/.test(html));
+  t('滑块由 core 定义渲染（加参数不用改界面）',
+    /function renderGradeSliders[\s\S]{0,400}for \(const p of C\.GRADE_PARAMS\)/.test(appSrc));
+  t('有归零与应用按钮', /id="grade-reset"/.test(html) && /id="grade-apply"/.test(html));
+  t('有改动说明容器', /id="grade-note"/.test(html));
+  t('有工具提示（说明不花钱）', /id="grade-tip"/.test(html));
+  t('参数栏平时隐藏（不占底栏空间）',
+    /\$\('grade-bar'\)\.hidden = !inGrade;/.test(appSrc));
+  t('提示只在第一次进这个工具时显示',
+    /gtip\.hidden = !\(inGrade && tipDecision\('grade'\)\)/.test(appSrc));
+  t('有参数栏样式', /#grade-bar \{/.test(css) && /\.grade-row/.test(css));
+  t('有改动行高亮样式', /\.grade-row\.on/.test(css));
+  // 调色滑块也必须「只能拖滑块头」——五个滑块紧挨着，误触归零等于白调
+  t('调色滑块也套了 thumbOnlySlider', /thumbOnlySlider\(input\);/.test(appSrc));
+  t('滑块渲染时也套了（不只是 bind 时扫一遍）',
+    /renderGradeSliders[\s\S]{0,2000}thumbOnlySlider\(input\)/.test(appSrc));
+
+  /* ---------- 9) AI 贴回后自动进入调色 ---------- */
+  t('贴回后自动打开调色工具',
+    /function applyPending[\s\S]{0,2600}openGradeTool\(edit\.rect\)/.test(appSrc));
+  t('自动打开时对着**同一块选区**', /openGradeTool\(edit\.rect\)/.test(appSrc));
+  // 可关闭：不想被切走工具的用户有权关掉
+  t('有开关可以关掉自动打开', /S\.cfg\.autoGrade !== false/.test(appSrc));
+  t('设置里有开关', /id="set-autograde"/.test(html));
+  t('开关已接线', /bindField\('set-autograde', 'autoGrade'/.test(appSrc));
+  t('配置默认开', /autoGrade: true/.test(appSrc));
+  t('配置会持久化', /'autoGrade',/.test(appSrc));
+  t('设置界面会同步开关状态', /\$\('set-autograde'\)\.checked = S\.cfg\.autoGrade !== false;/.test(appSrc));
+  // 不打断：不弹窗、不自动改像素（滑块全 0，画面还是刚贴回的结果）
+  t('自动打开不弹确认框（不打断用户）',
+    !/autoGrade !== false[\s\S]{0,300}confirm\(/.test(appSrc));
+  // 不打断：正在用画笔/引导线画东西时不抢走工具
+  t('画笔/引导线模式下不抢工具',
+    /const midTask = gradeMode === 'brush' \|\| gradeMode === 'guide';/.test(appSrc) &&
+    /if \(S\.cfg\.autoGrade !== false && !midTask\)/.test(appSrc));
+  t('自动打开时草稿是全零（不自动改像素）',
+    /function openGradeTool[\s\S]{0,400}gradeDraft = C\.emptyGrade\(\)/.test(appSrc));
+  // 没有框选时按整张图调色（需求：没有框选默认处理整张图）。
+  // 旧行为是弹提示拒绝，现在不再需要 —— 但「没有照片」仍然要拦，
+  // 否则拖滑块没有任何反应，比提示更让人困惑。
+  t('没有选区时按整张图处理（不再弹提示拒绝）',
+    /function openGradeTool[\s\S]{0,500}if \(!effectiveRect\(\)\)/.test(appSrc) &&
+    !/function openGradeTool[\s\S]{0,400}toast\('先在照片上框选要调色的区域'\)/.test(appSrc));
+  t('没有照片时仍然拦住（否则滑块拖了没反应）',
+    /function openGradeTool\(rect\)[\s\S]{0,120}toast\('先打开一张照片'\)/.test(appSrc));
+})();
+/* ---------- 基础调色（回归） ---------- */
+
+/* ---------- 新手教程（回归） ---------- */
+console.log('\n【教程】首次启动弹一次、看过不再弹、随时能重看');
+
+(() => {
+  const fs = require('fs');
+  const path = require('path');
+  const C2 = require(path.join(__dirname, '..', 'app', 'core.js'));
+  const appSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'app', 'index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'app', 'style.css'), 'utf8');
+
+  /* ---------- 1) 「看过」的标记：独立键，不与工具提示混用 ---------- */
+  t('有独立的 localStorage 键', /LS_KEY_TUTORIAL = 'photoStudio\.tutorialSeen\.v1'/.test(appSrc));
+  t('键名沿用 photoStudio. 前缀', /'photoStudio\.tutorialSeen\.v1'/.test(appSrc));
+  // 关键：与工具提示分开存。混用会让「重置工具提示」顺手把教程也重置了，
+  // 用户点一下「重置提示」就被教程挡住，很莫名
+  t('与工具提示的键不同',
+    /LS_KEY_TUTORIAL = '([^']+)'/.exec(appSrc)[1] !== /LS_KEY_HINTS = '([^']+)'/.exec(appSrc)[1],
+    [/LS_KEY_TUTORIAL = '([^']+)'/.exec(appSrc)[1], /LS_KEY_HINTS = '([^']+)'/.exec(appSrc)[1]]);
+  t('重置工具提示不会重置教程',
+    /resetHints:[\s\S]{0,400}?saveHints\(\)/.test(appSrc) &&
+    !/resetHints:[\s\S]{0,400}?clearTutorialSeen/.test(appSrc));
+  t('读写标记都有容错（隐私模式不崩）',
+    /function tutorialSeen\(\)[\s\S]{0,300}catch \(e\) \{ return false; \}/.test(appSrc));
+  t('写标记失败不抛异常',
+    /function markTutorialSeen\(\)[\s\S]{0,300}catch \(e\)/.test(appSrc));
+  t('有清除标记的函数（便于重看）', /function clearTutorialSeen\(\)/.test(appSrc));
+
+  /* ---------- 2) 首启自动弹：接在 boot 上 ---------- */
+  t('boot 里会判断是否自动弹', /shouldAutoTutorial\(\)/.test(appSrc));
+  t('自动弹之前先看「有没有正在编辑的照片」',
+    /function shouldAutoTutorial\(\)[\s\S]{0,300}hasPhoto: !!S\.img/.test(appSrc));
+  // 首屏元素还没布局时弹，高亮圈会套到 (0,0) —— 必须延后一拍
+  t('延后一拍再弹（等首屏布局完成）',
+    /shouldAutoTutorial\(\)[\s\S]{0,300}setTimeout\(/.test(appSrc));
+  t('延后期间用户打开了照片就不弹',
+    /setTimeout\(\(\) => \{[\s\S]{0,300}if \(!S\.img && shouldAutoTutorial\(\)\)/.test(appSrc));
+  // 自动弹的那一刻就记「已看过」：中途杀掉应用也不该下次再弹
+  t('自动弹时立刻记「已看过」', /function openTutorial\(auto\)[\s\S]{0,400}if \(auto\) markTutorialSeen\(\)/.test(appSrc));
+
+  /* ---------- 3) 重看入口：更多菜单 + 设置页 ---------- */
+  t('更多菜单里有教程入口', /id="btn-tutorial"/.test(html));
+  t('设置页也有教程入口', /id="btn-tutorial2"/.test(html));
+  t('两个入口都绑定了', /tutBtn\.onclick = \(\) => \{[^}]*openTutorial\(false\); \};/.test(appSrc) &&
+    /tutBtn2\.onclick = \(\) => \{[^}]*openTutorial\(false\); \};/.test(appSrc));
+  t('重看时先关掉菜单（否则菜单压在教程上）',
+    /tutBtn\.onclick = \(\) => \{ closeMoreMenu\(\); openTutorial\(false\); \}/.test(appSrc));
+  t('重看时先关掉设置（否则设置压在教程上）',
+    /tutBtn2\.onclick = \(\) => \{ closeSettings\(\); openTutorial\(false\); \}/.test(appSrc));
+  // 重看**不**改标记：反复重看不该反复写盘，也不该把「已看过」清掉
+  t('手动重看不改「已看过」标记',
+    /function openTutorial\(auto\)[\s\S]{0,600}if \(auto\) markTutorialSeen\(\)/.test(appSrc) &&
+    !/openTutorial\(false\)[\s\S]{0,200}markTutorialSeen/.test(appSrc));
+
+  /* ---------- 4) 跳过：必须记「已看过」，否则每次启动都弹 ---------- */
+  t('有跳过按钮', /id="tut-skip"/.test(html));
+  t('跳过会记「已看过」', /tutSkip\.onclick = \(\) => \{ markTutorialSeen\(\); closeTutorial\(\); \}/.test(appSrc));
+  t('点蒙层也算跳过', /tutMask\.onclick = \(\) => \{ markTutorialSeen\(\); closeTutorial\(\); \}/.test(appSrc));
+  // 返回键关教程同样要记，否则按返回键跳过的人下次还会被弹
+  t('返回键关教程也记「已看过」',
+    /case 'tutorial': markTutorialSeen\(\); closeTutorial\(\); break;/.test(appSrc));
+  t('返回键分层里有教程', /\{ id: 'tutorial'/.test(fs.readFileSync(
+    path.join(__dirname, '..', 'app', 'core.js'), 'utf8')));
+
+  /* ---------- 5) 界面结构：蒙层 + 高亮圈 + 气泡 ---------- */
+  t('有教程浮层', /id="tutorial" hidden/.test(html));
+  t('有蒙层', /class="tut-mask"/.test(html));
+  t('有高亮圈', /id="tut-spot"/.test(html));
+  t('有说明气泡', /id="tut-card"/.test(html));
+  t('有步骤计数', /id="tut-step"/.test(html));
+  t('有标题与正文容器', /id="tut-title"/.test(html) && /id="tut-body"/.test(html));
+  t('有上一步/下一步按钮', /id="tut-prev"/.test(html) && /id="tut-next"/.test(html));
+  t('有进度点容器', /id="tut-dots"/.test(html));
+  t('教程默认隐藏（不能一进来就盖住首页）', /id="tutorial" hidden/.test(html));
+  // z-index 必须最高，否则会被「更多」菜单或作品预览盖住
+  t('教程层级最高', /#tutorial \{[^}]*z-index: 140/.test(css), '教程的 z-index 必须是最高层');
+  t('高亮圈用扩散阴影挖空（不用四块遮罩拼）',
+    /\.tut-spot \{[\s\S]{0,300}box-shadow: 0 0 0 9999px/.test(css));
+  t('高亮圈不拦点击（用户能边看边操作）',
+    /\.tut-spot \{[\s\S]{0,400}pointer-events: none/.test(css));
+  t('气泡有样式', /\.tut-card \{/.test(css));
+  t('进度点有样式', /\.tut-dot \{/.test(css));
+  t('当前进度点有区分', /\.tut-dot\.on/.test(css));
+
+  /* ---------- 6) 摆位的兜底：目标找不到时必须居中，不能指向屏幕角落 ---------- */
+  t('有摆位函数', /function layoutTutorial\(step\)/.test(appSrc));
+  t('目标元素不存在时隐藏高亮圈',
+    /\} else \{[\s\S]{0,200}spot\.classList\.add\('off'\)/.test(appSrc) &&
+    /spot\.classList\.remove\('off'\)/.test(appSrc));
+  t('有 off 样式（隐藏高亮圈）', /\.tut-spot\.off \{ display: none; \}/.test(css));
+  t('气泡位置被夹在屏幕内',
+    /Math\.max\(8, Math\.min\(vh - cardH - 8, top\)\)/.test(appSrc));
+  t('选择器写错不会让教程崩',
+    /try \{\s*target = step\.target \? document\.querySelector\(step\.target\) : null;\s*\} catch \(e\) \{ target = null; \}/.test(appSrc));
+  t('尺寸为 0 的元素视作找不到（被隐藏了）',
+    /if \(!r \|\| r\.width < 2 \|\| r\.height < 2\) r = null;/.test(appSrc));
+  t('窗口尺寸变化时重摆（横竖屏切换）',
+    /addEventListener\('resize', \(\) => \{ if \(tutorialOpen\(\)\) renderTutorial\(\); \}\)/.test(appSrc));
+
+  /* ---------- 7) 步骤内容：文案要能独立看懂，不能只是「点这里」 ---------- */
+  t('每一步都说了「做什么」和「为什么」',
+    C2.TUTORIAL_STEPS.every((s) => s.body.length >= 12),
+    C2.TUTORIAL_STEPS.map((s) => s.body.length));
+  // 生成要等 30~60 秒是这个应用最容易让人困惑的点，教程必须提前说清
+  t('教程说明了生成要等一段时间',
+    C2.TUTORIAL_STEPS.some((s) => /30~60 秒|切到别的应用/.test(s.body)),
+    C2.TUTORIAL_STEPS.map((s) => s.body));
+  // 「框外不动」是核心卖点，必须讲
+  t('教程说明了只改框住的部分',
+    C2.TUTORIAL_STEPS.some((s) => /框外|框住哪里/.test(s.body)),
+    C2.TUTORIAL_STEPS.map((s) => s.body));
+})();
+/* ---------- 新手教程（回归） ---------- */
+
+/* ---------- 调用日志（回归） ---------- */
+console.log('\n【调用日志】设置里能看、能导出，且真的记了每次调用');
+
+(() => {
+  const fs = require('fs');
+  const path = require('path');
+  const appSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'app.js'), 'utf8');
+  const coreSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'core.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'app', 'index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'app', 'style.css'), 'utf8');
+
+  /* ---------- 1) 记录点：必须真的挂在生成流程上 ---------- */
+
+  // 关键：日志必须记在**真正发请求的那一层**（runJob），
+  // 记在 callModel 里拿不到选区尺寸与 workId。
+  // 注意不能只扫 runGenerate：发请求已经拆到 runJob 里了
+  // （拆开是为了让「准备输入」与「等结果」各自好测、好读）。
+  const rjStart = appSrc.indexOf('async function runJob(job) {');
+  const rjEnd = appSrc.indexOf('async function runGenerate() {');
+  const rgBody = rjStart >= 0 && rjEnd > rjStart ? appSrc.slice(rjStart, rjEnd) : '';
+  t('发请求的流程里记了调用日志', /recordCallLog\(/.test(rgBody), 'runJob 里没有 recordCallLog');
+  t('调用前记了开始时间', /const callT0 = Date\.now\(\)/.test(rgBody));
+  t('记了耗时', /ms: Date\.now\(\) - callT0/.test(rgBody));
+  t('记了发送的图片尺寸', /imgW: built\.canvas\.width, imgH: built\.canvas\.height/.test(rgBody));
+  t('记了提示词', /prompt: job\.promptText/.test(rgBody));
+  t('记了模型与服务商', /model: job\.req\.body\.model \|\| S\.cfg\.model/.test(rgBody));
+  // 归属必须用**任务里记的** workId，不是当前的 —— 用户可能已经换图了
+  t('日志的归属用任务里的 workId（换图后仍归对照片）',
+    /workId: job\.workId \|\| ''/.test(rgBody));
+  // 失败必须记 —— 有些接口失败也计费，而且失败原因是最有价值的排查线索
+  t('失败路径也记（catch 里有 recordCallLog）',
+    /catch \(callErr\)[\s\S]{0,600}recordCallLog\(/.test(rgBody));
+  t('失败记了 HTTP 状态', /status: callErr && callErr\.status/.test(rgBody));
+  t('失败记了错误原因', /error: describeCallError\(callErr\)/.test(rgBody));
+  t('成功记了 ok:true', /ok: true, status: 200/.test(rgBody));
+  // HTTP 通了但没拿到图片（对话模型回文字）也要算失败，不能记成「成功但没图」
+  t('没拿到图片也记为失败',
+    /if \(!items\.length\) \{[\s\S]{0,500}ok: false, status: 200/.test(rgBody));
+  t('没拿到图片记下了诊断结论', /diagnoseResponse\(json, 200/.test(rgBody));
+
+  /* ---------- 2) 失败原因要翻译成人话，不能只有一句 HTTP 400 ---------- */
+  t('有失败原因翻译函数', /function describeCallError\(/.test(appSrc));
+  t('复用了 core 的诊断文案', /C\.diagnoseResponse\(/.test(appSrc));
+
+  /* ---------- 3) 花费：用已有的成本预估，不另起一套 ---------- */
+  t('花费走已有的成本预估', /function estimateCallCost\(/.test(appSrc) && /currentEstimate\(\)/.test(appSrc));
+  t('单价未知记为 null（不能当成 0）', /return \{ usd: null, note: '单价未知' \}/.test(appSrc));
+
+  /* ---------- 4) 存储：环形缓冲 + 独立键 + 坏了不影响主流程 ---------- */
+  t('有独立的 localStorage 键', /LS_KEY_CALLLOG = 'photoStudio\.callLog\.v1'/.test(appSrc));
+  // 键名必须符合项目的命名约定（photoStudio.*），否则以后迁移会找不到
+  t('键名沿用 photoStudio. 前缀', /'photoStudio\.callLog\.v1'/.test(appSrc));
+  t('有上限常量', /const CALL_LOG_MAX = \d+/.test(coreSrc));
+  t('上限在 100 量级', /const CALL_LOG_MAX = 100;/.test(coreSrc));
+  t('用环形缓冲（appendCallLog 裁掉超出部分）',
+    /function appendCallLog\(list, entry, max\)/.test(coreSrc) && /out\.length < cap/.test(coreSrc));
+  // 日志是「可丢弃」数据：写不进去要降级，绝不能抛出去打断生成
+  t('记录失败不抛异常（catch 里只警告）',
+    /function recordCallLog\(entry\)[\s\S]{0,600}catch \(e\) \{[\s\S]{0,200}console\.warn/.test(appSrc));
+  t('读日志失败退回空数组',
+    /function loadCallLog\(\)[\s\S]{0,600}catch \(e\)[\s\S]{0,200}return \[\]/.test(appSrc));
+  t('空间紧张时日志先让路（丢一半再试）',
+    /function saveCallLog\(\)[\s\S]{0,600}slice\(0, Math\.max\(1/.test(appSrc));
+  // 日志绝不能把图片 base64 存进去 —— 那会让日志变成第二个存储黑洞
+  t('日志不存图片内容（只有尺寸与字节数）',
+    !/image:\s*(e\.image|img|dataUrl)/.test(coreSrc) && /imgBytes/.test(coreSrc));
+
+  /* ---------- 5) 界面：设置里有入口，面板能看能导出 ---------- */
+  t('设置页有调用日志入口', /id="btn-calllog"/.test(html));
+  t('入口显示条数与花费（不用点进去才知道）', /id="calllog-brief"/.test(html));
+  t('有日志面板', /id="calllog" class="sheet" hidden/.test(html));
+  t('面板有列表容器', /id="calllog-list"/.test(html));
+  t('面板有统计行', /id="calllog-summary"/.test(html));
+  t('面板有空状态', /id="calllog-empty"/.test(html));
+  t('有导出 JSON 按钮', /id="calllog-export-json"/.test(html));
+  t('有导出文本按钮', /id="calllog-export-text"/.test(html));
+  t('有清空按钮', /id="calllog-clear"/.test(html));
+  t('面板文案说明了「失败也记」', /失败也会记/.test(html));
+  t('面板文案说明了保留条数', /100 条/.test(html));
+  t('面板有样式', /\.cl-item/.test(css) && /\.cl-summary/.test(css));
+  t('失败条目有视觉区分', /\.cl-item\.bad/.test(css));
+
+  /* ---------- 6) 接线：按钮真的绑了函数 ---------- */
+  t('设置入口绑定打开函数', /clBtn\.onclick[\s\S]{0,120}openCallLog\(\)/.test(appSrc));
+  t('打开日志前先关设置（否则被压在下面）', /clBtn\.onclick = \(\) => \{ closeSettings\(\); openCallLog\(\); \}/.test(appSrc));
+  t('面板可关闭', /#calllog \[data-close\][\s\S]{0,80}closeCallLog/.test(appSrc));
+  t('导出按钮绑了导出函数', /clJson\.onclick = \(\) => exportCallLog\('json'\)/.test(appSrc));
+  t('导出文本按钮绑了导出函数', /clText\.onclick = \(\) => exportCallLog\('text'\)/.test(appSrc));
+  t('清空要二次确认（避免误触清掉排查线索）',
+    /clClear\.onclick[\s\S]{0,200}confirm\(/.test(appSrc));
+  t('启动时载入日志', /S\.callLog = loadCallLog\(\)/.test(appSrc));
+  t('启动时刷新入口副标题', /S\.callLog = loadCallLog\(\);[\s\S]{0,120}updateCallLogBrief\(\)/.test(appSrc));
+
+  /* ---------- 7) 导出复用已有的原生保存路径 ---------- */
+  t('导出走原生保存（安卓壳里 <a download> 没用）',
+    /async function exportCallLog\(kind\)[\s\S]{0,2000}nativeSaveAvailable\(\)/.test(appSrc));
+  t('日志默认存到下载目录（不是相册）',
+    /nativeSave\(blob, name, 'downloads'\)/.test(appSrc));
+  t('浏览器里有下载兜底', /a\.download = name/.test(appSrc));
+  t('导出用时间戳文件名', /C\.timestampName\('calllog'/.test(appSrc));
+  t('没有记录时不导出空文件', /if \(!list\.length\) \{ toast\('还没有调用记录'\); return; \}/.test(appSrc));
+
+  /* ---------- 8) 返回键要能关掉日志面板 ---------- */
+  t('返回键分层里有调用日志', /\{ id: 'calllog'/.test(coreSrc));
+  t('日志层在设置之上（z 更大）', (() => {
+    const iLog = coreSrc.indexOf("{ id: 'calllog'");
+    const iSet = coreSrc.indexOf("{ id: 'settings'");
+    const zLog = parseFloat((/z: (\d+)/.exec(coreSrc.slice(iLog, iLog + 60)) || [])[1]);
+    const zSet = parseFloat((/z: (\d+)/.exec(coreSrc.slice(iSet, iSet + 60)) || [])[1]);
+    return zLog > zSet;
+  })(), '日志层的 z 必须大于设置层');
+  t('返回键处理里有 closeCallLog', /case 'calllog': closeCallLog\(\)/.test(appSrc));
+  t('CSS 里日志面板的 z-index 高于设置',
+    /#calllog \{ z-index: 110; \}/.test(css));
+
+  /* ---------- 9) 耗时显示：ms=0 也必须显示出来 ---------- */
+  // 回归的坑：判断写成 `e.ms ? ... : ''`，而 ms 的合法值包含 0
+  // （瞬时返回 / 瞬时失败 —— 例如参数不对被服务端立刻拒绝）。
+  // 0 是 falsy，于是这条记录的耗时被静默吞掉，界面看起来像日志坏了。
+  // 这个 bug 在真实环境里表现为「偶尔有一条记录不显示耗时」的随机失败。
+  t('耗时判断不用真值判断（ms=0 不能被吞掉）',
+    /const hasMs = e\.ms !== null && e\.ms !== undefined && e\.ms !== '' &&/.test(appSrc) &&
+    /hasMs \? ' · ' \+ \(Number\(e\.ms\) \/ 1000\)\.toFixed\(1\) \+ ' 秒' : ''/.test(appSrc));
+  t('不再有 e.ms 的真值判断写法', !/\(e\.ms \? ' · '/.test(appSrc));
+  // 抽出来跑一遍：0 要显示、缺失不能显示成 0.0
+  // （只判 Number.isFinite 是不行的 —— Number(null) === 0 也是有限数，
+  //   那样「没记录耗时」会被显示成「0.0 秒」，变成另一个错误）
+  t('ms=0 显示 0.0 秒、ms 缺失不显示', (() => {
+    const fmt = (ms) => {
+      const hasMs = ms !== null && ms !== undefined && ms !== '' && Number.isFinite(Number(ms));
+      return hasMs ? ' · ' + (Number(ms) / 1000).toFixed(1) + ' 秒' : '';
+    };
+    return fmt(0) === ' · 0.0 秒' && fmt(1234) === ' · 1.2 秒' &&
+      fmt(undefined) === '' && fmt(null) === '' && fmt('') === '';
+  })());
+  t('core 里 ms 归一化后仍是数字 0（不是 null）', (() => {
+    const C2 = require(path.join(__dirname, '..', 'app', 'core.js'));
+    const rec = C2.appendCallLog([], { ms: 0, ok: false, model: 'm' })[0];
+    return rec.ms === 0;
+  })());
+})();
+/* ---------- 调用日志（回归） ---------- */
+
+/* ---------- 作品库「只存得下一张」回归（真实体积测量） ---------- */
+console.log('\n【作品库】历史记录必须存得住多张（用真实 JPEG 体积验证）');
+
+(() => {
+  const fs = require('fs');
+  const path = require('path');
+  const C2 = require(path.join(__dirname, '..', 'app', 'core.js'));
+  const appSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'app.js'), 'utf8');
+
+  let napi = null;
+  try { napi = require('@napi-rs/canvas'); }
+  catch (e) {
+    try { napi = require('/tmp/domtest/node_modules/@napi-rs/canvas'); }
+    catch (e2) { napi = null; }
+  }
+
+  if (!napi) {
+    console.log('  ⚠ 跳过（未安装 @napi-rs/canvas，无法做真实体积测量）');
+    return;
+  }
+
+  /**
+   * 造一张「像照片」的图：低频渐变 + 逐像素颗粒。
+   *
+   * 为什么不用纯色：纯色 JPEG 只有几 KB，测不出「一条记录吃满整库」的 bug。
+   * 真实照片（尤其带颗粒的）压缩后体积大得多，正是问题的来源。
+   */
+  function photoLike(w, h, seed) {
+    const c = napi.createCanvas(w, h);
+    const ctx = c.getContext('2d');
+    const img = ctx.createImageData(w, h);
+    let s = seed;
+    const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return ((s >>> 8) & 0xffff) / 0xffff; };
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      const b = (x / w) * 120 + (y / h) * 90 + 20;
+      img.data[i] = Math.max(0, Math.min(255, b + rnd() * 46 - 23));
+      img.data[i + 1] = Math.max(0, Math.min(255, b * 0.95 + 15 + rnd() * 46 - 23));
+      img.data[i + 2] = Math.max(0, Math.min(255, b * 0.85 + 30 + rnd() * 46 - 23));
+      img.data[i + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+    return c;
+  }
+  /** 编码成 dataURL 后的**字符数**（estimateWorkBytes 的口径） */
+  const dataUrlChars = (canvas, q) => {
+    const buf = canvas.toBuffer('image/jpeg', Math.round(q * 100));
+    return Math.ceil(buf.length / 3) * 4 + 23;
+  };
+
+  // ---- 1) 关键前提：会话基准图真的被缩放，不是照原尺寸存 ----
+  const docSide = 3072;                       // 设置里默认的「工作分辨率上限」
+  const docH = Math.round(docSide * 2048 / 3072);
+  const docCanvas = photoLike(docSide, docH, 7);
+  const plan = C2.planSessionBase({ w: docSide, h: docH });
+  t('基准图被缩到上限以内', plan.scaled && Math.max(plan.w, plan.h) <= C2.SESSION_BASE_MAX_SIDE,
+    plan);
+  t('缩放保持长宽比', Math.abs(plan.w / plan.h - docSide / docH) < 0.01, [plan.w, plan.h]);
+  // 只缩不放：小图不能被放大（放大变糊且体积更大）
+  const smallPlan = C2.planSessionBase({ w: 800, h: 600 });
+  t('小图不被放大', smallPlan.scaled === false && smallPlan.w === 800 && smallPlan.h === 600, smallPlan);
+  t('planSessionBase 对脏值安全', C2.planSessionBase({ w: 'x', h: null }).w === 0,
+    C2.planSessionBase({ w: 'x', h: null }));
+
+  // ---- 2) 用真实编码体积证明：修复前的存法一条就吃满整库 ----
+  const oldBaseChars = dataUrlChars(docCanvas, 0.85);          // 修复前：整张 3072px q0.85
+  const newBaseChars = dataUrlChars(
+    (() => {                                                  // 修复后：缩到 2048px q0.75
+      const s = napi.createCanvas(plan.w, plan.h);
+      const sc = s.getContext('2d');
+      sc.drawImage(docCanvas, 0, 0, docSide, docH, 0, 0, plan.w, plan.h);
+      return s;
+    })(), C2.SESSION_BASE_QUALITY);
+  const oldBaseBytes = C2.storageBytes('x'.repeat(oldBaseChars));
+  const newBaseBytes = C2.storageBytes('x'.repeat(newBaseChars));
+  t('修复前：单条会话基准图就吃掉大半个库', oldBaseBytes > C2.LIBRARY_BUDGET_BYTES * 0.6,
+    { oldBaseBytes, budget: C2.LIBRARY_BUDGET_BYTES });
+  t('修复后：基准图体积降到一半以下', newBaseBytes < oldBaseBytes * 0.6,
+    { newBaseBytes, oldBaseBytes });
+  t('修复后：单条会话基准图远小于总预算', newBaseBytes < C2.LIBRARY_BUDGET_BYTES * 0.5,
+    { newBaseBytes, budget: C2.LIBRARY_BUDGET_BYTES });
+
+  // ---- 3) 缩略图也是累积项：条数上限 × 单张体积必须放得下 ----
+  const thumbCanvas = photoLike(1600, 1067, 3);
+  const thumbPlan = Math.min(1, C2.THUMB_MAX_SIDE / 1600);
+  const thumb = (() => {
+    const s = napi.createCanvas(Math.round(1600 * thumbPlan), Math.round(1067 * thumbPlan));
+    s.getContext('2d').drawImage(thumbCanvas, 0, 0, 1600, 1067, 0, 0, s.width, s.height);
+    return s;
+  })();
+  const thumbChars = dataUrlChars(thumb, C2.THUMB_QUALITY);
+  const thumbBytes = C2.storageBytes('x'.repeat(thumbChars));
+  t('满条数时缩略图总占用不超过总预算的 3/4',
+    thumbBytes * C2.LIBRARY_MAX_ITEMS < C2.LIBRARY_BUDGET_BYTES * 0.75,
+    { thumbBytes, items: C2.LIBRARY_MAX_ITEMS, budget: C2.LIBRARY_BUDGET_BYTES });
+  t('单张缩略图 <= 64KB', thumbBytes <= 64 * 1024, thumbBytes);
+
+  // ---- 4) 核心回归：用真实体积模拟「导入 3 张、各改一次」 ----
+  const patchChars = dataUrlChars(photoLike(600, 400, 11), 0.82);   // 一次典型编辑的 patch
+  const realWork = (id, at) => ({
+    id, at, name: 'photo.jpg',
+    thumb: 't'.repeat(thumbChars),
+    session: { base: 'b'.repeat(newBaseChars), items: [{ patch: 'p'.repeat(patchChars) }] }
+  });
+  const opts = (pinned) => ({
+    maxBytes: C2.LIBRARY_BUDGET_BYTES,
+    maxItems: C2.LIBRARY_MAX_ITEMS,
+    sessionBudgetBytes: C2.SESSION_BUDGET_BYTES,
+    pinnedId: pinned || null
+  });
+
+  let lib = [];
+  const trace = [];
+  for (let i = 0; i < 3; i++) {
+    lib.unshift(realWork('w' + i, 1000 + i));
+    const p = C2.planLibrary(lib, opts('w' + i));
+    if (p.downgradeIds.length) for (const e of lib) if (p.downgradeIds.includes(e.id)) e.session = null;
+    if (p.evictIds.length) lib = lib.filter((e) => !p.evictIds.includes(e.id));
+    trace.push({ after: i + 1, kept: lib.length, editable: lib.filter((e) => e.session).length });
+  }
+  t('导入 3 张照片后 3 条都在列表里', lib.length === 3, trace);
+  t('导入 3 张后没有一条被清理', lib.length === 3, trace);
+  t('导入 3 张后至少 2 张可继续编辑', lib.filter((e) => e.session).length >= 2,
+    lib.filter((e) => e.session).map((e) => e.id));
+  t('第 1 张仍然看得见（缩略图还在）', lib.some((e) => e.id === 'w0' && e.thumb), lib.map((e) => e.id));
+  t('真实体积下占用不超总预算',
+    C2.workLibraryStats(lib).bytes <= C2.LIBRARY_BUDGET_BYTES,
+    [C2.workLibraryStats(lib).bytes, C2.LIBRARY_BUDGET_BYTES]);
+  t('统计能报告可继续编辑的张数',
+    C2.workLibraryStats(lib).withSession >= 2, C2.workLibraryStats(lib));
+
+  // ---- 4b) 对照：把「修复前」的算法原样复现一遍，证明本测试真的能测出这个 bug ----
+  // 只复现旧算法里与取舍相关的部分（单层预算 + 先降级再淘汰）。
+  // 没有这个对照，上面那几条断言在「预算被悄悄调大」时也会通过，
+  // 测试就失去意义了。
+  const oldPlanLibrary = (entries, maxBytes, maxItems, pinnedId) => {
+    const sorted = entries.slice().sort((a, b) => b.at - a.at);
+    const kept = [], evictIds = [], downgradeIds = [];
+    const downgraded = new Set();
+    for (let i = 0; i < sorted.length; i++) {
+      const e = sorted[i];
+      const isPinned = pinnedId && e.id === pinnedId;
+      if (i < maxItems || isPinned) kept.push(e); else evictIds.push(e.id);
+    }
+    const remainBytes = (e) => {
+      let n = 400 + C2.storageBytes(e.thumb) + C2.storageBytes(e.before || '');
+      if (e.session && !downgraded.has(e.id)) n += C2.storageBytes(JSON.stringify(e.session));
+      return n;
+    };
+    let bytes = kept.reduce((s, e) => s + C2.estimateWorkBytes(e), 0);
+    if (bytes > maxBytes) {
+      for (let i = kept.length - 1; i >= 0 && bytes > maxBytes; i--) {
+        const e = kept[i];
+        if ((pinnedId && e.id === pinnedId) || !e.session) continue;
+        bytes -= C2.storageBytes(JSON.stringify(e.session));
+        downgraded.add(e.id); downgradeIds.push(e.id);
+      }
+      for (let i = kept.length - 1; i >= 0 && bytes > maxBytes && kept.length > 1; i--) {
+        const e = kept[i];
+        if (pinnedId && e.id === pinnedId) continue;
+        bytes -= remainBytes(e); evictIds.push(e.id); kept.splice(i, 1);
+      }
+    }
+    return { keepIds: kept.map((e) => e.id), downgradeIds, evictIds };
+  };
+  // 旧算法 + 旧预算 + 旧尺寸（3072px 基准图）
+  const fatWork = (id, at) => ({
+    id, at, name: 'photo.jpg', thumb: 't'.repeat(thumbChars),
+    session: { base: 'b'.repeat(oldBaseChars), items: [{ patch: 'p'.repeat(patchChars) }] }
+  });
+  const oldLib = [fatWork('w0', 1000), fatWork('w1', 2000), fatWork('w2', 3000)];
+  const oldRepro = oldPlanLibrary(oldLib, 2.5 * 1024 * 1024, 80, 'w2');
+  t('（对照）旧算法下第 1 张确实被淘汰 —— 说明本测试能测出这个 bug',
+    oldRepro.evictIds.indexOf('w0') >= 0, oldRepro);
+  t('（对照）旧算法最终只剩 1 条 —— 与用户报告的现象一致',
+    oldRepro.keepIds.length === 1, oldRepro.keepIds);
+
+  // ---- 4c) 两个修复缺一不可（这条对照把「只改一半」的假修复挡在门外）----
+  // 「会话单独一层预算」+「基准图缩小」是配套的：
+  //   只加预算分层、不缩基准图 → 单条记录本身仍超过总预算，列表照样被清空
+  //   只缩基准图、不加预算分层 → 单条会话变小了，但两条一起仍会互相挤掉
+  const fatLib = [fatWork('w0', 1000), fatWork('w1', 2000)];
+  const fatPlan = C2.planLibrary(fatLib, {
+    maxBytes: C2.LIBRARY_BUDGET_BYTES, maxItems: 80,
+    sessionBudgetBytes: C2.SESSION_BUDGET_BYTES, pinnedId: 'w1'
+  });
+  t('对照：基准图不缩时单条就超过总预算（所以缩图是必需的）',
+    C2.estimateWorkBytes(fatLib[0]) > C2.LIBRARY_BUDGET_BYTES,
+    [C2.estimateWorkBytes(fatLib[0]), C2.LIBRARY_BUDGET_BYTES]);
+  t('对照：基准图不缩时列表仍会被清空（说明光加预算分层不够）',
+    fatPlan.evictIds.length > 0, fatPlan);
+
+  // 反过来说：缩了图但两条一起超预算时，也必须先降级而不是淘汰
+  const midWork = (id, at) => ({
+    id, at, name: 'photo.jpg', thumb: 't'.repeat(thumbChars),
+    session: { base: 'b'.repeat(newBaseChars), items: [{ patch: 'p'.repeat(patchChars) }] }
+  });
+  const midLib = [midWork('w0', 1000), midWork('w1', 2000), midWork('w2', 3000)];
+  const midPlan = C2.planLibrary(midLib, {
+    maxBytes: C2.LIBRARY_BUDGET_BYTES, maxItems: 80,
+    // 故意把会话预算压到只够放 1 条，逼出降级
+    sessionBudgetBytes: C2.estimateWorkBytes(midLib[0]) * 1.1,
+    pinnedId: 'w2'
+  });
+  t('会话预算不足时降级最老的会话', midPlan.downgradeIds.indexOf('w0') >= 0, midPlan.downgradeIds);
+  t('会话预算不足时列表一条都不少', midPlan.keepIds.length === 3 && midPlan.evictIds.length === 0,
+    midPlan);
+
+  // ---- 5) 接线：app 侧必须真的用上新参数，不能只改 core ----
+  t('app 传了会话预算', /sessionBudgetBytes: C\.SESSION_BUDGET_BYTES/.test(appSrc));
+  t('app 用 core 的基准图规划', /C\.planSessionBase\(/.test(appSrc));
+  t('app 用 core 的基准图质量', /C\.SESSION_BASE_QUALITY/.test(appSrc));
+  t('app 用 core 的 patch 上限', /maxBytes: C\.SESSION_PATCH_MAX_CHARS/.test(appSrc));
+  t('app 用 core 的缩略图质量', /C\.THUMB_QUALITY/.test(appSrc));
+  // 兜底路径不能直接砍记录（用户会莫名丢历史），要先丢会话
+  const saveFn = appSrc.slice(appSrc.indexOf('function saveLibrary()'),
+    appSrc.indexOf('function saveLibrary()') + 2200);
+  t('配额兜底先丢会话而不是丢记录',
+    /session: null/.test(saveFn) && !/slice\(0, 5\)/.test(saveFn), '兜底路径仍是直接砍记录');
+  // 单条会话过大时必须**告诉用户**，不能静默不存
+  const touchFn = appSrc.slice(appSrc.indexOf('function touchWork()'),
+    appSrc.indexOf('function touchWork()') + 2000);
+  t('单条会话过大时不静默（有提示）', /libraryNote/.test(touchFn));
+})();
+/* ---------- 作品库「只存得下一张」回归 ---------- */
+
+/* ---------- 滑块「只能拖滑块头」（回归） ---------- */
+console.log('\n【滑块】点轨道不能跳值，拖动滑块头必须照常工作');
+
+(() => {
+  const fs = require('fs');
+  const path = require('path');
+  const C2 = require(path.join(__dirname, '..', 'app', 'core.js'));
+  const appSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'app', 'index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'app', 'style.css'), 'utf8');
+
+  // 1) 页面上每一个滑块都要被保护。
+  //    回归的坑：只给「设置页那几个」接线，导出面板/画笔栏/图层参数里的滑块漏掉，
+  //    用户在最容易误触的地方（图层参数滑块上下紧挨着）照样会被跳值。
+  const ids = [...html.matchAll(/<input type="range"[^>]*id="([^"]+)"/g)].map((m) => m[1]);
+  t('页面里确实有多个滑块（前提）', ids.length >= 10, ids.length);
+  const expected = ['brush-size', 'exp-quality', 'set-ctx', 'set-feather', 'set-cm',
+    'set-fusion', 'set-fusionc', 'set-fusiong', 'set-mem', 'set-quality'];
+  for (const id of expected) {
+    t('滑块 ' + id + ' 在页面里', ids.indexOf(id) >= 0, ids);
+  }
+
+  // 2) 实现必须是「一个可复用函数 + 统一套用」，不是逐个写死 id
+  t('有可复用的 thumbOnlySlider', /function thumbOnlySlider\(el\)/.test(appSrc));
+  t('有统一套用入口（覆盖页面上全部滑块）', /function applyThumbOnlySliders\(/.test(appSrc));
+  t('统一入口真的被调用', /applyThumbOnlySliders\(\);/.test(appSrc));
+  // 动态创建的图层参数滑块也要套上（它是运行时才出现的，统一入口扫不到）
+  t('动态滑块也套了保护', /thumbOnlySlider\(input\)/.test(appSrc));
+  t('套用前会跳过已处理的（幂等）', /el\.__psThumbOnly/.test(appSrc));
+
+  // 3) 判定必须走 core 的纯函数（可单测），不在 DOM 里内联几何计算
+  t('判定走 core 纯函数', /C\.planSliderHit\(/.test(appSrc));
+  t('几何算法已导出', typeof C2.sliderThumbGeometry === 'function' && typeof C2.planSliderHit === 'function');
+
+  // 4) 必须真的 preventDefault —— 只 stopPropagation 拦不住「跳值」
+  //    （跳值是浏览器对 range 元素的默认动作，跟事件冒泡无关）
+  const fnStart = appSrc.indexOf('function thumbOnlySlider(el)');
+  const fnBody = appSrc.slice(fnStart, fnStart + 3200);
+  t('拦下时调用了 preventDefault', /if \(plan\.block\) e\.preventDefault\(\)/.test(fnBody));
+  t('监听的是 pointerdown（覆盖触摸/鼠标/触控笔）',
+    /addEventListener\('pointerdown'/.test(fnBody));
+  t('pointerdown 监听是非被动（否则 preventDefault 无效）',
+    /addEventListener\('pointerdown', handler, \{ passive: false \}\)/.test(fnBody));
+
+  // 5) 键盘与程序赋值不能被误伤（这是用户明确要求的「键盘仍可用」）
+  t('没有拦 keydown（方向键仍能调值）', !/keydown/.test(fnBody));
+  t('没有拦 input/change 事件（程序赋值不受影响）',
+    !/addEventListener\('input'/.test(fnBody) && !/addEventListener\('change'/.test(fnBody));
+
+  // 6) 拿不到宽度时放行，不能把滑块拦成「拖不动」
+  t('量不到宽度时不拦', /if \(!r \|\| !\(r\.width > 0\)\) return;/.test(fnBody));
+  // 只拦主按键：右键菜单之类不该影响滑块
+  t('只拦主按键', /e\.button !== 0/.test(fnBody));
+
+  // 7) 滑块头宽度必须和 CSS 一致 —— 对不上就会「点滑块头跳值」或「拖不动」
+  t('滑块头宽度是自定义属性', /--ps-thumb:/.test(css));
+  t('webkit 滑块头用该属性', /::-webkit-slider-thumb\s*\{[\s\S]{0,120}var\(--ps-thumb\)/.test(css));
+  t('firefox 滑块头也用该属性', /::-moz-range-thumb\s*\{[^}]*var\(--ps-thumb\)/.test(css));
+  t('JS 从 CSS 读宽度', /getPropertyValue\('--ps-thumb'\)/.test(appSrc));
+  t('读不到时回落到 core 常量', /return C\.SLIDER_THUMB_PX/.test(appSrc));
+  // CSS 里的默认值必须等于 core 常量，否则两条兜底路径会给出不同判定
+  const cssPx = parseFloat((/--ps-thumb:\s*([\d.]+)px/.exec(css) || [])[1]);
+  t('CSS 默认宽度等于 core 常量', cssPx === C2.SLIDER_THUMB_PX, [cssPx, C2.SLIDER_THUMB_PX]);
+
+  // 8) 老内核（没有 PointerEvent）要有降级路径，否则那批设备又变回会跳值
+  t('老内核有降级监听', /typeof window\.PointerEvent === 'undefined'/.test(fnBody));
+  t('降级到 touchstart', /addEventListener\('touchstart'/.test(fnBody));
+  t('降级到 mousedown', /addEventListener\('mousedown'/.test(fnBody));
+
+  // 9) 解绑函数：重复套用不能叠加监听器（否则一次按下被处理多次）
+  t('返回解绑函数', /return \(\) => \{[\s\S]{0,300}removeEventListener\('pointerdown'/.test(fnBody));
+
+  // 10) 端到端行为（用最小 DOM 验证真实事件路径）：
+  //     点轨道 → 值不变；点滑块头 → 值照常跳过去
+  //     jsdom 的 range 不实现原生跳值，所以这里验证「事件有没有被吃掉」，
+  //     那正是决定浏览器跳不跳值的唯一开关。
+  let domOk = true, detail = '';
+  try {
+    const { JSDOM } = (() => {
+      try { return require('jsdom'); } catch (e) { return require('/tmp/domtest/node_modules/jsdom'); }
+    })();
+    const dom = new JSDOM('<!doctype html><input type="range" id="s" min="0" max="100" value="50">', {
+      pretendToBeVisual: true
+    });
+    const win = dom.window;
+    const el = win.document.getElementById('s');
+    // 伪装成一个 200px 宽、left=30 的滑块（jsdom 不做布局）
+    el.getBoundingClientRect = () => ({ left: 30, top: 0, width: 200, height: 22, right: 230, bottom: 22 });
+    win.getComputedStyle = () => ({ getPropertyValue: () => '17px' });
+
+    // 复刻 app.js 里的接线（用同一套 core 判定）
+    const attach = (input) => {
+      input.addEventListener('pointerdown', (e) => {
+        const px = e.clientX;
+        const r = input.getBoundingClientRect();
+        const plan = C2.planSliderHit({
+          value: input.value, min: input.min, max: input.max,
+          rectLeft: r.left, rectWidth: r.width, thumbWidth: 17, pointerX: px
+        });
+        if (plan.block) e.preventDefault();
+      }, { passive: false });
+    };
+    attach(el);
+
+    // 轨道最左端（离 50% 处的滑块头很远）
+    const evTrack = new win.PointerEvent('pointerdown', { clientX: 33, bubbles: true, cancelable: true, button: 0 });
+    el.dispatchEvent(evTrack);
+    if (!evTrack.defaultPrevented) { domOk = false; detail = '点轨道没有被拦下'; }
+
+    // 滑块头中心（值 50 → 30 + 8.5 + 0.5×183 = 130）
+    const evThumb = new win.PointerEvent('pointerdown', { clientX: 130, bubbles: true, cancelable: true, button: 0 });
+    el.dispatchEvent(evThumb);
+    if (evThumb.defaultPrevented) { domOk = false; detail = '点滑块头被误拦（会拖不动）'; }
+  } catch (e) {
+    domOk = false; detail = 'DOM 验证失败：' + e.message;
+  }
+  t('真实事件路径：点轨道被拦下、点滑块头放行', domOk, detail);
+})();
+/* ---------- 滑块只能拖滑块头（回归） ---------- */
+
+console.log('\n【引导线大改】两类线、按序号配色、线真的画进请求图');
+
+(() => {
+  const fs = require('fs');
+  const path = require('path');
+  const C2 = require(path.join(__dirname, '..', 'app', 'core.js'));
+  const appSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'app', 'index.html'), 'utf8');
+
+  /* ---- 1) 只留两类：直线 + 自由绘制 ---- */
+  t('引导线只有两类', C2.GUIDE_KINDS.length === 2, C2.GUIDE_KINDS.map((k) => k.id));
+  t('两类是直线与自由绘制',
+    C2.GUIDE_KINDS.map((k) => k.id).join(',') === 'line,freehand');
+  // 老用户的历史引导线存的是 horizon/vertical/diagonal/subject，
+  // 不迁移的话会退化成「第一项」，语义就错了
+  t('旧四类自动迁移为直线', ['horizon', 'vertical', 'diagonal', 'subject']
+    .every((k) => C2.migrateGuideKind(k) === 'line'));
+  t('迁移后的数据能正常归一化',
+    C2.normalizeGuide({ kind: 'horizon', x1: 0, y1: .5, x2: 1, y2: .5 }).kind === 'line');
+  t('旧类型经吸附也不残留', C2.snapGuide({
+    kind: 'diagonal', x1: .1, y1: .5, x2: .9, y2: .5
+  }).kind === 'line');
+
+  /* ---- 2) 颜色按序号：第 1 条红、第 2 条青，以此类推 ---- */
+  t('第 1 条是红色', C2.guideColorAt(0).id === 'red');
+  t('第 2 条是青色', C2.guideColorAt(1).id === 'cyan');
+  t('第 3 条是黄色', C2.guideColorAt(2).id === 'yellow');
+  t('第 4 条是品红', C2.guideColorAt(3).id === 'magenta');
+  t('第 5 条是绿色', C2.guideColorAt(4).id === 'green');
+  t('第 6 条是橙色', C2.guideColorAt(5).id === 'orange');
+  t('第 7 条循环回红色', C2.guideColorAt(6).id === 'red');
+  t('每种颜色的中文名都不重复（指代必须唯一）',
+    new Set(C2.GUIDE_COLORS.map((c) => c.zh)).size === C2.GUIDE_COLORS.length);
+  t('每种颜色的色值都不重复', new Set(C2.GUIDE_COLORS.map((c) => c.hex)).size === C2.GUIDE_COLORS.length);
+  // 相邻两条的颜色必须差得够远，否则在画面上糊成一片
+  t('相邻两条颜色明显不同', (() => {
+    const rgb = (h) => [1, 3, 5].map((i) => parseInt(h.substr(i, 2), 16));
+    const dist = (a, b) => {
+      const x = rgb(a), y = rgb(b);
+      return Math.hypot(x[0] - y[0], x[1] - y[1], x[2] - y[2]);
+    };
+    for (let i = 1; i < C2.GUIDE_COLORS.length; i++) {
+      if (dist(C2.GUIDE_COLORS[i - 1].hex, C2.GUIDE_COLORS[i].hex) < 90) return false;
+    }
+    return true;
+  })());
+
+  /* ---- 3) 致命点：模型必须真的「看得见」引导线 ---- */
+  const rect = { x: 0, y: 0, w: 200, h: 200 };
+  const two = [
+    { kind: 'line', x1: 0, y1: .3, x2: 1, y2: .3 },
+    { kind: 'line', x1: 0, y1: .7, x2: 1, y2: .7 }
+  ];
+  const painted = C2.planStrokeOverlay({ guides: two, rect, ctxRect: rect });
+  t('直线被真的画进请求图', painted.count === 2, painted.count);
+  t('第 1 条画成红色', painted.draw[0].color === '#ff2d2d', painted.draw[0].color);
+  t('第 2 条画成青色', painted.draw[1].color === '#00e5ff', painted.draw[1].color);
+  // 位置必须精确：提示词只说百分比，模型得靠画出来的线定位
+  t('线的位置换算精确（30% → 60px）', painted.draw[0].points[0].y === 60,
+    painted.draw[0].points[0].y);
+  t('线宽足够模型看清（≥4px）', painted.draw[0].width >= 4, painted.draw[0].width);
+  // 自由绘制同样进图（这条以前就成立，别在改动中弄丢）
+  t('自由绘制也进图', C2.planStrokeOverlay({
+    guides: [{ kind: 'freehand', points: [{ x: .2, y: .2 }, { x: .8, y: .8 }] }],
+    rect, ctxRect: rect
+  }).count === 1);
+  // 两类混排时都画，且颜色按原始顺序
+  t('两类混排都被画进去', (() => {
+    const p = C2.planStrokeOverlay({
+      guides: [
+        { kind: 'line', x1: 0, y1: .2, x2: 1, y2: .2 },
+        { kind: 'freehand', points: [{ x: .2, y: .8 }, { x: .8, y: .8 }] }
+      ], rect, ctxRect: rect
+    });
+    return p.count === 2 && p.draw[0].color === '#ff2d2d' && p.draw[1].color === '#00e5ff';
+  })());
+  // 真正落到画布上：画出来的像素里必须能找到这两种颜色，且位置对得上。
+  // 这是「模型看得见」的最后一环 —— planStrokeOverlay 算得再对，
+  // 只要 drawStrokeOverlay 没把像素真的画上去，模型那边就是一片空白。
+  const napi = (() => {
+    for (const p of ['@napi-rs/canvas', '/tmp/domtest/node_modules/@napi-rs/canvas',
+                     '/tmp/ci-sim/node_modules/@napi-rs/canvas']) {
+      try { return require(p); } catch (e) { /* 换下一个 */ }
+    }
+    return null;
+  })();
+  if (napi) {
+    const cv = napi.createCanvas(200, 200);
+    const c2d = cv.getContext('2d');
+    // 先铺一层中灰底：让「深色描边 + 本色」两层都画在已知背景上
+    c2d.fillStyle = '#888888';
+    c2d.fillRect(0, 0, 200, 200);
+    const drawn = C2.drawStrokeOverlay(c2d, painted);
+    const data = c2d.getImageData(0, 0, 200, 200).data;
+    let red = 0, cyan = 0, redRowMin = 1e9, redRowMax = -1;
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      if (r > 180 && g < 110 && b < 110) {
+        red++;
+        const y = Math.floor((i / 4) / 200);
+        if (y < redRowMin) redRowMin = y;
+        if (y > redRowMax) redRowMax = y;
+      }
+      if (r < 120 && g > 170 && b > 200) cyan++;
+    }
+    t('画布上真的画出了两条线', drawn === 2, drawn);
+    t('画布上出现了红色像素（第 1 条）', red > 100, red);
+    t('画布上出现了青色像素（第 2 条）', cyan > 100, cyan);
+    // 第 1 条线在 30% 处 → y=60。允许线宽带来的上下浮动
+    t('红线画在了正确位置（y≈60）',
+      redRowMin >= 56 && redRowMax <= 64, [redRowMin, redRowMax]);
+  } else {
+    t('画布像素校验（需要 @napi-rs/canvas，本次环境缺失）', false,
+      '找不到 canvas 库 —— 这条断言不能被静默跳过');
+  }
+
+  /* ---- 4) 提示词：颜色指代必须唯一且与实际一致 ---- */
+  const desc = C2.describeGuides({ guides: two, isZh: true });
+  t('提示词逐条按颜色指代', /第 1 条（红色，直线）/.test(desc) && /第 2 条（青色，直线）/.test(desc), desc.slice(0, 100));
+  t('提示词禁止把线画进画面（线现在真在图上，这句更关键）',
+    /不要把任何一条彩色线条画进最终画面/.test(desc));
+  t('提示词说明线是标注不是画面内容', /不是照片里真实存在的东西/.test(desc));
+  t('英文版同样逐条指代',
+    /line 1 \(red\)/.test(C2.describeGuides({ guides: two, isZh: false })) &&
+    /line 2 \(cyan\)/.test(C2.describeGuides({ guides: two, isZh: false })));
+  // 颜色不能被「全局颜色」覆盖 —— 那样两条线会变成同一个颜色
+  t('describeGuides 不再接受全局颜色参数（防指代失效）', (() => {
+    const d = C2.describeGuides({ guides: two, isZh: true, strokeColorZh: '品红色' });
+    return /红色/.test(d) && /青色/.test(d) && !/品红色/.test(d);
+  })());
+
+  /* ---- 5) 三处取色必须同源（屏幕 / 请求图 / 提示词）---- */
+  t('有统一的取色函数', typeof C2.colorOfGuide === 'function');
+  t('app 屏幕绘制用统一取色', /const c = C\.colorOfGuide\(g, i\);/.test(appSrc));
+  t('app 请求图绘制走同一函数（planStrokeOverlay 内部）',
+    /const color = colorOfGuide\(g, i\);/.test(
+      fs.readFileSync(path.join(__dirname, '..', 'app', 'core.js'), 'utf8')));
+  t('提示词也用同一函数', /const c = guideColorAt\(i\);/.test(
+    fs.readFileSync(path.join(__dirname, '..', 'app', 'core.js'), 'utf8')));
+  // 颜色在创建时就定下来，跟着线条走（删线不会让其它线换色）
+  t('画线时立刻定色', /colorId: C\.nextGuideColor\(S\.guides\)\.id,/.test(appSrc));
+  t('删除线之后新线不会撞色', C2.nextGuideColor([
+    { colorId: 'red' }, { colorId: 'yellow' }
+  ]).id === 'cyan');
+
+  /* ---- 6) 界面：只留两类，没有颜色选择 ---- */
+  t('界面没有颜色选择条', !/id="guide-colors"/.test(html));
+  t('设置里也没有颜色选择', !/id="set-strokecolor"/.test(html));
+  t('设置里说明了颜色按顺序分配', /第 1 条红、第 2 条青/.test(html));
+  t('提示里说明线会画进图片', /线会画进发给模型的图片/.test(html));
+})();
+/* ---------- 引导线大改（回归） ---------- */
+
+console.log('\n【整图】没有框选时默认处理整张图（含 AI 生图）');
+
+(() => {
+  const fs = require('fs');
+  const path = require('path');
+  const C2 = require(path.join(__dirname, '..', 'app', 'core.js'));
+  const appSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'app.js'), 'utf8');
+
+  // 1) core 的整图几何
+  t('整张图矩形 = 全画布', (() => {
+    const r = C2.wholeRect(3072, 2048);
+    return r.x === 0 && r.y === 0 && r.w === 3072 && r.h === 2048;
+  })());
+  t('能识别整张图', C2.isWholeRect({ x: 0, y: 0, w: 3072, h: 2048 }, 3072, 2048) === true);
+  t('内缩一像素就不算整张图',
+    C2.isWholeRect({ x: 1, y: 0, w: 3071, h: 2048 }, 3072, 2048) === false);
+  t('没有选区时不算整张图', C2.isWholeRect(null, 3072, 2048) === false);
+  // 浮点尺寸要按「夹取后」判断，否则 3071.6 会因为四舍五入被误判
+  t('浮点尺寸夹取后再判断',
+    C2.isWholeRect({ x: 0, y: 0, w: 3071.6, h: 2047.5 }, 3072, 2048) === true);
+
+  // 2) 整张图**不能**被当成普通选区去羽化/融合/色彩匹配。
+  //    这是这个功能最容易翻车的地方：
+  //      - 羽化 → 四周留一圈没改（可见的框）
+  //      - 融合/色彩匹配 → 环带样本为 0，均值 [0,0,0]，整张图被压黑
+  //    下面用真实像素验证「整张图铺满时，贴回的颜色与模型返回的颜色一致」。
+  const W = 120, H = 90;
+  const mkPix = (w, h, fn) => {
+    const d = new Uint8ClampedArray(w * h * 4);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const o = (y * w + x) * 4;
+        const c = fn(x, y);
+        d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = 255;
+      }
+    }
+    return { data: d, width: w, height: h };
+  };
+
+  const base = mkPix(W, H, () => [120, 130, 140]);
+  const model = mkPix(W, H, () => [200, 90, 60]);   // 模型返回一个明显不同的颜色
+
+  const whole = C2.compositeFeathered(base, model, { x: 0, y: 0, w: W, h: H }, {
+    whole: true,
+    feather: 20,                                     // 故意给大羽化：整图必须忽略它
+    colorMatch: { ring: 8, ramp: 12, strength: 1 },   // 故意开色彩匹配
+    fusion: { strength: 0.9, ring: 10, centerFloor: 0.35, grain: 0, seed: 7 },
+    dstOffset: { x: 0, y: 0 },
+    dstFull: base
+  });
+  const px = (p, x, y) => {
+    const o = (y * p.width + x) * 4;
+    return [p.data[o], p.data[o + 1], p.data[o + 2]];
+  };
+  const eq = (a, b, tol) => Math.abs(a[0] - b[0]) <= tol &&
+    Math.abs(a[1] - b[1]) <= tol && Math.abs(a[2] - b[2]) <= tol;
+
+  // 最外圈一个像素：如果被羽化，这里会保留原始底色 120/130/140
+  t('整图贴回：四个角都是模型颜色（没被羽化留边）',
+    eq(px(base, 0, 0), [200, 90, 60], 2) &&
+    eq(px(base, W - 1, 0), [200, 90, 60], 2) &&
+    eq(px(base, 0, H - 1), [200, 90, 60], 2) &&
+    eq(px(base, W - 1, H - 1), [200, 90, 60], 2),
+    JSON.stringify([px(base, 0, 0), px(base, W - 1, H - 1)]));
+  // 中心也不能被「融合」拉回底色
+  t('整图贴回：中心也是模型颜色（没被融合拉回底色）',
+    eq(px(base, (W / 2) | 0, (H / 2) | 0), [200, 90, 60], 2),
+    JSON.stringify(px(base, (W / 2) | 0, (H / 2) | 0)));
+  // 整张图必须**全部**改成模型颜色，不能有任何一块漏掉
+  let worst = 0;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const c = px(base, x, y);
+      worst = Math.max(worst, Math.abs(c[0] - 200), Math.abs(c[1] - 90), Math.abs(c[2] - 60));
+    }
+  }
+  t('整图贴回：整幅逐像素都是模型颜色（零遗漏）', worst <= 2, '最大偏差 ' + worst);
+
+  // 3) 对照组：普通小选区**必须**照旧羽化。
+  //    否则就是「为了修整图，把原来好用的局部贴回也改坏了」。
+  const base2 = mkPix(W, H, () => [120, 130, 140]);
+  const inset = { x: 30, y: 20, w: 60, h: 50 };
+  C2.compositeFeathered(base2, mkPix(60, 50, () => [200, 90, 60]), inset, {
+    feather: 10,
+    dstOffset: { x: 0, y: 0 },
+    dstFull: base2
+  });
+  t('对照组：小选区边缘仍然羽化（没被整图逻辑改坏）',
+    !eq(px(base2, 30, 20), [200, 90, 60], 2), JSON.stringify(px(base2, 30, 20)));
+  t('对照组：小选区中心照常是模型颜色',
+    eq(px(base2, 60, 45), [200, 90, 60], 2), JSON.stringify(px(base2, 60, 45)));
+  t('对照组：选区外一个像素都不动',
+    eq(px(base2, 29, 20), [120, 130, 140], 0) && eq(px(base2, 90, 20), [120, 130, 140], 0));
+
+  // 4) 融合/契合度在「取不到环带」时必须放弃，不能拿 0 均值去减。
+  //    回归的坑：ringMoments 零样本返回 mean=[0,0,0]，delta 变成 -128，
+  //    整张图被压成暗角，契合度还报 20 分说「接缝处有色差」。
+  const full = mkPix(60, 40, () => [128, 128, 128]);
+  const same = mkPix(60, 40, () => [128, 128, 128]);
+  const plan = C2.planFusion({
+    src: same, rect: { x: 0, y: 0, w: 60, h: 40 },
+    dst: full, dstFull: full, dstOffset: { x: 0, y: 0 }, ring: 10
+  });
+  t('整图融合：校正量为 0（不拿空环带的 0 均值去减）',
+    plan.delta[0] === 0 && plan.delta[1] === 0 && plan.delta[2] === 0,
+    JSON.stringify(plan.delta));
+  t('整图融合：明确标为「没有可对齐的环境」', plan.ok === false);
+  t('整图融合：环带样本确实是 0（前提成立）', plan.samples.dst === 0);
+  // 关键：融合后像素不能变
+  const fused = C2.fuseColor(128, 128, 128, 0.02, 0.02, { mean: 0.7, struct: 0.7 }, plan);
+  t('整图融合：像素原样不动（不会凭空多出暗角）',
+    fused[0] === 128 && fused[1] === 128 && fused[2] === 128, JSON.stringify(fused));
+  // 契合度：整图没有接缝，不能报「有色差」
+  t('整图不算契合度（整图没有接缝）',
+    C2.assessSeam({
+      src: same, rect: { x: 0, y: 0, w: 60, h: 40 },
+      dst: full, dstFull: full, dstOffset: { x: 0, y: 0 }, ring: 6
+    }) === null);
+  // 对照组：普通选区照旧有契合度
+  const dst2 = mkPix(60, 40, () => [128, 128, 128]);
+  const seam = C2.assessSeam({
+    src: mkPix(20, 20, () => [128, 128, 128]), rect: { x: 20, y: 10, w: 20, h: 20 },
+    dst: dst2, dstFull: dst2, dstOffset: { x: 0, y: 0 }, ring: 6
+  });
+  t('对照组：普通选区仍有契合度评分', !!seam && seam.score === 100, seam && seam.score);
+
+  // 5) 整图调色不能羽化，否则四周留一圈没调（这里是同一件事的调色版本）
+  const gradeEdit = {
+    rect: { x: 0, y: 0, w: W, h: H }, patch: null,
+    grade: { exposure: 60, contrast: 0, saturation: 0, temperature: 0, tint: 0 },
+    feather: 20, colorMatch: 0, mask: null, opacity: 1, enabled: true
+  };
+  const alpha = C2.layerAlphaMap(gradeEdit, W, H);
+  // smoothstep 在 d=0.5（最外圈像素中心）处几乎为 0 —— 也就是那一圈几乎没被调色。
+  // 不要求严格等于 0：smoothstep 在边界附近是连续过渡，取的是极小值而非 0。
+  t('整图调色的羽化权重在最外圈接近 0（这就是「一圈没调」的原因）',
+    alpha[0] < 0.01, String(alpha[0]));
+  const alphaNoF = C2.layerAlphaMap(Object.assign({}, gradeEdit, { feather: 0 }), W, H);
+  let allOne = true;
+  for (let i = 0; i < alphaNoF.length; i++) if (alphaNoF[i] !== 1) { allOne = false; break; }
+  t('整图调色按 0 羽化后，全幅权重都是 1（处处都调）', allOne);
+
+  // 6) 界面接线：四个工具入口都不能再要求先框选
+  t('生图入口用统一解析', /function prepareJob\(\)[\s\S]{0,300}const rect = effectiveRect\(\);/.test(appSrc));
+  t('生图不再要求先框选',
+    !/toast\('先在照片上框选要修改的位置'\)/.test(appSrc));
+  t('调色不再要求先框选',
+    !/toast\('先在照片上框选要调色的区域'\)/.test(appSrc));
+  t('画笔不再要求先框选',
+    !/toast\('先框选一块区域，再用画笔'\)/.test(appSrc));
+  t('引导线不再要求先框选',
+    !/toast\('先框选一块区域，再画引导线'\)/.test(appSrc));
+  t('整图生图走整体口径的提示词',
+    /scope: whole \? 'global' : \$\('scope-select'\)\.value,/.test(appSrc));
+  t('界面明示整张图（用户得知道会改全图）',
+    /整张图 ' \+ Math\.round\(S\.docW\)/.test(appSrc) && /未框选 → 调整整张图；/.test(appSrc));
+  // 选区框只在真的有选区时画：没框选就不该凭空出现一个铺满全图的框
+  t('没框选时不画选区框（不凭空多出选区）', /if \(S\.rect\) drawSelection\(\);/.test(appSrc));
+})();
+/* ---------- 没有框选 = 整张图（回归） ---------- */
 
 console.log(`\n合计 ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

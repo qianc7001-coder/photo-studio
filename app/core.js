@@ -48,6 +48,36 @@
     return { x, y, w, h };
   }
 
+  /**
+   * 整张图的矩形。
+   *
+   * 为什么需要它：需求是「没有框选的时候默认对整张图片进行调整」——
+   * 于是「没有选区」不再是错误，而是「操作整张图」。
+   * 所有工具（AI 生图 / 调色 / 画笔 / 引导线）都用这一个函数取默认范围，
+   * 保证「没有选区」在各处的含义完全一致。
+   */
+  function wholeRect(W, H) {
+    const w0 = Math.max(1, Math.round(num(W, 1)));
+    const h0 = Math.max(1, Math.round(num(H, 1)));
+    return { x: 0, y: 0, w: w0, h: h0 };
+  }
+
+  /**
+   * 这个矩形是不是「整张图」。
+   *
+   * 为什么要单独判断：整张图**没有外围环带**，于是
+   *   - 边缘羽化会把最外一圈留成没改过的原始像素（一条可见的框）
+   *   - 无缝融合取不到环带样本，均值是 [0,0,0]，会把整张图压黑
+   * 这两件事都必须按「整张图」特判掉，不能靠采样去猜。
+   */
+  function isWholeRect(rect, W, H) {
+    if (!rect) return false;
+    const r = clampRect(rect, W, H);
+    const w0 = Math.max(1, Math.round(num(W, 1)));
+    const h0 = Math.max(1, Math.round(num(H, 1)));
+    return r.x === 0 && r.y === 0 && r.w === w0 && r.h === h0;
+  }
+
   /** 由两点构造规范化矩形（左上 + 尺寸） */
   function rectFromPoints(a, b) {
     const A = a || {}, B = b || {};
@@ -367,14 +397,33 @@
   function compositeFeathered(dst, src, rect, opts) {
     opts = opts || {};
     const w = Math.min(rect.w, src.width), h = Math.min(rect.h, src.height);
-    const feather = Math.max(0, Math.min(num(opts.feather, 0), Math.min(w, h) / 3));
+    // 「这次改的是不是整张图」——必须按**整图坐标**判断。
+    //
+    // 不能写成 `w === dst.width`：调用方传进来的 dst 常常是「整图裁出来的一块」
+    // （compositeEditInto 就是这么用的：dst = 选区那块像素），
+    // 那种情况下 dst.width 恒等于 w，于是**每一次**贴回都会被误判成整张图、
+    // 羽化被全部关掉。这是个很容易踩进去的坑，所以显式优先取 opts.whole，
+    // 其次用 dstFull（真正的整图）比对，两者都拿不到时才当作「不是整张图」。
+    const off = opts.dstOffset || { x: 0, y: 0 };
+    const docW = opts.dstFull ? num(opts.dstFull.width, 0) : 0;
+    const docH = opts.dstFull ? num(opts.dstFull.height, 0) : 0;
+    const whole = opts.whole !== undefined
+      ? !!opts.whole
+      : !!(docW && docH && w === docW && h === docH && off.x === 0 && off.y === 0);
+    // 铺满整张图时不能羽化：羽化是「让边缘过渡到周围像素」，
+    // 而整张图没有「周围」——最外一圈会原样保留、改不到，看起来就是一圈没改的框。
+    // （需求「没有框选 = 调整整张图」会直接踩到这一点。）
+    const feather = whole ? 0
+      : Math.max(0, Math.min(num(opts.feather, 0), Math.min(w, h) / 3));
     const cm = opts.colorMatch || null;
-    const useCM = !!(cm && cm.strength > 0);
+    // 同理：色彩匹配靠「选区外一圈」取样，整张图没有外圈可采（见 ringStats 的
+    // 零样本处理），直接关掉，否则会拿 delta=0 的白算结果。
+    const useCM = !!(!whole && cm && cm.strength > 0);
     let stats = null, delta = [0, 0, 0];
     if (useCM) {
       // dstOffset/dstFull 由调用方给出：dst 是整图某块子图时，外环样本需从整图取
       const full = opts.dstFull
-        ? { pixels: opts.dstFull, offset: opts.dstOffset || { x: 0, y: 0 } }
+        ? { pixels: opts.dstFull, offset: off }
         : null;
       stats = ringStats(dst, src, { x: rect.x, y: rect.y, w, h }, cm.ring || 8, full);
       delta = stats.delta;
@@ -389,7 +438,11 @@
     //   中心处保留一部分（默认 35%）——色偏是模型带来的瑕疵，不是用户的意图，
     //   所以中心也要压一部分；但压太多会把用户想要的改动一起抹掉。
     const fus = opts.fusion || null;
-    const useFusion = !!(fus && fus.strength > 0);
+    // 整张图不做融合：融合的全部依据都是「选区外一圈的周围环境」，
+    // 整张图没有外圈（planFusion 会因此返回 ok:false / delta 全 0）。
+    // 这里提前关掉，省掉整张图的环带扫描 + 梯度拟合 —— 那在 600 万像素上很贵，
+    // 而算出来的结果本来就该被丢弃。
+    const useFusion = !!(!whole && fus && fus.strength > 0);
     let plan = null, grain = null;
     if (useFusion) {
       plan = planFusion({
@@ -565,7 +618,29 @@
 
   /* ============================ 5. 色彩科学 ============================ */
 
+  /**
+   * sRGB(0-255) → 线性光(0-1)。
+   *
+   * 输入永远是 0~255 的整数（像素值），所以可以用一张 256 项的查找表把
+   * Math.pow 彻底省掉。pow 是这里最贵的运算，而整张图调色要跑 600 万像素 ×3 通道
+   * = 1800 万次 —— 手机上一次拖动滑块要等一秒多，滑块跟不动手指。
+   *
+   * 表值与公式**逐位相同**（同一个表达式算出来的，不是近似），
+   * 所以这是一次纯粹的等价替换，不改变任何输出像素。
+   * 非整数 / 越界输入（理论上不该出现，但函数是导出的）走原公式，行为不变。
+   */
+  const SRGB_TO_LINEAR_LUT = (() => {
+    const t = new Float64Array(256);
+    for (let i = 0; i < 256; i++) {
+      const c = i / 255;
+      t[i] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    }
+    return t;
+  })();
+
   function srgbToLinear(c) {
+    const n = c | 0;                       // 截断取整，顺便排除 NaN（NaN|0 = 0）
+    if (n === c && n >= 0 && n <= 255) return SRGB_TO_LINEAR_LUT[n];
     c /= 255;
     return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
   }
@@ -1626,6 +1701,23 @@
     { id: 'png', label: 'PNG（无损，体积大）', mime: 'image/png', ext: 'png' }
   ];
 
+  /** 导出保存位置（供导出面页与迁移校验共用） */
+  const SAVE_LOCATIONS = [
+    { id: 'gallery',   label: '系统相册',   desc: '图库 App 里直接能看到' },
+    { id: 'downloads', label: '下载目录',   desc: '文件管理器里好找' },
+    { id: 'ask',       label: '每次询问',   desc: '每次导出都让你自己挑目录' }
+  ];
+
+  /** 位置是否合法（脏数据/手改 localStorage 会让它不合法） */
+  function isSaveLocation(id) {
+    return SAVE_LOCATIONS.some((x) => x.id === id);
+  }
+
+  /** 取位置定义；不合法时回落到第一个（相册），保证界面永远有选中项 */
+  function getSaveLocation(id) {
+    return SAVE_LOCATIONS.find((x) => x.id === id) || SAVE_LOCATIONS[0];
+  }
+
   /**
    * 把「自定义导出设置」规范化成和预设一样的结构，供 exportImage 统一使用。
    *
@@ -2144,6 +2236,12 @@
    *   - 缩略图：每条都存（几十 KB），保证「看得见」
    *   - 完整会话：只在预算够时存，保证「能继续编辑」
    *   - 超预算：先把老条目的完整会话降级掉（保缩略图），再不够才整条淘汰
+   *
+   * 两个预算常量分开，是因为「能看见几张」和「能继续编辑几张」是两件事：
+   *   - LIBRARY_MAX_ITEMS：条数上限（缩略图 + 元数据，很便宜）
+   *   - SESSION_BUDGET_BYTES：完整会话的总预算（会话很贵，一条就可能上 MB）
+   * 早期版本只有一个总预算，一条大图的会话就能吃掉整个库，
+   * 结果「修第二张时第一张被清理」—— 用户看到的就是「历史记录只存得下一张」。
    */
 
   /** localStorage 按 UTF-16 计费：1 个字符占 2 字节。不算这个会严重低估占用 */
@@ -2152,10 +2250,81 @@
     return String(str).length * 2;
   }
 
-  /** 作品库预算：localStorage 通常共 5MB，要给配置与会话留余量 */
-  const LIBRARY_BUDGET_BYTES = 2.5 * 1024 * 1024;
-  const LIBRARY_MAX_ITEMS = 80;
-  const THUMB_MAX_SIDE = 360;
+  /**
+   * 作品库总预算（字节，UTF-16 口径）。
+   *
+   * localStorage 各端差异很大：桌面 Chrome 约 5MB/源，安卓 WebView 常见 5MB，
+   * 但**同一源下所有键共享**（配置、会话、作品库都要用）。
+   *
+   * 取 3.2MB 的算法（实测数据，见 tools/regression-test.js 里的体积回归）：
+   *   会话基准图上限 2048px @ q0.75 ≈ 1.1MB（每条会话）
+   *   缩略图 320px @ q0.68       ≈ 25KB（每条）
+   *   另有约 1.5MB 留给「未完成编辑的会话」键 + 配置 + 余量
+   * 合计压在 5MB 以内 —— 写爆配额会让 setItem 抛异常，比「少留几张」严重得多。
+   *
+   * 注意这里算的是**字节**（字符数 × 2），不是字符数。
+   * 早期版本同一口径下只有 2.5MB，而一条 3072px 大图的会话就要近 3MB，
+   * 于是每存一张新的就把上一张整条淘汰 ——
+   * 这就是「历史记录只存得下一张」的直接原因。
+   */
+  const LIBRARY_BUDGET_BYTES = 3.2 * 1024 * 1024;
+
+  /**
+   * 条数上限。
+   *
+   * 60 条 × 25KB 缩略图 ≈ 1.5MB，在总预算里放得下；
+   * 再多的话缩略图本身就会把会话挤没（那又回到「能看见但不能继续编辑」的老问题）。
+   */
+  const LIBRARY_MAX_ITEMS = 60;
+
+  /**
+   * 缩略图长边（px）。
+   *
+   * 缩略图是「看得见历史」的全部依赖，但它也是条数上限下唯一会累积的东西。
+   * 320px 在手机列表里（约 110px 宽的格子，2x 屏 = 220px）已经绰绰有余，
+   * 体积却只有 360px 的 2/3。
+   */
+  const THUMB_MAX_SIDE = 320;
+
+  /** 缩略图 JPEG 质量。列表里的小图，0.68 看不出差别，体积再降三成 */
+  const THUMB_QUALITY = 0.68;
+
+  /**
+   * 完整会话（可继续编辑）的总预算。
+   *
+   * 关键：**永远给最新的那一条留出配额**（pinnedId）。
+   * 否则会出现最糟的情形 —— 刚修完一张，它的会话因为「预算被更早的记录占着」
+   * 而存不进去，用户下次点开发现「这张不能继续编辑了」。
+   *
+   * 取 3MB：按 2048px 基准图（实测约 1.1MB）算，够同时留住 2 张能继续编辑的照片。
+   * 其余记录降级成「仅预览」但**仍然留在列表里** ——
+   * 这才是用户要的「历史记录能存住多张」。
+   */
+  const SESSION_BUDGET_BYTES = 3 * 1024 * 1024;
+
+  /**
+   * 会话基准图的长边上限（px）。
+   *
+   * 会话里存的是**整张工作图**的 JPEG（用于「继续编辑」时还原底图），
+   * 这是单条记录体积的大头：3072px 的基准图 q0.85 约 1.1MB，
+   * Base64 + UTF-16 后接近 3MB —— 一条就能吃满整个库。
+   *
+   * 为什么 2048 够用：
+   *   1. 会话是「接着改」的中间态，不是成品；2048 也是设置里
+   *      「工作分辨率上限」自己就提供的档位，超过绝大多数手机屏幕；
+   *   2. 真出片走导出，导出会按**原图**尺寸重新合成，不受这里影响。
+   */
+  const SESSION_BASE_MAX_SIDE = 2048;
+  const SESSION_BASE_QUALITY = 0.75;
+
+  /**
+   * 单条会话里 patch 的总上限（**字符数**，与 planSessionPersist 同口径）。
+   *
+   * 256K 字符 ≈ 512KB（UTF-16）。给得比早期版本（3MB 字符）小得多，因为
+   * 基准图已经占了大头，patch 再放开就放不下第二张照片了。
+   * 超出时只丢「最老的几次编辑能否继续调参」，最近的操作永远保住。
+   */
+  const SESSION_PATCH_MAX_CHARS = 256 * 1024;
 
   /** 估算一条作品记录占多少存储 */
   function estimateWorkBytes(rec) {
@@ -2196,17 +2365,39 @@
    *
    * 纯函数（不修改入参），返回 id 列表交给调用方执行 —— 这样好测。
    *
-   * 淘汰顺序刻意「先降级再淘汰」：完整会话很占地方（几百 KB），
-   * 但缩略图只要几十 KB。把老条目的会话丢掉，能多留好几倍的历史可见性。
+   * **两层预算，分开管**（这是修掉「历史记录只存得下一张」的关键）：
+   *
+   *   1. 条数（maxItems）：缩略图 + 元数据很便宜（一条约 30KB），
+   *      所以「列表里能看见几张」由条数上限决定，几乎不受体积影响。
+   *
+   *   2. 会话预算（sessionBudgetBytes）：完整会话很贵（一条可上 MB），
+   *      单独用一个预算管。超了就降级最老的会话 ——
+   *      **但列表照旧留着**（降级只丢「能继续编辑」，不丢「看得见」）。
+   *
+   * 早期版本只有一层总预算，且把「置顶项」排除在降级之外却没排除在淘汰之外，
+   * 于是一张大图的会话就能吃满整个预算 → 每次都把上一条整条淘汰，
+   * 用户看到的就是「历史记录里永远只有一张」。
+   *
+   * 淘汰顺序刻意「先降级再淘汰」：把老条目的会话丢掉能省最多空间，
+   * 而用户失去的只是「继续编辑」的能力，历史可见性一点没少。
    *
    * @param {Array} entries 作品记录数组
-   * @param {object} opts { maxBytes, maxItems, pinnedId }
-   * @returns {{keepIds:Array, downgradeIds:Array, evictIds:Array, bytes:number, note:string}}
+   * @param {object} opts
+   *   { maxBytes, maxItems, sessionBudgetBytes, pinnedId }
+   *   maxBytes          —— 总预算（含缩略图 + 会话）
+   *   maxItems          —— 条数上限
+   *   sessionBudgetBytes—— 完整会话的单独预算（默认 maxBytes 的 3/4）
+   *   pinnedId          —— 当前正在编辑的作品 id（**永不淘汰、永不降级**）
+   * @returns {{keepIds:Array, downgradeIds:Array, evictIds:Array, bytes:number,
+   *            sessionBytes:number, note:string}}
    */
   function planLibrary(entries, opts) {
     const o = opts || {};
-    const maxBytes = num(o.maxBytes, LIBRARY_BUDGET_BYTES);
+    const maxBytes = Math.max(1, num(o.maxBytes, LIBRARY_BUDGET_BYTES));
     const maxItems = Math.max(1, Math.round(num(o.maxItems, LIBRARY_MAX_ITEMS)));
+    // 会话预算默认取总预算的 3/4：剩下的 1/4 留给缩略图与元数据，
+    // 保证「列表看得见」不会先被会话挤死
+    const sessionBudget = Math.max(1, num(o.sessionBudgetBytes, Math.min(SESSION_BUDGET_BYTES, maxBytes * 0.75)));
     const pinnedId = o.pinnedId || null;
 
     const sorted = sortWorksNewestFirst(entries);
@@ -2233,25 +2424,50 @@
       if (r.session && !downgraded.has(r.id)) n += storageBytes(JSON.stringify(r.session));
       return n;
     };
+    /** 一条记录的会话体积（已降级的算 0） */
+    const sessionBytesOf = (e) => {
+      const r = normalizeWork(e);
+      if (!r.session || downgraded.has(r.id)) return 0;
+      return storageBytes(JSON.stringify(r.session));
+    };
 
-    // 第二轮：按体积裁。先降级最老的（丢完整会话），仍超再淘汰
     let bytes = kept.reduce((s, e) => s + estimateWorkBytes(e), 0);
-    if (bytes > maxBytes) {
-      // 从最老的开始降级
-      for (let i = kept.length - 1; i >= 0 && bytes > maxBytes; i--) {
+    let sessionBytes = kept.reduce((s, e) => s + sessionBytesOf(e), 0);
+
+    /**
+     * 从最老的开始降级会话，直到满足给定的两个上限。
+     *
+     * 为什么按「最老」而不是「最大」降级：用户接着改的多半是最近几张，
+     * 丢最老的会话对体验伤害最小。而且这样结果是确定的（可测），
+     * 不会因为某张图恰好很大就把它单独踢掉。
+     */
+    const downgradeOldestUntil = (overBytes, overSession) => {
+      for (let i = kept.length - 1; i >= 0; i--) {
+        if (bytes <= overBytes && sessionBytes <= overSession) break;
         const e = kept[i];
         const isPinned = pinnedId && e.id === pinnedId;
-        if (isPinned || !e.session) continue;
-        bytes -= storageBytes(JSON.stringify(e.session));
+        // 置顶项（当前正在编辑的这张）的会话必须保住 ——
+        // 否则刚修完就「不能继续编辑了」，用户完全无法理解
+        if (isPinned) continue;
+        const sb = sessionBytesOf(e);
+        if (!sb) continue;                      // 本来就没会话，没什么可降的
+        bytes -= sb;
+        sessionBytes -= sb;
         downgraded.add(e.id);
         downgradeIds.push(e.id);
       }
-      // 还超就淘汰最老的（保留至少 1 条，否则界面会空得莫名其妙）
+    };
+
+    // 第二轮：先按「会话预算」降级 —— 这一层只丢会话，列表照旧留着
+    downgradeOldestUntil(maxBytes, sessionBudget);
+    // 第三轮：仍超总预算（缩略图本身就装不下了）才整条淘汰
+    if (bytes > maxBytes) {
       for (let i = kept.length - 1; i >= 0 && bytes > maxBytes && kept.length > 1; i--) {
         const e = kept[i];
         const isPinned = pinnedId && e.id === pinnedId;
         if (isPinned) continue;
         bytes -= remainBytes(e);        // 已降级的条目不能再扣一次会话体积
+        sessionBytes -= sessionBytesOf(e);
         evictIds.push(e.id);
         kept.splice(i, 1);
       }
@@ -2268,7 +2484,12 @@
       note = downgradeIds.length + ' 条较早的记录已转为仅保留预览';
     }
 
-    return { keepIds, downgradeIds, evictIds, bytes, note };
+    return {
+      keepIds, downgradeIds, evictIds,
+      bytes: Math.max(0, bytes),
+      sessionBytes: Math.max(0, sessionBytes),
+      note
+    };
   }
 
   /** 某个时间戳所在「那一天」的零点（本地时区） */
@@ -2450,8 +2671,10 @@
    */
   const BACK_LAYERS = [
     // 顶栏「更多」下拉：z-index 必须高于所有面板，否则会被盖住点不到
+    { id: 'tutorial', z: 140, zh: '新手教程' },      // #tutorial（盖住一切）
     { id: 'moremenu', z: 130, zh: '更多菜单' },
     { id: 'workPreview', z: 120, zh: '作品预览' },   // #work-preview
+    { id: 'calllog', z: 110, zh: '调用日志' },       // #calllog（在设置之上打开）
     { id: 'settings', z: 100, zh: '设置' },
     { id: 'library', z: 100, zh: '修图记录' },
     { id: 'history', z: 100, zh: '历史时间线' },
@@ -2556,6 +2779,749 @@
       collapsed: isBarCollapsed(height, full),
       // 展开程度（0~1），用于提示与动画
       pct: full > 0 ? Math.round((height / full) * 100) / 100 : 1
+    };
+  }
+
+  /* ====================== 7.01k 后台生成任务 ====================== */
+
+  /**
+   * 后台生成任务：发起生成后可以离开这张照片，生成继续跑。
+   *
+   * 背景：生图要 30~60 秒。摄影师手上通常有几十张要修，等待期间想去看别的照片
+   * 是很自然的事。但旧实现里「回首页 / 换图」会 abort 在途请求 ——
+   * 上游已经出图、钱已经花了，结果却收不到。
+   *
+   * 设计（尽量小，但要正确）：
+   *   - 一个内存里的任务表 `S.jobs`（**不落盘**：应用被杀的话请求也断了，
+   *     留一条「任务记录」只会让用户以为它还在跑）
+   *   - 每个任务记住 **它属于哪件作品**（workId）+ **属于哪个文档版本**（docVersion）
+   *     + 请求参数（选区、提示词、掩膜……）
+   *   - 结果回来时：如果用户已经回到那张照片 → 走原来的「对比图」流程；
+   *     如果用户在别处 → 把结果**存进那件作品的记录里**（不丢），
+   *     并给一个角标 + 通知，用户回去时能直接看到。
+   *
+   * 要防的三个坑（用户明确点出的）：
+   *   1. 结果落到**错的照片**上 → 任务带 workId/docVersion，落地前双重校验
+   *   2. 结果**静默丢失** → 落不进当前文档就落进作品库，两条路必有一条成功
+   *   3. UI **假装在忙** → busy 只反映「当前这张照片有没有在跑的任务」
+   */
+
+  /**
+   * 任务该往哪里落地。
+   *
+   * 纯函数，把「用户现在在哪」与「任务属于哪」的关系讲清楚，
+   * 便于把各种组合（同一张/换了一张/回首页/任务过期）都测到。
+   *
+   * @param {object} o
+   *   jobWorkId     任务属于哪件作品
+   *   jobDocVersion 发起时的文档版本
+   *   curWorkId     当前作品的 id（null = 在首页，没有打开任何照片）
+   *   curDocVersion 当前文档版本
+   *   hasPhoto      当前是否真的打开了照片
+   *   hasLibrary    作品库是否可用（能落盘）
+   * @returns {{target:string, reason:string}}
+   *   target: 'compare' —— 用户就在这张照片上，走对比图流程
+   *           'library' —— 用户在别处，把结果存进作品记录
+   *           'drop'    —— 没地方可落（且无法存进库），只能丢弃
+   */
+  function planJobLanding(o) {
+    const opt = o || {};
+    const sameDoc = opt.hasPhoto && opt.curDocVersion === opt.jobDocVersion;
+    const sameWork = !!opt.curWorkId && opt.curWorkId === opt.jobWorkId;
+
+    // 文档版本一致 = 就是同一张照片的同一份编辑状态，可以直接贴
+    if (sameDoc) return { target: 'compare', reason: 'same-doc' };
+    // 作品 id 一致但文档版本变了（用户在这张照片上又做了别的编辑 / 撤销过）：
+    // 结果仍属于这张照片，但不能走「对比图」（那会把中间的操作盖掉）。
+    // 落进作品库，用户回这张照片时能看到。
+    if (sameWork) return { target: 'library', reason: 'same-work-newer-doc' };
+    if (opt.hasLibrary) return { target: 'library', reason: 'other-photo' };
+    // 没有作品库（还没存过任何编辑）时无处可落
+    return { target: 'drop', reason: 'no-place' };
+  }
+
+  /**
+   * 后台任务角标该显示什么。
+   *
+   * 用户要能一眼看出「有几张在后台生成」以及「哪几张已经好了」——
+   * 这正是「可以放在后台处理下一张」的关键：没有可见的进度，
+   * 用户不敢离开，功能等于没有。
+   *
+   * @param {Array} jobs 任务列表 [{status:'running'|'done'|'failed', ...}]
+   * @returns {{running:number, done:number, failed:number, total:number, text:string}}
+   */
+  function planJobBadge(jobs) {
+    const list = Array.isArray(jobs) ? jobs : [];
+    let running = 0, done = 0, failed = 0;
+    for (const j of list) {
+      if (!j) continue;
+      if (j.status === 'running') running++;
+      else if (j.status === 'done') done++;
+      else if (j.status === 'failed') failed++;
+    }
+    const total = running + done + failed;
+    let text = '';
+    if (running && done) text = running + ' 张生成中 · ' + done + ' 张已完成';
+    else if (running) text = running + ' 张正在后台生成';
+    else if (done) text = done + ' 张后台生成已完成';
+    else if (failed) text = failed + ' 张后台生成失败';
+    return { running, done, failed, total, text };
+  }
+
+  /**
+   * 首页/作品库里那条记录该打什么标（让用户知道点进去有结果）。
+   *
+   * 优先级刻意是「完成 > 生成中 > 失败」：
+   * 「已完成」是行动召唤（点进去看结果），最重要；
+   * 「生成中」是信息（别急）；「失败」最次要（用户多半已经知道了）。
+   */
+  function jobTagFor(workId, jobs) {
+    const list = Array.isArray(jobs) ? jobs : [];
+    let fallback = null;
+    for (const j of list) {
+      if (!j || j.workId !== workId) continue;
+      if (j.status === 'done') return { tag: 'done', zh: '已生成，点开看' };
+      if (j.status === 'running') fallback = { tag: 'running', zh: '生成中…' };
+      else if (j.status === 'failed' && !fallback) fallback = { tag: 'failed', zh: '生成失败' };
+    }
+    return fallback;
+  }
+
+  /**
+   * 「当前这张照片还在跑吗」—— 决定 busy 遮罩要不要显示。
+   *
+   * 关键：**不能只看「有没有任务在跑」**。用户在首页时，别的照片的任务还在跑，
+   * 此时弹出「正在生成…」的遮罩会让他以为卡住了（而且挡住首页）。
+   * 所以只有「用户正看着的那张照片有任务」才显示遮罩。
+   *
+   * @param {object} o { jobs, curWorkId, curDocVersion, hasPhoto }
+   */
+  function planBusyForCurrent(o) {
+    const opt = o || {};
+    if (!opt.hasPhoto) return { busy: false, count: 0 };
+    let n = 0;
+    for (const j of (opt.jobs || [])) {
+      if (!j || j.status !== 'running') continue;
+      if (j.docVersion === opt.curDocVersion) n++;
+    }
+    return { busy: n > 0, count: n };
+  }
+
+  /* ====================== 7.01j 基础调色（选区色调微调） ====================== */
+
+  /**
+   * 基础调色：对**框选区域**做色调微调（曝光/对比度/饱和度/色温/色调）。
+   *
+   * 定位：AI 修图之后，模型改的内容在**颜色**上常常还差一点 ——
+   * 偏冷偏暖、发灰、过艳。这些是纯数学能修的，不该再花一次模型调用。
+   * 所以调色和「羽化/色彩匹配/融合」是一类东西：**免费、即时、可撤销**。
+   *
+   * 与无缝融合的分工（刻意不重叠）：
+   *   融合 —— 把生成块的**接缝**对齐周围环境（只动边缘一圈）
+   *   调色 —— 按用户的意图调**整个选区**的色调（用户主动要的改动）
+   * 融合的「中心保留」保证了「你改的颜色完整保留」，
+   * 调色是在那之后进一步微调，两者叠加不会互相打架。
+   *
+   * 全部是纯函数（吃 ImageData 形状的对象，返回同样的结构），
+   * 便于在 Node 里逐像素验证「全零调整 = 原图不变」这类关键性质。
+   */
+
+  /**
+   * 调色参数定义：滑块范围与默认值。
+   *
+   * 值域刻意都做成 -100 ~ +100 的**对称**整数：
+   *   1. 滑块中点（0）就是「不变」，用户能一眼看出自己有没有动过；
+   *   2. 撤销记录、会话存档里存的就是这个整数，不用来回换算；
+   *   3. 「重置」就是全归零，不需要记「默认值」是什么。
+   * 内部换算成实际系数时再除（见 gradePixels），这样界面与算法解耦。
+   */
+  const GRADE_PARAMS = [
+    { key: 'exposure', zh: '曝光', min: -100, max: 100, def: 0, hint: '整体明暗' },
+    { key: 'contrast', zh: '对比度', min: -100, max: 100, def: 0, hint: '明暗反差' },
+    { key: 'saturation', zh: '饱和度', min: -100, max: 100, def: 0, hint: '颜色浓淡' },
+    { key: 'temperature', zh: '色温', min: -100, max: 100, def: 0, hint: '偏冷 / 偏暖' },
+    { key: 'tint', zh: '色调', min: -100, max: 100, def: 0, hint: '偏绿 / 偏品红' }
+  ];
+
+  /** 一组「什么都没调」的参数（用于比较与重置） */
+  function emptyGrade() {
+    const g = {};
+    for (const p of GRADE_PARAMS) g[p.key] = p.def;
+    return g;
+  }
+
+  /** 这组参数是否等于「什么都没调」（全 0） */
+  function isGradeEmpty(g) {
+    const x = g || {};
+    for (const p of GRADE_PARAMS) {
+      if (Math.abs(num(x[p.key], 0)) > 1e-6) return false;
+    }
+    return true;
+  }
+
+  /** 把一组调色参数归一化：夹到合法范围、补齐缺失字段、丢掉脏值 */
+  function normalizeGrade(g) {
+    const x = g || {};
+    const out = {};
+    for (const p of GRADE_PARAMS) {
+      out[p.key] = Math.max(p.min, Math.min(p.max, num(x[p.key], p.def)));
+    }
+    return out;
+  }
+
+  /**
+   * 曝光：在**线性光**空间里乘一个系数。
+   *
+   * 为什么不在 sRGB 空间直接加减：sRGB 是经过 gamma 编码的，
+   * 直接乘会让暗部变化远大于亮部（看起来像「对比度」而不是「曝光」），
+   * 而且加减容易把暗部整片压死或把亮部削平。转成线性光再乘，
+   * 才和相机上的曝光补偿是一个意思。
+   *
+   * ±100 对应 ±2 EV（4 倍 / 1/4）—— 再大就完全不像照片了。
+   */
+  function gradeExposureFactor(v) {
+    const t = Math.max(-100, Math.min(100, num(v, 0))) / 100;
+    return Math.pow(2, t * 2);
+  }
+
+  /**
+   * 对比度：绕**中灰**（线性光 0.18）缩放。
+   *
+   * 用 0.18 而不是 0.5 是因为线性光下的中灰在 0.18 附近
+   * （sRGB 约 118/255）。绕 0.5 缩放会让整张图变亮。
+   */
+  const GRADE_MID_GRAY = 0.18;
+
+  /**
+   * 色温 / 色调：在**线性光**里对 R/B（色温）与 G/M（色调）做增益。
+   *
+   * 为什么用增益而不是「往某个方向混合颜色」：
+   * 混合会整体降饱和（把纯色拉向灰），而真实的白平衡偏移是**通道增益** ——
+   * 暖一点就是红通道乘多一点、蓝通道乘少一点，颜色该饱和的地方依然饱和。
+   *
+   * ±100 对应约 ±40% 的通道增益差：足够把冷调照片拉暖，又不会变成油画。
+   */
+  function gradeChannelGains(temperature, tint) {
+    const t = Math.max(-100, Math.min(100, num(temperature, 0))) / 100;
+    const g = Math.max(-100, Math.min(100, num(tint, 0))) / 100;
+    const k = 0.4;
+    return {
+      r: 1 + t * k,
+      g: 1 - g * k,          // 色调正方向 = 偏品红（减绿）
+      b: 1 - t * k
+    };
+  }
+
+  /**
+   * 饱和度：把像素朝「同亮度的灰」插值。
+   *
+   * 用 Rec.709 亮度权重（0.2126/0.7152/0.0722）而不是简单平均：
+   * 简单平均会让绿色严重变暗，调饱和时画面会跟着变亮变暗。
+   *
+   * -100 = 完全去色（黑白），+100 = 饱和度翻倍。
+   */
+  const GRADE_LUMA_R = 0.2126, GRADE_LUMA_G = 0.7152, GRADE_LUMA_B = 0.0722;
+
+  /**
+   * 对一块像素应用调色。**纯函数**：不改入参，返回新的 ImageData 形状对象。
+   *
+   * 计算顺序刻意固定为：曝光 → 色温/色调 → 对比度 → 饱和度。
+   * 顺序会影响结果，所以必须定死并写清楚 ——
+   * 否则以后有人「顺手」调一下顺序，用户存下来的效果就全变了。
+   * 这个顺序也符合直觉：先定明暗和白平衡（拍摄层），再调反差与浓淡（风格层）。
+   *
+   * @param {object} img   ImageData 形状（{ data, width, height }），data 为 RGBA
+   * @param {object} grade { exposure, contrast, saturation, temperature, tint }
+   *                       （-100~100；全 0 时原样返回，不做任何计算）
+   * @param {object} opts  { mask: Float32Array|null, inPlace: boolean }
+   *                       mask 为 0~1 的混合权重（选区外的像素权重 0，
+   *                       这样调色天然只作用在框选区域内，边界由羽化掩膜平滑过渡）
+   * @returns {object} 新的 ImageData 形状对象
+   */
+  function gradePixels(img, grade, opts) {
+    const opt = opts || {};
+    const src = img || {};
+    const data = src.data;
+    const width = Math.max(0, Math.round(num(src.width, 0)));
+    const height = Math.max(0, Math.round(num(src.height, 0)));
+    if (!data || !width || !height) return { data: data || new Uint8ClampedArray(0), width, height };
+
+    const g = normalizeGrade(grade);
+    const mask = opt.mask || null;
+    // 输出：默认复制一份（不破坏调用方的像素）
+    const out = opt.inPlace ? data : new Uint8ClampedArray(data.length);
+    if (!opt.inPlace) out.set(data);
+
+    // 全零 = 什么都不做。这条捷径不只是省时间 ——
+    // 它保证了「参数全零时像素**逐字节**等于原图」，
+    // 这是「调色是非破坏性的」这个承诺的技术底线（浮点往返会有 1~2 的误差）。
+    if (isGradeEmpty(g)) return { data: out, width, height };
+
+    const expF = gradeExposureFactor(g.exposure);
+    const gains = gradeChannelGains(g.temperature, g.tint);
+    // 对比度：0 → 系数 1（不变）；+100 → 2 倍；-100 → 0（完全压成中灰）
+    const cF = 1 + g.contrast / 100;
+    // 饱和度：-100 → 0（黑白）；0 → 1；+100 → 2
+    const sF = 1 + g.saturation / 100;
+
+    const n = width * height;
+    for (let i = 0; i < n; i++) {
+      const o = i * 4;
+      const a = data[o + 3];
+      // 全透明像素没有颜色可调，直接跳过（也避免给它们编出假颜色）
+      if (a === 0) continue;
+
+      // 混合权重：掩膜为 0 的地方完全不动（选区外、画笔排除的区域）
+      const w = mask ? clamp01(mask[i]) : 1;
+      if (w <= 0) continue;
+      // 先记下原值：调色结果要按权重和原值混合，
+      // 否则掩膜边缘会出现「一半的调色」这种不连续
+      const r0 = data[o], g0 = data[o + 1], b0 = data[o + 2];
+
+      // 1) 转到线性光
+      // 注意 srgbToLinear 吃的是 **0~255 的 sRGB 值**、返回 0~1 的线性值
+      // （与 linearToSrgb 正好相反，后者吃 0~1、返回 0~255）。
+      // 这对函数的参数口径不一致，传错会让整张图黑掉 —— 这里显式写清楚。
+      let r = srgbToLinear(r0);
+      let gg = srgbToLinear(g0);
+      let bb = srgbToLinear(b0);
+
+      // 2) 曝光（线性空间乘系数）
+      if (expF !== 1) { r *= expF; gg *= expF; bb *= expF; }
+
+      // 3) 色温 / 色调（通道增益）
+      if (gains.r !== 1) r *= gains.r;
+      if (gains.g !== 1) gg *= gains.g;
+      if (gains.b !== 1) bb *= gains.b;
+
+      // 4) 对比度（绕线性中灰缩放）
+      if (cF !== 1) {
+        r = GRADE_MID_GRAY + (r - GRADE_MID_GRAY) * cF;
+        gg = GRADE_MID_GRAY + (gg - GRADE_MID_GRAY) * cF;
+        bb = GRADE_MID_GRAY + (bb - GRADE_MID_GRAY) * cF;
+      }
+
+      // 5) 饱和度（朝同亮度的灰插值，在线性光里做）
+      if (sF !== 1) {
+        const lum = GRADE_LUMA_R * r + GRADE_LUMA_G * gg + GRADE_LUMA_B * bb;
+        r = lum + (r - lum) * sF;
+        gg = lum + (gg - lum) * sF;
+        bb = lum + (bb - lum) * sF;
+      }
+
+      // 6) 回 sRGB（linearToSrgb 吃 0~1、返回 0~255，内部已夹取）。
+      //    夹取很关键：负值 / 超过 1 的值如果直接取模会绕回，
+      //    那是「调色把亮部烧成黑块」的经典 bug
+      let nr = linearToSrgb(r);
+      let ng = linearToSrgb(gg);
+      let nb = linearToSrgb(bb);
+
+      // 7) 按掩膜权重和原值混合（边界平滑过渡）
+      if (w < 1) {
+        nr = r0 + (nr - r0) * w;
+        ng = g0 + (ng - g0) * w;
+        nb = b0 + (nb - b0) * w;
+      }
+      // 显式夹取：即便 out 以后被换成普通数组，也不会出现绕回
+      out[o] = nr < 0 ? 0 : (nr > 255 ? 255 : nr);
+      out[o + 1] = ng < 0 ? 0 : (ng > 255 ? 255 : ng);
+      out[o + 2] = nb < 0 ? 0 : (nb > 255 ? 255 : nb);
+      out[o + 3] = a;
+    }
+    return { data: out, width, height };
+  }
+
+  /**
+   * 一组调色参数的人话描述（图层列表、撤销记录里显示用）。
+   * 全零返回「未调整」—— 界面据此决定要不要显示这一行。
+   */
+  function describeGrade(g) {
+    const x = normalizeGrade(g);
+    if (isGradeEmpty(x)) return '未调整';
+    const bits = [];
+    const sign = (v) => (v > 0 ? '+' : '');
+    if (x.exposure) bits.push('曝光 ' + sign(x.exposure) + Math.round(x.exposure) + '%');
+    if (x.contrast) bits.push('对比 ' + sign(x.contrast) + Math.round(x.contrast) + '%');
+    if (x.saturation) bits.push('饱和 ' + sign(x.saturation) + Math.round(x.saturation) + '%');
+    if (x.temperature) {
+      bits.push(x.temperature > 0
+        ? '偏暖 ' + Math.round(x.temperature) + '%'
+        : '偏冷 ' + Math.round(-x.temperature) + '%');
+    }
+    if (x.tint) {
+      bits.push(x.tint > 0
+        ? '偏品红 ' + Math.round(x.tint) + '%'
+        : '偏绿 ' + Math.round(-x.tint) + '%');
+    }
+    return bits.join(' · ');
+  }
+
+  /* ====================== 7.01i 新手教程 ====================== */
+
+  /**
+   * 新手教程的步骤定义。
+   *
+   * 为什么放在 core.js 而不是 app.js：步骤文案与顺序是**可测的数据**，
+   * 放这里能在 Node 里断言「步骤齐备、指向的界面元素都存在」——
+   * 写错一个 `target` 选择器在真机上只会表现为「教程点不动」，
+   * 很难查（浮层盖着画面，控制台也不一定看得到）。
+   *
+   * 每一步：
+   *   target —— 指向的界面元素（CSS 选择器）；空字符串表示居中的纯说明页
+   *   title  —— 一句话说清这一步做什么
+   *   body   —— 补充说明（为什么这么做 / 有什么坑）
+   *   place  —— 气泡位置：bottom / top / center（由 app 侧决定具体像素）
+   */
+  const TUTORIAL_STEPS = [
+    {
+      target: '#btn-open',
+      place: 'bottom',
+      title: '先打开一张照片',
+      body: '点左上角「打开」从相册选一张。也可以用示例图先试试手感。'
+    },
+    {
+      target: '.tool[data-mode="select"]',
+      place: 'top',
+      title: '框选要修改的地方',
+      body: '在照片上拖出一个框。框住哪里就改哪里，框外一律不动 —— 这是这个工具和「整张重绘」最大的区别。'
+    },
+    {
+      target: '#prompt',
+      place: 'top',
+      title: '用一句话说清要改成什么',
+      body: '比如「把这块背景换成傍晚的海边，光线自然」。说得越具体越好；不确定怎么写就点下面的快捷短语。'
+    },
+    {
+      target: '#btn-generate',
+      place: 'top',
+      title: '点「生成并贴回」',
+      body: '模型只改你框住的那一块，改完自动贴回原位置。生成要等 30~60 秒，可以切到别的应用，好了会通知你。'
+    },
+    {
+      target: '#cmp-apply',
+      place: 'center',
+      title: '对比一下再决定',
+      body: '生成后出现对比图：拖动中间的竖线看修改前后。满意就点「应用」，不满意点「放弃」不花第二次钱。'
+    },
+    {
+      target: '#btn-save',
+      place: 'bottom',
+      title: '导出成片',
+      body: '点右上角「导出」选格式和大小。拍摄信息（机型/镜头/参数）会保留下来。'
+    }
+  ];
+
+  /** 教程步骤总数（界面上的「第 N / M 步」要用） */
+  const TUTORIAL_LEN = TUTORIAL_STEPS.length;
+
+  /**
+   * 该不该自动弹新手教程。
+   *
+   * 判定刻意保守：**只在真正第一次启动时弹一次**。
+   * 教程盖住整屏，如果在每次升级后都弹，老用户会很烦 ——
+   * 所以「看过」的标记与版本无关，看过就永远不再自动弹（但能手动重看）。
+   *
+   * @param {object} o { seen, dismissed, hasPhoto }
+   * @returns {{show:boolean, reason:string}}
+   */
+  function planTutorial(o) {
+    const opt = o || {};
+    // 已经有照片在编辑时不弹：用户显然已经会用了，而且盖住画布很讨厌
+    if (opt.hasPhoto) return { show: false, reason: 'editing' };
+    if (opt.seen) return { show: false, reason: 'seen' };
+    return { show: true, reason: 'first-run' };
+  }
+
+  /**
+   * 教程推进：下一步 / 上一步。
+   *
+   * 到末尾再点「下一步」返回 done —— 调用方据此关闭教程并标记已看过。
+   * 越界（脏数据 / 连点）一律夹到合法范围，不会返回 NaN 让界面卡住。
+   *
+   * @param {number} idx   当前步骤索引
+   * @param {string} dir   'next' | 'prev'
+   * @returns {{idx:number, done:boolean, atStart:boolean, atEnd:boolean}}
+   */
+  function planTutorialStep(idx, dir) {
+    const n = TUTORIAL_LEN;
+    const cur = Math.max(0, Math.min(n - 1, Math.round(num(idx, 0))));
+    let next = cur;
+    if (dir === 'prev') next = cur - 1;
+    else if (dir === 'next') next = cur + 1;
+    const done = next >= n;
+    return {
+      idx: done ? n - 1 : Math.max(0, next),
+      done,
+      atStart: cur <= 0,
+      atEnd: cur >= n - 1
+    };
+  }
+
+  /* ====================== 7.01h 调用日志（每次模型调用都留痕） ====================== */
+
+  /**
+   * 调用日志：记录每一次模型 API 调用。
+   *
+   * 为什么需要：生图是**按次花钱**的。用户想知道「这个月修图花了多少、
+   * 哪几次失败了（失败也可能计费）、失败原因是什么、发给模型的提示词到底长什么样」——
+   * 这些信息原本只在控制台里，手机上根本看不到。
+   *
+   * 设计要点：
+   *   - **环形缓冲**（上限 CALL_LOG_MAX）：只留最近 N 条，不会无限涨
+   *   - 每条只存**摘要**：提示词截断、图片只记尺寸不记内容 ——
+   *     日志本身不能变成第二个存储黑洞（照片 base64 是 MB 级的）
+   *   - 纯函数负责「加一条 / 裁剪 / 导出」，app.js 只负责读写 localStorage
+   */
+
+  /** 日志条数上限。100 条 × 每条约 500 字节 ≈ 50KB，对 localStorage 无压力 */
+  const CALL_LOG_MAX = 100;
+  /** 提示词在日志里保留多少字符（够看出意图，又不至于把日志撑大） */
+  const CALL_LOG_PROMPT_CHARS = 120;
+
+  /**
+   * 往日志里追加一条（返回**新数组**，不改入参）。
+   *
+   * 顺序：**最新的在前**（index 0）——
+   * 用户打开面板最想看的就是「刚刚那一次」，让它出现在第一屏，
+   * 不用滚到底。
+   *
+   * 失败也要记（`ok: false` + `error`）：失败常常是要花时间的排查线索，
+   * 而且有些接口失败也计费。静默丢掉失败记录等于把最有用的信息扔了。
+   *
+   * @param {Array} list 现有日志（可为 null）
+   * @param {object} entry { at, provider, model, prompt, imgW, imgH, imgBytes,
+   *                         ms, ok, error, costUsd, costNote, status, endpoint }
+   * @param {number} max  上限（默认 CALL_LOG_MAX）
+   * @returns {Array} 新数组
+   */
+  function appendCallLog(list, entry, max) {
+    const cap = Math.max(1, Math.round(num(max, CALL_LOG_MAX)));
+    const e = entry || {};
+    const rec = {
+      at: num(e.at, Date.now()),
+      provider: typeof e.provider === 'string' ? e.provider : '',
+      model: typeof e.model === 'string' ? e.model : '',
+      // 提示词截断：完整提示词可能上千字，100 条就是几百 KB。
+      // 保留开头足够用户认出「这次要求的是什么」。
+      prompt: truncateText(e.prompt, CALL_LOG_PROMPT_CHARS),
+      promptLen: Math.max(0, Math.round(num(e.promptLen,
+        typeof e.prompt === 'string' ? e.prompt.length : 0))),
+      // 图片只记尺寸与字节数 —— 绝不能把 base64 存进日志
+      imgW: Math.max(0, Math.round(num(e.imgW, 0))),
+      imgH: Math.max(0, Math.round(num(e.imgH, 0))),
+      imgBytes: Math.max(0, Math.round(num(e.imgBytes, 0))),
+      ms: Math.max(0, Math.round(num(e.ms, 0))),
+      ok: e.ok === true,
+      error: typeof e.error === 'string' ? e.error.slice(0, 300) : '',
+      status: Math.round(num(e.status, 0)),
+      costUsd: (e.costUsd === null || e.costUsd === undefined) ? null : num(e.costUsd, 0),
+      costNote: typeof e.costNote === 'string' ? e.costNote.slice(0, 60) : '',
+      endpoint: typeof e.endpoint === 'string' ? e.endpoint.slice(0, 200) : '',
+      // 记录属于哪张作品（将来「这张照片花了几次」能直接查）
+      workId: typeof e.workId === 'string' ? e.workId : ''
+    };
+    const out = [rec];
+    const src = Array.isArray(list) ? list : [];
+    for (let i = 0; i < src.length && out.length < cap; i++) out.push(src[i]);
+    return out;
+  }
+
+  /** 按字符数截断（中英文都按「字符」算，够用且可预期） */
+  function truncateText(s, max) {
+    const t = typeof s === 'string' ? s : (s === null || s === undefined ? '' : String(s));
+    const n = Math.max(0, Math.round(num(max, 0)));
+    if (t.length <= n) return t;
+    return t.slice(0, n) + '…';
+  }
+
+  /**
+   * 日志统计（面板顶部那行「共 N 次 · 成功 M 次 · 花费 $X」）。
+   *
+   * 花费只累加**已知单价**的调用：未知单价按 0 计，同时单独报出条数 ——
+   * 把未知的当成 0 直接算进总额，会让用户以为「这个月只花了这么点」。
+   */
+  function callLogStats(list) {
+    const arr = Array.isArray(list) ? list : [];
+    let ok = 0, failed = 0, usd = 0, unknown = 0, ms = 0, msCount = 0;
+    for (const e of arr) {
+      if (e && e.ok) ok++; else failed++;
+      if (e && e.costUsd !== null && e.costUsd !== undefined) usd += num(e.costUsd, 0);
+      else unknown++;
+      if (e && num(e.ms, 0) > 0) { ms += num(e.ms, 0); msCount++; }
+    }
+    return {
+      count: arr.length,
+      ok, failed,
+      usd,
+      unknown,
+      avgMs: msCount ? Math.round(ms / msCount) : 0
+    };
+  }
+
+  /**
+   * 导出成文本（给人看的）。
+   *
+   * 为什么同时提供文本和 JSON：
+   *   - 文本：用户自己扫一眼、贴给客服/群里问问题
+   *   - JSON：脚本处理、导入别的工具分析
+   * 只给一种都不够用，而实现两种的成本几乎为零。
+   */
+  function callLogToText(list, opts) {
+    const o = opts || {};
+    const arr = Array.isArray(list) ? list : [];
+    const st = callLogStats(arr);
+    const lines = [];
+    lines.push('枫叶修图 · 模型调用日志');
+    lines.push('导出时间：' + formatDateTime(num(o.now, Date.now())));
+    if (o.version) lines.push('应用版本：v' + o.version);
+    lines.push('共 ' + st.count + ' 次调用（成功 ' + st.ok + ' 次，失败 ' + st.failed + ' 次）');
+    lines.push('已知单价的花费合计：' + formatUsd(st.usd) +
+      (st.unknown ? '（另有 ' + st.unknown + ' 次单价未知，未计入）' : ''));
+    if (st.avgMs) lines.push('平均耗时：' + (st.avgMs / 1000).toFixed(1) + ' 秒');
+    lines.push('');
+    lines.push('─'.repeat(46));
+    // 文本按**时间正序**输出（人读日志的习惯是从早到晚），
+    // 而内部存储是倒序（界面要先看最新的）。
+    // 这里显式按时间排序，而不是简单地 reverse() —— 数组顺序可能因为
+    // 导入、手工拼接、旧版本存档而错乱，日志导出必须经得起这个。
+    const chrono = arr.slice().sort((x, y) => num((x || {}).at, 0) - num((y || {}).at, 0));
+    for (let i = 0; i < chrono.length; i++) {
+      const e = chrono[i] || {};
+      lines.push('');
+      lines.push('#' + (i + 1) + '  ' + formatDateTime(num(e.at, 0)) + '  ' + (e.ok ? '成功' : '失败'));
+      lines.push('  模型：' + (e.model || '（未记录）') + (e.provider ? '（' + e.provider + '）' : ''));
+      if (e.endpoint) lines.push('  接口：' + e.endpoint);
+      if (e.imgW || e.imgH) {
+        lines.push('  发送图片：' + e.imgW + '×' + e.imgH +
+          (e.imgBytes ? '（约 ' + formatBytes(e.imgBytes) + '）' : ''));
+      }
+      if (e.ms) lines.push('  耗时：' + (e.ms / 1000).toFixed(1) + ' 秒');
+      if (e.costUsd !== null && e.costUsd !== undefined) {
+        lines.push('  花费：' + formatUsd(e.costUsd) + (e.costNote ? '（' + e.costNote + '）' : ''));
+      } else {
+        lines.push('  花费：未知（该模型未收录价格）');
+      }
+      if (e.status) lines.push('  HTTP：' + e.status);
+      if (e.prompt) {
+        lines.push('  要求：' + e.prompt + (e.promptLen > e.prompt.length ? '（共 ' + e.promptLen + ' 字）' : ''));
+      }
+      if (!e.ok && e.error) lines.push('  错误：' + e.error);
+    }
+    if (!chrono.length) lines.push('（还没有任何调用记录）');
+    return lines.join('\n');
+  }
+
+  /**
+   * 导出成 JSON 字符串（给脚本用）。带统计头，方便直接读。
+   *
+   * 条目按**最新在前**输出，与界面和内部存储一致 ——
+   * 导出格式必须可预期，否则脚本要自己猜顺序。
+   */
+  function callLogToJson(list, opts) {
+    const o = opts || {};
+    const arr = Array.isArray(list) ? list : [];
+    const entries = arr.slice().sort((x, y) => num((y || {}).at, 0) - num((x || {}).at, 0));
+    return JSON.stringify({
+      app: 'photo-studio',
+      version: o.version || '',
+      exportedAt: num(o.now, Date.now()),
+      stats: callLogStats(arr),
+      entries
+    }, null, 2);
+  }
+
+  /** 日期时间：2024-09-23 10:05:33（日志导出用，本地时区） */
+  function formatDateTime(ts) {
+    const n = num(ts, 0);
+    if (!(n > 0)) return '';
+    const d = new Date(n);
+    if (isNaN(d.getTime())) return '';
+    const p = (x) => String(x).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+      ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+
+  /* ====================== 7.01g 滑块「只能拖滑块头」 ====================== */
+
+  /**
+   * 滑块头的 CSS 宽度（px）。必须与 style.css 里的 `::-webkit-slider-thumb` 一致 ——
+   * 判定「点的是滑块头还是轨道」全靠它，对不上就会出现「点滑块头却跳值」
+   * 或「拖不动」。
+   */
+  const SLIDER_THUMB_PX = 17;
+
+  /**
+   * 原生 `<input type=range>` 的默认行为：**点轨道任意位置，值直接跳过去**。
+   *
+   * 这在设置页里是个坑：设置项是一行行挨着的，想拖动滑块时手指稍微偏一点
+   * 就落在轨道上，值瞬间跳到 0 或 100（比如「融合强度」直接归零，
+   * 用户完全没察觉，下次生成才发现效果不对）。
+   *
+   * 这里算出「滑块头中心」的屏幕坐标，以及「点到滑块头中心的距离」，
+   * 交给 app.js 判断该不该吃掉这次 pointerdown。
+   *
+   * 为什么把几何算法放 core.js：它是纯计算（只吃数字），可以在 Node 里
+   * 把「贴着滑块头 / 离得很远 / 极端尺寸」各种组合都测到，
+   * 不用起浏览器。
+   *
+   * 坐标约定（全部是 CSS 像素，与 getBoundingClientRect 同系）：
+   *   滑块头中心 = 轨道起点 + 进度 × 轨道可用宽度
+   *   轨道可用宽度 = 元素宽度 − 滑块头宽度（浏览器就是这样留出两端的）
+   *
+   * @param {object} o
+   *   { value, min, max, rectLeft, rectWidth, thumbWidth }
+   * @returns {{thumbX:number, distance:number, trackWidth:number, ratio:number}}
+   *   thumbX  滑块头中心相对**视口**的 x（和 pointer.clientX 同一坐标系）
+   *   distance 指针到滑块头中心的水平距离
+   *   trackWidth 轨道可用宽度（元素宽度 − 滑块头宽），最小 0
+   *   ratio   当前值在 min~max 中的位置（0~1）
+   */
+  function sliderThumbGeometry(o) {
+    const opt = o || {};
+    const min = num(opt.min, 0);
+    const max = num(opt.max, 100);
+    const span = max - min;
+    // 值越界 / 区间非法时夹到 0~1，避免算出 NaN 让判定整个失效
+    const ratio = span > 0 ? clamp01((num(opt.value, min) - min) / span) : 0;
+    const thumbW = Math.max(0, num(opt.thumbWidth, 0));
+    const width = Math.max(0, num(opt.rectWidth, 0));
+    // 元素比滑块头还窄（极端布局）时轨道宽度为 0，滑块头中心就等于左边缘
+    const trackWidth = Math.max(0, width - thumbW);
+    const left = num(opt.rectLeft, 0);
+    const thumbX = left + thumbW / 2 + ratio * trackWidth;
+    return {
+      thumbX,
+      distance: Math.abs(num(opt.pointerX, thumbX) - thumbX),
+      trackWidth,
+      ratio
+    };
+  }
+
+  /**
+   * 这次 pointerdown 该不该拦下来（阻止「点轨道跳值」）。
+   *
+   * 判定标准：指针离滑块头中心超过 `slack` 像素就拦。
+   * slack 默认取「滑块头半径 + 一点点余量」，而不是滑块头直径 ——
+   * 手指按在滑块头边缘也算「抓到了」，按直径算会让边缘的按压被误拦，
+   * 用户觉得「滑块卡住拖不动」。
+   *
+   * 注意：只有「点」才拦，拖动不受影响 —— 浏览器从滑块头上开始的拖动
+   * 本来就会跟随指针，拦的是「从轨道上按下」这一种。
+   *
+   * @param {object} o sliderThumbGeometry 的入参 + { pointerX, slack }
+   * @returns {{block:boolean, distance:number, thumbX:number}}
+   */
+  function planSliderHit(o) {
+    const opt = o || {};
+    const g = sliderThumbGeometry(opt);
+    // 滑块头宽度的兜底：拿不到 CSS 宽度时（老内核读不到自定义属性）
+    // 用 SLIDER_THUMB_PX，再取一半 + 6px 余量
+    const thumbW = Math.max(1, num(opt.thumbWidth, SLIDER_THUMB_PX));
+    const slack = num(opt.slack, thumbW / 2 + 6);
+    return {
+      block: g.distance > slack,
+      distance: g.distance,
+      thumbX: g.thumbX
     };
   }
 
@@ -2912,6 +3878,10 @@
     return {
       rect: L.rect,
       patch: L.patch,
+      // 调色图层：没有 patch，只有一组色调参数（见 gradePixels）。
+      // 非调色图层为 null —— 界面上据此决定显示「效果强度/羽化/色彩匹配」
+      // 还是「曝光/对比度/饱和度/色温/色调」。
+      grade: L.grade ? normalizeGrade(L.grade) : null,
       mask: L.mask || null,
       feather: Math.max(0, num(L.feather, 10)),
       colorMatch: clamp01(num(L.colorMatch, 0.5)),
@@ -2996,38 +3966,62 @@
   /**
    * 引导线的类型。
    *
-   * 为什么需要这个功能：
-   *   文字描述构图很吃力 —— 「把地平线放在画面下方三分之一处」这种要求，
-   *   模型只能猜。而画一条线直接告诉它「地平线在这里」，准确率高得多。
-   *   这是把「构图意图」从模糊的文字变成精确的几何约束。
+   * 只有两类 —— 这是刻意的简化：
+   *   原来的「地平线 / 垂直线 / 对角线 / 主体位置」四种，差别只在**文字措辞**上，
+   *   画出来的东西是同一种东西（一条线段）。四种类型带来的实际后果是：
+   *   用户要选四次、选错了还会被 snapGuide 改类型，而模型那边收到的都是「一条线」。
+   *   现在统一叫「直线」，方向由手画的角度决定，不再要求用户先声明它是什么。
+   *
+   * 两类在**是否画进请求图**上完全一致（都画），区别只在提示词的描述方式：
+   *   直线 = 构图位置约束；自由绘制 = 走向/形态约束。
    */
   const GUIDE_KINDS = [
-    { id: 'horizon', zh: '地平线', en: 'horizon line', desc: '水平参考：地平线 / 水平面（只写进提示词）' },
-    { id: 'vertical', zh: '垂直线', en: 'vertical line', desc: '垂直参考：墙角 / 立柱 / 树干（只写进提示词）' },
-    { id: 'diagonal', zh: '对角线', en: 'diagonal line', desc: '视线引导：道路 / 河流 / 栏杆（只写进提示词）' },
-    { id: 'subject', zh: '主体位置', en: 'subject placement', desc: '标出主体应出现的位置（只写进提示词）' },
+    { id: 'line', zh: '直线', en: 'straight line', desc: '拖一条直线：地平线 / 立柱 / 道路等构图位置' },
     {
       id: 'freehand', zh: '自由绘制', en: 'freehand stroke', freehand: true,
-      desc: '手画走向：发丝 / 水流 / 衣褶 —— 笔迹会画进发给模型的图片'
+      desc: '手画走向：发丝 / 水流 / 衣褶'
     }
   ];
 
   /**
-   * 笔迹颜色。
+   * 引导线的颜色**按序号自动分配**。
    *
-   * 为什么要可切换：不同底色上对比度差别很大（红发上画红线等于没画），
-   * 而且各家模型对「什么颜色代表标注」的理解并不一致。
-   * 颜色名必须和提示词里的说法严格对应 —— 画品红却说「红色线条」，模型会去找一条不存在的线。
+   * 为什么不再让用户选颜色：
+   *   颜色在这里的唯一作用是「让模型知道你说的是哪一条线」。
+   *   如果用户能给两条线都选红色，提示词里就会出现「红线」指代不明 ——
+   *   模型只能猜，等于引导线白画。按序号固定配色，每条线的颜色天然唯一。
+   *
+   * 为什么是这个顺序：
+   *   相邻两条的色相拉开得足够远（红→青→黄→品红→绿→橙），
+   *   在任何底色上都不会两条线糊成一片；红打头是因为它最醒目、最符合直觉。
+   *
+   * 超过 6 条就循环 —— 画到第七条的情况极少，真出现了提示词里还有序号兜底
+   * （「第 7 条线」），颜色只是辅助指代。
    */
-  const GUIDE_STROKE_COLORS = [
+  const GUIDE_COLORS = [
     { id: 'red', zh: '红色', en: 'red', hex: '#ff2d2d' },
+    { id: 'cyan', zh: '青色', en: 'cyan', hex: '#00e5ff' },
+    { id: 'yellow', zh: '黄色', en: 'yellow', hex: '#ffe100' },
     { id: 'magenta', zh: '品红色', en: 'magenta', hex: '#ff2df0' },
-    { id: 'cyan', zh: '青色', en: 'cyan', hex: '#00e5ff' }
+    { id: 'green', zh: '绿色', en: 'green', hex: '#22e06a' },
+    { id: 'orange', zh: '橙色', en: 'orange', hex: '#ff9b1f' }
   ];
 
-  /** 取笔迹颜色定义（未知退化为第一个） */
+  /**
+   * 取第 n 条线（从 0 开始）的颜色。
+   *
+   * 这是**唯一的配色入口**：屏幕绘制、请求图绘制、提示词描述三处都必须用它，
+   * 否则会出现「屏幕上第 2 条是青色、提示词里却说是红色」这种致命的错位 ——
+   * 模型会照着错误颜色的线去理解，比不画引导线还糟。
+   */
+  function guideColorAt(index) {
+    const i = Math.max(0, Math.round(num(index, 0)));
+    return GUIDE_COLORS[i % GUIDE_COLORS.length];
+  }
+
+  /** 取颜色定义（按 id 反查；未知退化为第一个） */
   function getStrokeColor(id) {
-    return GUIDE_STROKE_COLORS.find((c) => c.id === id) || GUIDE_STROKE_COLORS[0];
+    return GUIDE_COLORS.find((c) => c.id === id) || GUIDE_COLORS[0];
   }
 
   /** 取引导线类型定义（未知类型退化为第一条） */
@@ -3035,21 +4029,99 @@
     return GUIDE_KINDS.find((k) => k.id === id) || GUIDE_KINDS[0];
   }
 
-  /** 是否自由笔迹（构图线只进提示词，笔迹还要画进请求图） */
+  /** 是否自由笔迹（两类都要画进请求图，区别只在提示词措辞） */
   function isFreehandGuide(g) {
     return getGuideKind((g || {}).kind).freehand === true;
+  }
+
+  /**
+   * 取某条引导线的颜色。
+   *
+   * 优先用线条自带的 `colorId`，没有才按序号推。
+   *
+   * 为什么要让颜色跟着线条走、而不是永远按下标算：
+   *   颜色是「这条线叫什么」的身份标识，必须在**任何坐标变换、过滤之后**都不变。
+   *   一旦只按下标推，任何一次「过滤掉几条线」都会让后面的线整体换色 ——
+   *   于是屏幕上画的是黄色、提示词里说成青色，模型会去找一条不存在的线。
+   *   把颜色挂在数据上，这类错位从根上不可能发生。
+   *
+   * @param {object} g 引导线（可能带 colorId）
+   * @param {number} index 兜底序号
+   */
+  function colorOfGuide(g, index) {
+    const id = g && g.colorId;
+    if (id) {
+      const found = GUIDE_COLORS.find((c) => c.id === id);
+      if (found) return found;
+    }
+    return guideColorAt(index);
+  }
+
+  /**
+   * 给「下一条要画的线」挑一个颜色。
+   *
+   * 不能简单地用 `guideColorAt(list.length)`：删掉中间某条之后长度会变小，
+   * 新画的线就会撞上已有颜色（[红,青,黄] 删掉青 → 长度 2 → 新线又是黄，
+   * 于是画面上有两条黄线，提示词里「黄线」这个指代当场失效）。
+   *
+   * 规则：按色序找**第一个还没被用掉的**颜色。
+   *   - 正常情况下就是「第 1 条红、第 2 条青…」；
+   *   - 删过线之后会补上空缺的颜色，颜色始终唯一；
+   *   - 六种都用满时退回按长度循环（画到第七条的情况极少，
+   *     真出现了提示词里还有「第 N 条线」兜底）。
+   *
+   * @param {Array} guides 现有引导线
+   */
+  function nextGuideColor(guides) {
+    const list = guides || [];
+    const used = {};
+    for (const g of list) {
+      if (g && g.colorId) used[getStrokeColor(g.colorId).id] = true;
+    }
+    for (const c of GUIDE_COLORS) {
+      if (!used[c.id]) return c;
+    }
+    return guideColorAt(list.length);
+  }
+
+  /**
+   * 给一组引导线按序号配好颜色（原地不改，返回新的列表）。
+   *
+   * 用户每画一条就调用一次，或在提交前统一调用 ——
+   * 配好的颜色会一路带到屏幕绘制、请求图绘制和提示词。
+   */
+  function assignGuideColors(list) {
+    return (list || []).map((g, i) => {
+      const c = colorOfGuide(g, i);
+      return Object.assign({}, g, { colorId: c.id });
+    });
+  }
+
+  /**
+   * 旧数据的类型迁移。
+   *
+   * 老版本存过 horizon / vertical / diagonal / subject 四种构图线，
+   * 它们现在统一是「直线」。不迁移的话 getGuideKind 会退化成第一项，
+   * 虽然结果也是 line（不会崩），但语义上应当显式转换 ——
+   * 万一将来 GUIDE_KINDS 的第一项变了，旧数据就会静默变成另一种类型。
+   */
+  const LEGACY_LINE_KINDS = ['horizon', 'vertical', 'diagonal', 'subject'];
+
+  function migrateGuideKind(id) {
+    return LEGACY_LINE_KINDS.indexOf(String(id)) >= 0 ? 'line' : id;
   }
 
   /**
    * 归一化一条引导线：夹取坐标、补齐字段。
    *
    * 两种形态：
-   *   构图线（horizon/vertical/diagonal/subject）—— 两个端点，只翻译成文字；
-   *   自由笔迹（freehand）—— 一整条折线，既要文字说明，还要画进请求图。
+   *   直线（line）—— 两个端点；
+   *   自由笔迹（freehand）—— 一整条折线。
+   *   两者都会画进请求图，区别只在提示词怎么写。
    */
   function normalizeGuide(g) {
     const G = g || {};
-    const kind = getGuideKind(G.kind);
+    const kind = getGuideKind(migrateGuideKind(G.kind));
     const out = {
       kind: kind.id,
       x1: clamp01(num(G.x1, 0)),
@@ -3057,6 +4129,8 @@
       x2: clamp01(num(G.x2, 0)),
       y2: clamp01(num(G.y2, 0))
     };
+    // 颜色跟着线条走（见 colorOfGuide）。老数据没有这个字段，由调用方按序号补。
+    if (G.colorId) out.colorId = getStrokeColor(G.colorId).id;
     if (kind.freehand) {
       const pts = Array.isArray(G.points) ? G.points : [];
       const clean = [];
@@ -3081,15 +4155,15 @@
   }
 
   /**
-   * 把手画的线吸附到常见方向。
+   * 把手画的直线吸附到常见方向。
    *
    * 为什么需要：手指拖出来的线必然带抖动 —— 想画地平线却拖出 3~8 度的斜角。
    * 直接把这个斜角写进提示词，模型会以为「地平线是斜的」，比不画还糟。
    * 所以与水平/垂直偏差在 12 度以内时拉直，超出则保留原角度
    * （透视下的地平线确实可能倾斜，不能强行掰直）。
    *
-   * 吸附后同步更新 kind：用户选的是「地平线」，但画出来明显是竖线时，
-   * 以实际画的为准 —— 手上的动作比选中的按钮更可信。
+   * 现在只有「直线」一种类型，所以吸附**不再改类型**（以前会把
+   * 「竖着画的地平线」改成垂直线）—— 方向信息由坐标本身表达，类型保持为 line。
    *
    * @param {object} g 引导线
    * @returns {object} 吸附后的引导线
@@ -3111,12 +4185,9 @@
       // 拉平到两端点平均高度
       const y = (G.y1 + G.y2) / 2;
       out.y1 = y; out.y2 = y;
-      // 竖着画的「地平线」其实是垂直线，以手上的动作为准
-      if (out.kind === 'horizon' || out.kind === 'vertical') out.kind = 'horizon';
     } else if (Math.abs(dx) < 1e-6 || near(90)) {
       const x = (G.x1 + G.x2) / 2;
       out.x1 = x; out.x2 = x;
-      if (out.kind === 'horizon' || out.kind === 'vertical') out.kind = 'vertical';
     }
     return out;
   }
@@ -3135,11 +4206,17 @@
   }
 
   /**
-   * 把引导线翻译成**模型能理解的构图说明**。
+   * 把引导线翻译成**模型能理解的说明**。
    *
-   * 关键设计：不用像素坐标（模型看不到我们的坐标系），而是用
-   * 「画面位置 + 相对比例」描述 —— 例如「地平线在画面高度 62% 处」。
-   * 同时给出三分法参考（33%/66%），因为这是摄影构图的通用语言。
+   * 关键设计：
+   *   1. 不用像素坐标（模型看不到我们的坐标系），用「画面位置 + 相对比例」描述 ——
+   *      例如「地平线在画面高度 62% 处」，并给出三分法参考（33%/66%），
+   *      因为这是摄影构图的通用语言。
+   *   2. **每条线都带颜色**，颜色由序号决定（第 1 条红、第 2 条青…），
+   *      和画在图片上的颜色严格一致。模型看到图上有一条红线，
+   *      提示词里就说「红色线」，指代才没有歧义。
+   *   3. 明确告诉模型「线是我画的标注，不是画面内容，最终不要画出来」——
+   *      否则模型会把线当成照片里真实存在的东西照着生成。
    *
    * @param {object} o { guides, isZh }
    * @returns {string} 可直接拼进提示词的说明
@@ -3173,101 +4250,118 @@
       return { x0, y0, x1, y1 };
     };
 
+    /** 一条线的走向：水平 / 垂直 / 斜向 */
+    const dirWord = (dx, dy) => {
+      if (Math.abs(dx) < 0.05 && Math.abs(dy) < 0.05) return isZh ? '集中在一处' : 'in one spot';
+      if (Math.abs(dy) < Math.abs(dx) * 0.4) return isZh ? '基本横向' : 'mostly horizontal';
+      if (Math.abs(dx) < Math.abs(dy) * 0.4) return isZh ? '基本纵向' : 'mostly vertical';
+      return isZh ? '斜向' : 'diagonal';
+    };
+
     const lines = [];
-    const strokes = [];      // 自由笔迹单独收集，措辞完全不同
-    for (const g of list) {
+    const strokes = [];
+    // 每条线的颜色（按序号），最后统一用于「这些线都是标注」的汇总说明
+    const allColors = [];
+    // 用序号取色 —— 和屏幕上、请求图上画的是同一套颜色。
+    // index 用**原始列表下标**，不能只数「直线」或只数「笔迹」：
+    // 用户画的是「第 1 条线、第 2 笔」，颜色就该按这个顺序排。
+    for (let i = 0; i < list.length; i++) {
+      const g = list[i];
+      const c = guideColorAt(i);
+      const colorZh = c.zh, colorEn = c.en;
+      allColors.push(c);
       const mx = (g.x1 + g.x2) / 2, my = (g.y1 + g.y2) / 2;
+
       if (isFreehandGuide(g)) {
         const pts = g.points && g.points.length ? g.points : [{ x: g.x1, y: g.y1 }, { x: g.x2, y: g.y2 }];
         const bb = bboxOf(pts);
         // 用包围盒 + 走向描述，而不是把几十个点念一遍 —— 模型读不了坐标列表
-        const dir = (() => {
-          const dx = g.x2 - g.x1, dy = g.y2 - g.y1;
-          if (Math.abs(dx) < 0.05 && Math.abs(dy) < 0.05) return isZh ? '集中在一处' : 'in one spot';
-          if (Math.abs(dy) < Math.abs(dx) * 0.4) return isZh ? '基本横向' : 'mostly horizontal';
-          if (Math.abs(dx) < Math.abs(dy) * 0.4) return isZh ? '基本纵向' : 'mostly vertical';
-          return isZh ? '斜向' : 'diagonal';
-        })();
+        const dir = dirWord(g.x2 - g.x1, g.y2 - g.y1);
         const area = isZh
           ? '横向 ' + Math.round(bb.x0 * 100) + '%~' + Math.round(bb.x1 * 100) +
             '%、纵向 ' + Math.round(bb.y0 * 100) + '%~' + Math.round(bb.y1 * 100) + '%'
           : Math.round(bb.x0 * 100) + '%–' + Math.round(bb.x1 * 100) + '% horizontally and ' +
             Math.round(bb.y0 * 100) + '%–' + Math.round(bb.y1 * 100) + '% vertically';
-        strokes.push({ g, area, dir, n: pts.length });
+        // 颜色跟着条目一起存：直线的序号和它在 lines 里的下标**不是一回事**
+        // （中间可能夹着笔迹），最后汇总时若按下标去 allColors 里取就会错位，
+        // 变成「说第 2 条是青色、实际画的是黄色」。
+        // n 是全局序号（第几条画的），见上面直线的说明
+        strokes.push({ colorZh, colorEn, area, dir, n: i + 1 });
         continue;
       }
+
+      // 直线：一条线段。方向由坐标本身决定，不再分「地平线/垂直线」等类型，
+      // 所以这里按实际角度说清楚它是横的、竖的还是斜的。
+      const dir = dirWord(g.x2 - g.x1, g.y2 - g.y1);
       if (isZh) {
-        if (g.kind === 'horizon') {
-          lines.push('水平参考线（地平线/水平面）位于画面高度 ' + posWord(my) +
-            '，左右贯穿 —— 生成画面里的地平线必须落在这条线上');
-        } else if (g.kind === 'vertical') {
-          lines.push('垂直参考线位于画面宽度 ' + posWord(mx) +
-            '，上下贯穿 —— 竖直结构（墙面/立柱/树干）必须沿它保持竖直');
-        } else if (g.kind === 'diagonal') {
-          lines.push('斜向引导线从画面横向 ' + posWord(g.x1) + ' 延伸到 ' + posWord(g.x2) +
-            '，纵向从 ' + posWord(g.y1) + ' 到 ' + posWord(g.y2) +
-            ' —— 让道路/河流/栏杆等线性元素沿这个方向延伸，形成纵深');
-        } else {
-          lines.push('主体应出现在：横向 ' + posWord(mx) + '、纵向 ' + posWord(my) +
-            ' —— 把这个位置留给画面主体');
-        }
+        // 序号用**全局序号 i+1**，不是「第几条直线」。
+        // 用户眼里「第 1 条、第 2 条」是按画的先后数的，不管它是直线还是笔迹；
+        // 若这里只数直线，混排时会出现「第 1 条线」指代的其实是用户画的第 2 条 ——
+        // 而它的颜色是青色，用户会以为模型搞错了。
+        lines.push({ colorZh, colorEn, text: '第 ' + (i + 1) + ' 条（' + colorZh + '，直线）是' + dir + '线，' +
+          '从横向 ' + posWord(g.x1) + '、纵向 ' + posWord(g.y1) +
+          ' 延伸到横向 ' + posWord(g.x2) + '、纵向 ' + posWord(g.y2) +
+          ' —— 画面里的对应结构（地平线 / 墙面 / 立柱 / 道路等）必须落在这一条线上' });
       } else {
-        if (g.kind === 'horizon') {
-          lines.push('A horizontal reference line (horizon/waterline) sits at ' + posWord(my) +
-            ' of the frame height, spanning the full width — the generated horizon must land on it');
-        } else if (g.kind === 'vertical') {
-          lines.push('A vertical reference line sits at ' + posWord(mx) +
-            ' of the frame width, spanning top to bottom — vertical structures must stay vertical along it');
-        } else if (g.kind === 'diagonal') {
-          lines.push('A diagonal leading line runs from ' + posWord(g.x1) + ' to ' + posWord(g.x2) +
-            ' horizontally and ' + posWord(g.y1) + ' to ' + posWord(g.y2) +
-            ' vertically — let linear elements follow it to create depth');
-        } else {
-          lines.push('The main subject should be placed at ' + posWord(mx) +
-            ' horizontally and ' + posWord(my) + ' vertically');
-        }
+        lines.push({ colorZh, colorEn, text: 'line ' + (i + 1) + ' (' + colorEn + ') runs ' + dir +
+          ' from ' + posWord(g.x1) + ' horizontally / ' + posWord(g.y1) + ' vertically' +
+          ' to ' + posWord(g.x2) + ' horizontally / ' + posWord(g.y2) + ' vertically' +
+          ' — the matching structure (horizon, wall, pillar, road, etc.) must land on this line' });
       }
     }
 
     if (isZh) {
       const parts = [];
       if (lines.length) {
-        parts.push('【构图引导】我画了 ' + lines.length + ' 条引导线，请严格按它们构图：' +
-          lines.join('；') +
-          '。这些线只用于说明构图位置，不要在画面里画出任何线条、标记或辅助线。');
+        parts.push('【构图引导】我在图上画了 ' + lines.length +
+          ' 条直线作为构图标注（颜色依次为 ' +
+          lines.map((x) => x.colorZh).join('、') + '）：' +
+          lines.map((x) => x.text).join('；') +
+          '。这些线只是我标出的位置，请让画面内容与它们对齐。');
       }
       if (strokes.length) {
-        // 自由笔迹是「画在图片上的草图」，措辞必须和构图线区分开：
-        // 前者要模型「沿着它生成内容」，后者要模型「别把线画出来」。
-        const sDesc = strokes.map((x, i) =>
-          '第 ' + (i + 1) + ' 笔（' + x.dir + '，位于' + x.area + '）').join('；');
-        parts.push('【手绘草图】我在图片上用' + (opt.strokeColorZh || '红色') +
-          '画了 ' + strokes.length + ' 笔走向草图：' + sDesc +
+        // 自由笔迹是「画在图片上的草图」，措辞必须和直线区分开：
+        // 前者要模型「沿着它生成内容」，后者要模型「让结构对齐它」。
+        const sDesc = strokes.map((x) => '第 ' + x.n + ' 条（' + x.colorZh + '，' + x.dir +
+          '，位于' + x.area + '）').join('；');
+        parts.push('【手绘走向】我画了 ' + strokes.length + ' 笔走向草图：' + sDesc +
           '。这些笔迹表示我希望生成内容的**位置、走向和范围** —— ' +
           '请沿着笔迹生成相应的内容（例如头发、水流、衣褶、烟雾等线性或成束的形态），' +
-          '让生成结果贴合笔迹的走向与范围。' +
-          '笔迹只是我的示意，**绝对不要把' + (opt.strokeColorZh || '红色') +
-          '线条本身画进画面**，最终画面里不能出现任何线条、涂鸦或标记。');
+          '让生成结果贴合笔迹的走向与范围。');
       }
+      // 这一句必须放在两类描述之后，并且措辞要足够强 —— 见函数头的说明。
+      // 引导线现在真的画进了请求图，模型会看到它们，所以「别画出来」必须说清楚，
+      // 否则它会把这些线当成照片里真实存在的东西照着生成。
+      parts.push('【重要】上面提到的所有彩色线条（' +
+        allColors.map((c) => c.zh).join('、') +
+        '）都是**我为了说明构图而画的标注**，不是照片里真实存在的东西。' +
+        '请只把它们当作位置和走向的参考，**绝对不要把任何一条彩色线条画进最终画面**。' +
+        '最终画面里不能出现任何线条、涂鸦、箭头或标记。');
       return parts.join('');
     }
     const enParts = [];
     if (lines.length) {
       enParts.push('[Composition guides] I drew ' + lines.length +
-        ' guide line(s); compose strictly according to them: ' + lines.join('; ') +
-        '. These lines only indicate composition — do not draw any lines, marks or overlays.');
+        ' straight line(s) on the image as composition annotations (colors in order: ' +
+        lines.map((x) => x.colorEn).join(', ') + '): ' +
+        lines.map((x) => x.text).join('; ') +
+        '. Let the picture content align with them.');
     }
     if (strokes.length) {
-      const sDesc = strokes.map((x, i) =>
-        'stroke ' + (i + 1) + ' (' + x.dir + ', at ' + x.area + ')').join('; ');
-      enParts.push('[Hand-drawn sketch] I drew ' + strokes.length + ' ' +
-        (opt.strokeColorEn || 'red') + ' stroke(s) on the image showing the intended flow: ' + sDesc +
+      const sDesc = strokes.map((x) => 'stroke ' + x.n + ' (' + x.colorEn + ', ' + x.dir +
+        ', at ' + x.area + ')').join('; ');
+      enParts.push('[Hand-drawn flow] I drew ' + strokes.length +
+        ' stroke(s) showing the intended flow: ' + sDesc +
         '. These strokes indicate the position, direction and extent of the content I want — ' +
         'generate the corresponding content (hair strands, water flow, fabric folds, smoke, etc.) ' +
-        'following the strokes. The strokes are only my indication: ' +
-        '**never draw the ' + (opt.strokeColorEn || 'red') +
-        ' lines themselves into the image**; the final image must contain no lines, scribbles or marks.');
+        'following the strokes.');
     }
+    enParts.push('[IMPORTANT] All the colored lines mentioned above (' +
+      allColors.map((c) => c.en).join(', ') +
+      ') are **annotations I drew to indicate composition**, not real objects in the photo. ' +
+      'Treat them only as position/direction references and ' +
+      '**never draw any of these colored lines into the final image**. ' +
+      'The final image must contain no lines, scribbles, arrows or marks.');
     return enParts.join(' ');
   }
 
@@ -3301,6 +4395,9 @@
         })
         .map((g) => ({
           kind: g.kind,
+          // colorId 必须跟着一起换算 —— 它是这条线的身份，
+          // 丢了它颜色就会退回「按新下标推」，过滤之后整体错位
+          colorId: g.colorId,
           x1: clamp01((rect.x + g.x1 * rect.w - ctx.x) / w),
           y1: clamp01((rect.y + g.y1 * rect.h - ctx.y) / h),
           x2: clamp01((rect.x + g.x2 * rect.w - ctx.x) / w),
@@ -3311,6 +4408,7 @@
       // 引导线存的是「相对选区」的归一化坐标：先还原成文档坐标，再换算到请求图
       const out = {
         kind: g.kind,
+        colorId: g.colorId,
         x1: clamp01((rect.x + g.x1 * rect.w - ctx.x) / w),
         y1: clamp01((rect.y + g.y1 * rect.h - ctx.y) / h),
         x2: clamp01((rect.x + g.x2 * rect.w - ctx.x) / w),
@@ -3327,32 +4425,34 @@
     return (opt.guides || []).map((raw) => conv(normalizeGuide(raw)));
   }
 
-  /* ====================== 7.03c 笔迹进图（让模型「看见」你画的走向） ====================== */
+  /* ====================== 7.03c 引导线进图（让模型「看见」你画的线） ====================== */
 
   /**
-   * 为什么需要把笔迹画进图片：
+   * 为什么必须把引导线画进图片：
    *
-   * 构图线可以用文字说清楚（「地平线在 62% 处」），但「头发要往这个方向飘」
-   * 用文字几乎说不明白 —— 模型看不到你的坐标系，也读不了几十个点。
-   * 唯一可行的办法是把笔迹直接画在发给它的图片上：模型看图就懂。
+   * 只把线翻译成文字写进提示词是不够的 —— 「地平线在画面高度 62% 处」这种描述，
+   * 模型只能靠猜来落位，实际偏移个 10% 很常见，用户看到的就是「没按我画的来」。
+   * 而把线直接画在发给它的图片上，模型看图就懂，位置是**精确**的。
+   * 这是这个功能唯一可靠的做法：模型看不到我们的坐标系，但看得见图。
    *
-   * 为什么默认可以关掉：
-   *   早期版本把选区涂成半透明蓝色当标记，模型把蓝色当成了画面内容，
-   *   生成结果整体偏蓝。教训是「标记有可能被当成画面内容」。
-   *   对认识标注的模型（Qwen-Image-Edit / Nano Banana 等）笔迹很有效，
-   *   但某些模型或中转仍可能把线画进结果 —— 所以必须能一键关掉。
+   * 代价与对策：
+   *   线会被模型当成画面内容照着生成（早期把选区涂蓝，结果整张图偏蓝，就是这个坑）。
+   *   对策有两层：
+   *     1. 提示词里用**强措辞**说明「这些彩色线是我的标注，不要画进最终画面」
+   *        （见 describeGuides 最后那一段）；
+   *     2. 设置里保留「引导线画进请求图」开关，万一某个模型不听话可以关掉。
    *
-   * 颜色可切换的原因：红发上画红线等于没画；不同模型对「什么颜色代表标注」
-   * 理解也不同。颜色名必须和提示词里的说法严格一致。
+   * 颜色按序号自动分配（第 1 条红、第 2 条青…），见 GUIDE_COLORS。
+   * 这样提示词里说「红色线」时指代唯一，模型不会认错是哪一条。
    *
-   * @param {object} o { guides, rect, ctxRect, enabled, colorId, width }
-   * @returns {{draw:Array, note:string, count:number}}
+   * @param {object} o { guides, rect, ctxRect, enabled, width }
+   * @returns {{draw:Array, note:string, count:number, colors:Array}}
    */
   /**
    * 把一条折线裁剪到 [0,w]×[0,h] 矩形内（逐段用 Liang-Barsky）。
    *
-   * 为什么不能简单地把越界点 clamp 到边界：分块生成时笔迹常常跨出当前瓦片，
-   * clamp 会让整条线**贴着瓦片边缘**拉出一道直线 —— 模型看到的就是一条沿边缘的
+   * 为什么不能简单地把越界点 clamp 到边界：笔迹常常跨出选区，
+   * clamp 会让整条线**贴着边缘**拉出一道直线 —— 模型看到的就是一条沿边缘的
    * 假线，生成结果会莫名其妙多出一道光或一道痕。正确做法是真正裁掉框外的部分。
    *
    * @returns {Array<Array<{x:number,y:number}>>} 裁剪后的若干段折线（可能为空）
@@ -3385,7 +4485,11 @@
         continue;
       }
       const last = run[run.length - 1];
-      // 上一段的终点与这一段的起点不重合 → 中间有内容被裁掉，另起一段
+      // 上一段的终点与这一段的起点不重合 → 中间有内容被裁掉，另起一段。
+      // 少了这个判断，「穿出去再回来」的折线会被接成一条**穿过框外区域**的
+      // 假直线（模型会把它当成画面里真实存在的线条）。实测：三点折线
+      // (0.2,0.5)-(0.5,2)-(0.8,0.5) 本应断成两段，却连成了一条从 (20,50)
+      // 经 (30,100) 到 (80,50) 的折线 —— 中间那段其实在框外。
       if (last && Math.hypot(last.x - seg[0].x, last.y - seg[0].y) > 1e-6) {
         if (run.length > 1) out.push(run);
         run = [];
@@ -3399,33 +4503,39 @@
 
   function planStrokeOverlay(o) {
     const opt = o || {};
-    const color = getStrokeColor(opt.colorId);
     const rect = opt.rect || { x: 0, y: 0, w: 1, h: 1 };
     const ctx = opt.ctxRect || rect;
+    const all = (opt.guides || []).map(normalizeGuide);
+    const usedColors = [];
     if (opt.enabled === false) {
-      return { draw: [], note: '笔迹未画进图片（已关闭）', count: 0, color };
+      return {
+        draw: [], colors: [], count: 0,
+        note: all.length ? '引导线未画进图片（已关闭，只作为文字说明）' : ''
+      };
     }
     const rw = Math.max(1, num(rect.w, 1)), rh = Math.max(1, num(rect.h, 1));
     const w = Math.max(1, num(ctx.w, 1)), h = Math.max(1, num(ctx.h, 1));
     // 线宽跟着请求图大小走：小图用细线、大图用粗线，视觉粗细才一致。
     // 下限给到 4px 是实测出来的：2px 的细线在 JPEG 编码后会被压得几乎看不见
     // （600px 图上从 698 个像素掉到 42 个，位置也糊掉了），
-    // 模型看不到笔迹，这个功能就等于没做。
+    // 模型看不到线，这个功能就等于没做。
     const width = Math.max(4, Math.round(num(opt.width, Math.min(w, h) * 0.012)));
     const draw = [];
-    for (const raw of (opt.guides || [])) {
-      const g = normalizeGuide(raw);
-      if (!isFreehandGuide(g)) continue;
-      const pts = (g.points && g.points.length >= 2)
-        ? g.points
-        : [{ x: g.x1, y: g.y1 }, { x: g.x2, y: g.y2 }];
+    for (let i = 0; i < all.length; i++) {
+      const g = all[i];
+      const color = colorOfGuide(g, i);
+      // 直线是两点，自由笔迹是折线 —— 统一成「点序列」后走同一条绘制路径。
+      // 直线也画进图（这正是这次改动的核心），不再区分「只进提示词」。
+      const pts = (!isFreehandGuide(g) || !(g.points && g.points.length >= 2))
+        ? [{ x: g.x1, y: g.y1 }, { x: g.x2, y: g.y2 }]
+        : g.points;
       if (pts.length < 2) continue;
       // 选区归一化坐标 → 请求图像素坐标（**不夹取**：越界信息要留给裁剪用）
       const px = pts.map((pt) => ({
         x: (rect.x + pt.x * rw - ctx.x) / w * w,
         y: (rect.y + pt.y * rh - ctx.y) / h * h
       }));
-      // 整笔都在框外的直接跳过，不浪费绘制。
+      // 整条都在框外的直接跳过，不浪费绘制。
       // 注意必须按**包围盒**判断，不能按「有没有点在框内」：
       // 一条从框上方穿到框下方的竖线，两个端点都在框外，但它明明穿过整个画面 ——
       // 按点判断会把它整条丢掉（这个坑真实踩过）。
@@ -3440,15 +4550,21 @@
       if (!near) continue;
       for (const seg of clipPolyline(px, w, h)) {
         if (seg.length < 2) continue;
-        draw.push({ color: color.hex, width, points: seg });
+        draw.push({
+          color: color.hex, width, points: seg,
+          colorZh: color.zh, colorEn: color.en,
+          // 自由笔迹用实线、直线也用实线 —— 两类都要让模型看清，
+          // 虚线在 JPEG 压缩后容易断成几截，模型会当成噪声
+          freehand: isFreehandGuide(g)
+        });
+        if (usedColors.indexOf(color) < 0) usedColors.push(color);
       }
     }
-    return {
-      draw,
-      color,
-      count: draw.length,
-      note: draw.length ? '已把 ' + draw.length + ' 笔草图用' + color.zh + '画进请求图' : ''
-    };
+    const note = draw.length
+      ? '已把 ' + draw.length + ' 条引导线画进请求图（' +
+        usedColors.map((c) => c.zh).join('、') + '）'
+      : '';
+    return { draw, colors: usedColors, count: draw.length, note };
   }
 
   /**
@@ -3689,16 +4805,28 @@
       ring, full: full ? full.pixels : null, offset: full ? full.offset : null
     });
 
-    const delta = [
-      dstMom.mean[0] - srcMom.mean[0],
-      dstMom.mean[1] - srcMom.mean[1],
-      dstMom.mean[2] - srcMom.mean[2]
-    ];
+    // 取不到环带样本时必须放弃校正，**不能**拿 mean=[0,0,0] 去算差值。
+    //
+    // 什么时候取不到：选区铺满整张图（「没有框选 = 整张图」正是这种情况）。
+    // 此时环带全在画面外，一个样本都没有，ringMoments 返回 n=0 / mean=[0,0,0]，
+    // 于是 delta = 0 - srcMean = -128（对中灰图），融合会把整张图往黑里拉 ——
+    // 实测边缘从 128 掉到 65，看起来就是凭空多了一个暗角。
+    // 环带本来是为了「对齐周围环境」，没有周围环境时唯一正确的做法是**不动**。
+    const hasRing = dstMom.n > 0;
+    const delta = hasRing
+      ? [
+        dstMom.mean[0] - srcMom.mean[0],
+        dstMom.mean[1] - srcMom.mean[1],
+        dstMom.mean[2] - srcMom.mean[2]
+      ]
+      : [0, 0, 0];
     // 对比度增益：目标标准差 / 当前标准差。夹在合理范围，避免噪声被放大
     const gain = [1, 1, 1];
-    for (let i = 0; i < 3; i++) {
-      const s = srcMom.std[i], d = dstMom.std[i];
-      if (s > 2 && d > 0.5) gain[i] = clamp(d / s, 0.75, 1.35);
+    if (hasRing) {
+      for (let i = 0; i < 3; i++) {
+        const s = srcMom.std[i], d = dstMom.std[i];
+        if (s > 2 && d > 0.5) gain[i] = clamp(d / s, 0.75, 1.35);
+      }
     }
     const plane = fitLightPlane({
       pixels: opt.dst, rect, ring: ring + 6,
@@ -3707,6 +4835,9 @@
 
     return {
       rect, ring, delta, gain, plane,
+      // 调用方据此知道「这次有没有真的对齐环境」：整张图时是 false，
+      // 界面不该报「接缝有色差」——整张图根本没有接缝。
+      ok: hasRing,
       srcMean: srcMom.mean, srcStd: srcMom.std,
       dstMean: dstMom.mean, dstStd: dstMom.std,
       samples: { src: srcMom.n, dst: dstMom.n }
@@ -3846,6 +4977,12 @@
       pixels: opt.dst, rect, ring,
       full: full ? full.pixels : null, offset: full ? full.offset : null
     });
+
+    // 整张图没有「接缝」可言 —— 没有周围环境可对齐，也就无从谈起「契合」。
+    // 若照常计算，环带样本为 0 → dstMean=[0,0,0] → 亮度台阶 128、评分 20 分，
+    // 界面会对着一次正常的整图调整报「接缝处有色差/亮度台阶」（实测踩到）。
+    // 返回 null 让调用方干脆不显示评分，比显示一个假的低分诚实。
+    if (dstMom.n <= 0) return null;
 
     // 色差：Oklab 感知距离（比 RGB 欧氏距离更贴近人眼）
     const dE = colorDistance(srcMom.mean, dstMom.mean);
@@ -4032,7 +5169,9 @@
     const list = edits || [];
     const budget = Math.max(8 * 1024 * 1024, num(budgetBytes, 192 * 1024 * 1024));
     let used = 0;
-    for (const e of list) used += patchMemory(e.patch.width, e.patch.height);
+    // 调色图层没有 patch（patch 为 null），内存占用是 0 ——
+    // 直接读 e.patch.width 会抛异常，把整个内存整理流程打断
+    for (const e of list) used += e.patch ? patchMemory(e.patch.width, e.patch.height) : 0;
 
     const downscale = [];
     let drop = 0;
@@ -4045,6 +5184,7 @@
     const keepSharp = Math.max(0, list.length - 3);
     for (let i = 0; i < keepSharp && used > budget; i++) {
       const e = list[i];
+      if (!e.patch) continue;                  // 调色图层没有可降采样的 patch
       const before = patchMemory(e.patch.width, e.patch.height);
       const after = before / 4;
       used -= (before - after);
@@ -4058,11 +5198,49 @@
     // 策略 2：仍超预算 → 丢弃最老的编辑
     let remain = used;
     for (let i = 0; i < list.length && remain > budget; i++) {
-      remain -= patchMemory(list[i].patch.width, list[i].patch.height) / (downscale.indexOf(i) >= 0 ? 4 : 1);
+      const e = list[i];
+      const mem = e.patch ? patchMemory(e.patch.width, e.patch.height) : 0;
+      remain -= mem / (downscale.indexOf(i) >= 0 ? 4 : 1);
       drop = i + 1;
     }
     note = '编辑次数较多，最早的 ' + drop + ' 次已无法回退（内存受限）';
     return { downscale, drop, usedBytes: Math.max(0, remain), note };
+  }
+
+  /**
+   * 规划会话基准图的存放尺寸。
+   *
+   * 背景：会话里存的是**整张工作图**的 JPEG dataURL（恢复底图要用），
+   * 这是单条作品记录体积的大头。3072×2048 的原图按 q=0.85 编码约 1.1MB，
+   * Base64 后 1.5MB，localStorage 按 UTF-16 计费就是 2.9MB ——
+   * 一条就能吃满整个库，这就是「历史记录只存得下一张」的根因。
+   *
+   * 取舍：会话是「接着改」的中间态，不是成品。用户真出片会走导出，
+   * 而导出会按原图尺寸重新合成（不受这里影响）。所以把基准图缩到
+   * 2048px 对接着改的体验没有可见损失，体积却减半。
+   *
+   * **只缩不放**：原图本来就比上限小的时候保持原样 —— 放大会变糊，
+   * 而且体积还会变大（毫无收益）。
+   *
+   * @param {object} o { w, h, maxSide }
+   * @returns {{w:number, h:number, scale:number, scaled:boolean}}
+   */
+  function planSessionBase(o) {
+    const opt = o || {};
+    const w = Math.max(0, Math.round(num(opt.w, 0)));
+    const h = Math.max(0, Math.round(num(opt.h, 0)));
+    const maxSide = Math.max(1, Math.round(num(opt.maxSide, SESSION_BASE_MAX_SIDE)));
+    const longest = Math.max(w, h);
+    if (!longest || longest <= maxSide) {
+      return { w, h, scale: 1, scaled: false };
+    }
+    const scale = maxSide / longest;
+    return {
+      w: Math.max(1, Math.round(w * scale)),
+      h: Math.max(1, Math.round(h * scale)),
+      scale,
+      scaled: true
+    };
   }
 
   /**
@@ -4090,8 +5268,11 @@
         rect: { x: e.rect.x, y: e.rect.y, w: e.rect.w, h: e.rect.h },
         feather: e.feather,
         colorMatch: e.colorMatch,
+        // 调色图层没有 patch，参数本身就是要存的东西（很便宜，几百字节）。
+        // 不存的话「继续编辑」后调色就丢了 —— 而调色正是用户花时间调出来的。
+        grade: e.grade ? normalizeGrade(e.grade) : null,
         mask: e.mask ? Array.from(e.mask) : null,
-        patch: opts.encode ? opts.encode(e.patch) : null
+        patch: (opts.encode && e.patch) ? opts.encode(e.patch) : null
       };
       const size = item.patch ? String(item.patch).length : 0;
       if (bytes + size > maxBytes) { dropped = i + 1; break; }
@@ -4911,6 +6092,7 @@
     clamp, clamp01, lerp, smoothstep, round, num, HAS_CJK,
     // 几何
     clampRect, rectFromPoints, rectCenter, rectsEqual, expandRect, expandRectByPx,
+    wholeRect, isWholeRect,
     makeView, fitView, screenToImage, imageToScreen, imageRectToScreen, zoomAt, clampView,
     HANDLES, handlePoints, hitTest, CURSORS, resizeRect, pointInRect, rectsIntersect,
     // 像素
@@ -4936,13 +6118,30 @@
     storageBytes, estimateWorkBytes, normalizeWork, sortWorksNewestFirst,
     planLibrary, dayStartTs, describeWorkAge, formatWorkClock,
     groupWorksByDay, workLibraryStats,
-    LIBRARY_BUDGET_BYTES, LIBRARY_MAX_ITEMS, THUMB_MAX_SIDE,
+    LIBRARY_BUDGET_BYTES, LIBRARY_MAX_ITEMS, THUMB_MAX_SIDE, THUMB_QUALITY,
+    SESSION_BUDGET_BYTES, SESSION_BASE_MAX_SIDE, SESSION_BASE_QUALITY,
+    SESSION_PATCH_MAX_CHARS,
+    // 会话基准图缩放（把整张工作图缩到 SESSION_BASE_MAX_SIDE 以内）
+    planSessionBase,
     // 后台保活
     planKeepAlive, describeKeepAlive, planGenForegroundNotice,
     // 返回键分层处理
     planBackAction, BACK_LAYERS,
     // 工具栏高度
     planToolbar, clampBarHeight, isBarCollapsed, BAR_MIN,
+    // 滑块「只能拖滑块头」（防止设置页点轨道误触跳值）
+    sliderThumbGeometry, planSliderHit, SLIDER_THUMB_PX,
+    // 调用日志（每次模型调用都留痕）
+    appendCallLog, callLogStats, callLogToText, callLogToJson, truncateText, formatDateTime,
+    CALL_LOG_MAX, CALL_LOG_PROMPT_CHARS,
+    // 新手教程
+    TUTORIAL_STEPS, TUTORIAL_LEN, planTutorial, planTutorialStep,
+    // 后台生成任务（离开照片也能继续生成）
+    planJobLanding, planJobBadge, jobTagFor, planBusyForCurrent,
+    // 基础调色（选区色调微调）
+    GRADE_PARAMS, emptyGrade, isGradeEmpty, normalizeGrade,
+    gradeExposureFactor, gradeChannelGains, gradePixels, describeGrade,
+    GRADE_MID_GRAY, GRADE_LUMA_R, GRADE_LUMA_G, GRADE_LUMA_B,
     // 浏览器能力兼容
     planCompat, compatClassNames,
     // 对比视图手势
@@ -4955,11 +6154,13 @@
     textureEnergy, planGrain, grainNoise, assessSeam,
     EXPORT_PRESETS, getExportPreset, planExportSize, stripGpsFromExif, planExportMetadata,
     EXPORT_SIZES, EXPORT_FORMATS, makeCustomPreset, planExportWithHint, estimateExportSize,
+    SAVE_LOCATIONS, isSaveLocation, getSaveLocation,
     MODEL_PRICES, DEFAULT_USD_CNY, modelPrice, estimateCost, accumulateSpend, formatUsd, formatCny,
     parseJpegSegments, extractExif, extractICC, readExifOrientation,
     parseExifFields, describePhotoInfo, formatExifDate, EXIF_TAGS,
     // 引导线
-    GUIDE_KINDS, getGuideKind, getStrokeColor, GUIDE_STROKE_COLORS, isFreehandGuide,
+    GUIDE_KINDS, getGuideKind, GUIDE_COLORS, guideColorAt, nextGuideColor, colorOfGuide, assignGuideColors,
+    getStrokeColor, migrateGuideKind, isFreehandGuide,
     normalizeGuide, snapGuide, guideOrientation,
     planStrokeOverlay, drawStrokeOverlay,
     describeGuides, mapGuidesToRequest,

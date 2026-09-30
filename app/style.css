@@ -208,6 +208,13 @@ button:disabled { opacity: .38; cursor: default; }
   white-space: nowrap;
 }
 .hud-pill.dim { color: var(--text-faint); }
+/* 「没框选 = 整张图」时的提示：用强调色描边，和「已框选」一眼区分开，
+   免得用户以为系统忘了他的框选、或者没注意到这次会改全图 */
+.hud-pill.whole {
+  color: var(--accent);
+  border-color: rgba(77, 163, 255, .45);
+  background: rgba(77, 163, 255, .12);
+}
 
 /* ============================ 升级提示条 ============================ */
 
@@ -414,6 +421,45 @@ ul.whatsnew li { margin-bottom: 5px; }
   overflow-x: auto; scrollbar-width: none;
 }
 #brush-bar::-webkit-scrollbar, #sel-bar::-webkit-scrollbar, #guide-bar::-webkit-scrollbar { display: none; }
+
+/* ---------- 调色面板 ---------- */
+/* 五个参数竖排：横排的话每个滑块只剩几十像素，根本拖不准 */
+#grade-bar {
+  display: block;
+  padding: 2px 12px 8px;
+}
+#grade-sliders {
+  display: grid;
+  /* 两列：窄屏一列放不下「标签 + 滑块 + 数值」三样 */
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 2px 10px;
+}
+.grade-row {
+  display: flex; align-items: center; gap: 7px;
+}
+.grade-row .gl {
+  flex: 0 0 46px;
+  font-size: 11px; color: var(--text-dim);
+}
+.grade-row input[type=range] { min-width: 0; }
+.grade-row .gv {
+  flex: 0 0 38px; text-align: right;
+  font-size: 11px; color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+/* 有改动的那一行高亮，一眼看出自己动了哪几个参数 */
+.grade-row.on .gl { color: var(--accent); }
+.grade-row.on .gv { color: var(--accent); }
+
+.grade-actions {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 6px;
+}
+.grade-note {
+  flex: 1 1 auto;
+  font-size: 11px; color: var(--text-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 /* 笔迹颜色色块 */
 .chip-color { display: inline-flex; align-items: center; }
 .chip-color .swatch {
@@ -445,19 +491,25 @@ ul.whatsnew li { margin-bottom: 5px; }
 .lbl { font-size: 11px; color: var(--text-faint); flex: 0 0 auto; }
 .val { font-size: 11px; color: var(--text-dim); min-width: 30px; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
 
+/*
+  滑块头宽度做成自定义属性：JS 要靠它判断「手指按在滑块头上还是轨道上」。
+  写死两处的话，改样式时很容易忘了同步 JS 里的常量 ——
+  结果不是「点滑块头也跳值」就是「滑块拖不动」，两种都很难查。
+*/
 input[type=range] {
   -webkit-appearance: none; appearance: none;
   flex: 1 1 auto; min-width: 90px; height: 22px;
   background: transparent;
+  --ps-thumb: 17px;
 }
 input[type=range]::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: var(--line); }
 input[type=range]::-webkit-slider-thumb {
-  -webkit-appearance: none; width: 17px; height: 17px; margin-top: -6.5px;
+  -webkit-appearance: none; width: var(--ps-thumb); height: var(--ps-thumb); margin-top: -6.5px;
   border-radius: 50%; background: var(--accent);
   border: 2px solid #0e1014; box-shadow: 0 1px 5px rgba(0, 0, 0, .5);
 }
 input[type=range]::-moz-range-track { height: 4px; border-radius: 2px; background: var(--line); }
-input[type=range]::-moz-range-thumb { width: 15px; height: 15px; border-radius: 50%; background: var(--accent); border: 2px solid #0e1014; }
+input[type=range]::-moz-range-thumb { width: var(--ps-thumb); height: var(--ps-thumb); border-radius: 50%; background: var(--accent); border: 2px solid #0e1014; }
 
 .chips { display: flex; gap: 6px; flex: 1 1 auto; overflow-x: auto; scrollbar-width: none; padding: 2px 0; }
 .chips::-webkit-scrollbar { display: none; }
@@ -802,6 +854,63 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 }
 .lib-usage:empty { display: none; }
 
+/* ---------- 调用日志 ---------- */
+
+.cl-summary {
+  font-size: 12px; color: var(--text-dim);
+  margin: 0 0 10px;
+  font-variant-numeric: tabular-nums;
+}
+.cl-summary:empty { display: none; }
+
+.cl-item {
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-sm);
+  padding: 9px 11px;
+  margin-bottom: 8px;
+}
+/* 失败的调用用左侧红边标出来：一眼扫过去就知道哪几次有问题 */
+.cl-item.bad { border-left: 3px solid var(--bad); }
+
+.cl-head {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11px; color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.cl-time { flex: 1 1 auto; }
+.cl-tag {
+  flex: 0 0 auto;
+  padding: 1px 7px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 600;
+}
+.cl-tag.ok { background: rgba(53, 208, 127, .15); color: var(--ok); }
+.cl-tag.bad { background: rgba(255, 90, 90, .15); color: var(--bad); }
+.cl-cost { flex: 0 0 auto; color: var(--text-dim); }
+
+.cl-model {
+  font-size: 12.5px; color: var(--text);
+  margin-top: 5px;
+  word-break: break-all;
+}
+.cl-meta {
+  font-size: 11px; color: var(--text-faint);
+  margin-top: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.cl-prompt {
+  font-size: 11.5px; color: var(--text-dim);
+  margin-top: 5px;
+  /* 提示词可能很长，限两行，避免一条日志把屏幕占满 */
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.cl-error {
+  font-size: 11.5px; color: #ffb0b0;
+  margin-top: 5px;
+  word-break: break-word;
+}
+
 .lib-day {
   font-size: 11px; font-weight: 600; letter-spacing: .6px;
   color: var(--accent);
@@ -844,6 +953,105 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
   margin-top: 3px;
   font-variant-numeric: tabular-nums;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 调用日志：从设置页进入，必须盖在设置之上（否则点进去看起来没反应） */
+#calllog { z-index: 110; }
+
+/* ---------- 新手教程 ---------- */
+
+/*
+  分层：蒙层 → 高亮圈（挖空）→ 说明气泡。
+  高亮圈用 box-shadow 的大扩散值做出「周围压暗、中间透亮」的效果，
+  比用 4 个遮罩块拼简单得多，也不会因为四舍五入露出缝隙。
+*/
+#tutorial { position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 140; }
+
+.tut-mask {
+  position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0;
+  background: rgba(4, 6, 9, .72);
+  backdrop-filter: blur(1.5px);
+}
+
+.tut-spot {
+  position: absolute;
+  border-radius: 12px;
+  /* 0 0 0 9999px 的扩散值把「圈外」整片压暗 —— 圈内保持透明可点 */
+  box-shadow: 0 0 0 9999px rgba(4, 6, 9, .72), 0 0 0 2px var(--accent);
+  pointer-events: none;
+  transition: all .18s ease-out;
+}
+/* 找不到目标元素（老内核不支持某个选择器 / 元素被隐藏）时隐藏高亮圈，
+   只留居中的说明气泡 —— 总比指向屏幕角落好 */
+.tut-spot.off { display: none; }
+
+.tut-card {
+  position: absolute;
+  left: 12px; right: 12px;
+  max-width: 460px;
+  margin: 0 auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  box-shadow: var(--sh);
+  padding: 14px 16px 12px;
+}
+
+.tut-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 7px;
+}
+.tut-step { font-size: 11px; color: var(--accent); font-weight: 600; letter-spacing: .4px; }
+.tut-skip {
+  background: none; border: 0; padding: 3px 2px;
+  color: var(--text-faint); font-size: 12px;
+}
+.tut-title { font-size: 15.5px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+.tut-body { font-size: 13px; color: var(--text-dim); line-height: 1.6; }
+
+.tut-foot {
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 14px;
+}
+.tut-dots { display: flex; gap: 5px; flex: 1 1 auto; justify-content: center; }
+.tut-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--line);
+}
+.tut-dot.on { background: var(--accent); width: 16px; border-radius: 3px; }
+
+/* 后台生成状态条：浮在画布上方，不占顶栏宽度 */
+#job-badge {
+  position: absolute;
+  top: 10px; left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  max-width: 92%;
+  padding: 6px 13px;
+  border-radius: 999px;
+  background: rgba(20, 26, 36, .92);
+  border: 1px solid rgba(77, 163, 255, .45);
+  color: var(--accent);
+  font-size: 12px; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .45);
+}
+/* 全部跑完时变绿：这是「有结果可以看了」的信号 */
+#job-badge.ok {
+  border-color: rgba(53, 208, 127, .5);
+  color: var(--ok);
+}
+#job-badge[hidden] { display: none !important; }
+
+/* 首页/作品库条目上的后台状态标 */
+.home-tag.job-done, .lib-tag.job-done {
+  background: rgba(53, 208, 127, .16); color: var(--ok);
+}
+.home-tag.job-running, .lib-tag.job-running {
+  background: rgba(77, 163, 255, .16); color: var(--accent);
+}
+.home-tag.job-failed, .lib-tag.job-failed {
+  background: rgba(255, 90, 90, .16); color: var(--bad);
 }
 
 /* 作品大图预览 */
@@ -1106,8 +1314,9 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
   flex: 1 1 auto;
   min-width: 0;
 }
-/* 标签内的小字说明（跟在标题后面） */
-#settings .st-desc-inline {
+/* 标签内的小字说明（跟在标题后面）。导出面板里也有（保存位置那一组） */
+#settings .st-desc-inline,
+#exportpanel .st-desc-inline {
   display: block;
   margin-top: 3px;
   font-size: 11.5px;

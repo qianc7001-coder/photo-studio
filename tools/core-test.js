@@ -422,12 +422,31 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('统计对空安全', C.workLibraryStats(null).count === 0);
   t('editable 与 withSession 一致', st.editable === st.withSession);
 
-  // 9) 预算常量本身要合理：不能超过 localStorage 常见上限（5MB）
-  t('作品库预算不超过 3MB', C.LIBRARY_BUDGET_BYTES <= 3 * 1024 * 1024, C.LIBRARY_BUDGET_BYTES);
-  t('作品库预算留了余量给会话', C.LIBRARY_BUDGET_BYTES <= 2.5 * 1024 * 1024);
+  // 9) 预算常量本身要合理：不能超过 localStorage 常见上限（5MB），
+  //    且必须给「未完成编辑的会话」键和配置留出余量 ——
+  //    作品库 + 会话 + 配置写爆配额会让 setItem 抛异常，比少留几张严重得多。
+  t('作品库预算不超过 3.5MB', C.LIBRARY_BUDGET_BYTES <= 3.5 * 1024 * 1024, C.LIBRARY_BUDGET_BYTES);
+  t('作品库预算不至于小到放不下两条', C.LIBRARY_BUDGET_BYTES >= 3 * 1024 * 1024, C.LIBRARY_BUDGET_BYTES);
+  t('作品库预算 + 会话预算留了余量给 5MB 上限',
+    C.LIBRARY_BUDGET_BYTES + C.SESSION_BUDGET_BYTES <= 7 * 1024 * 1024,
+    [C.LIBRARY_BUDGET_BYTES, C.SESSION_BUDGET_BYTES]);
+  // 会话预算必须单独存在，且小于总预算（否则又回到「一条挤满整库」）
+  t('有独立的会话预算', typeof C.SESSION_BUDGET_BYTES === 'number' && C.SESSION_BUDGET_BYTES > 0,
+    C.SESSION_BUDGET_BYTES);
+  t('会话预算小于总预算', C.SESSION_BUDGET_BYTES < C.LIBRARY_BUDGET_BYTES,
+    [C.SESSION_BUDGET_BYTES, C.LIBRARY_BUDGET_BYTES]);
   t('条数上限合理', C.LIBRARY_MAX_ITEMS >= 20 && C.LIBRARY_MAX_ITEMS <= 200, C.LIBRARY_MAX_ITEMS);
   t('缩略图边长够小', C.THUMB_MAX_SIDE <= 512, C.THUMB_MAX_SIDE);
   t('缩略图边长不至于糊', C.THUMB_MAX_SIDE >= 128, C.THUMB_MAX_SIDE);
+  t('缩略图质量在合理区间', C.THUMB_QUALITY > 0.5 && C.THUMB_QUALITY <= 0.85, C.THUMB_QUALITY);
+  // 会话基准图必须真的被限制住 —— 它就是「一条吃满整库」的元凶
+  t('会话基准图有长边上限', C.SESSION_BASE_MAX_SIDE > 0 && C.SESSION_BASE_MAX_SIDE <= 3072,
+    C.SESSION_BASE_MAX_SIDE);
+  t('会话基准图质量在合理区间',
+    C.SESSION_BASE_QUALITY > 0.5 && C.SESSION_BASE_QUALITY <= 0.9, C.SESSION_BASE_QUALITY);
+  t('单条 patch 上限不至于吃满库',
+    C.SESSION_PATCH_MAX_CHARS > 0 && C.SESSION_PATCH_MAX_CHARS * 2 < C.SESSION_BUDGET_BYTES,
+    [C.SESSION_PATCH_MAX_CHARS, C.SESSION_BUDGET_BYTES]);
 
   // 10) 用户的核心诉求：昨天修的照片今天还能看到
   //     用真实的「今天 10:00」和「昨天 22:00」验证，不能依赖当前时钟
@@ -1123,9 +1142,12 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('返回层级表存在', Array.isArray(C.BACK_LAYERS) && C.BACK_LAYERS.length >= 8, C.BACK_LAYERS.length);
   // 顺序必须与 z-index 一致：后开的浮层压在上面，返回时先关它。
   // 顺序错了会出现「关掉了看不见的那个面板」这种怪事。
-  // 顶栏「更多」下拉是 z-index 最高的一层（必须盖住所有面板，否则点不到）
-  t('更多菜单在最前（z-index 最高）', C.BACK_LAYERS[0].id === 'moremenu', C.BACK_LAYERS[0].id);
-  t('作品预览次之', C.BACK_LAYERS[1].id === 'workPreview', C.BACK_LAYERS[1].id);
+  // 新手教程是全屏引导，必须盖住一切（含「更多」下拉）——
+  // 否则教程高亮圈会把菜单里的按钮圈出来，但菜单本身盖在蒙层上，看着像坏了
+  t('新手教程在最前（z-index 最高）', C.BACK_LAYERS[0].id === 'tutorial', C.BACK_LAYERS[0].id);
+  t('更多菜单次之（必须盖住所有面板，否则点不到）',
+    C.BACK_LAYERS[1].id === 'moremenu', C.BACK_LAYERS[1].id);
+  t('作品预览排第三', C.BACK_LAYERS[2].id === 'workPreview', C.BACK_LAYERS[2].id);
   t('层级表按 z-index 降序',
     C.BACK_LAYERS.every((L, i) => i === 0 || C.BACK_LAYERS[i - 1].z >= L.z),
     C.BACK_LAYERS.map((L) => L.id + ':' + L.z));
@@ -1198,7 +1220,10 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
     return ['workPreview', 'settings', 'library', 'history', 'layers', 'photoinfo', 'exportpanel', 'compare', 'genError']
       .every((k) => body.indexOf("'" + k + "'") >= 0);
   })());
-  t('生成中取消走 abort', /case 'cancel-gen':[\s\S]{0,200}S\.aborter\.abort\(\)/.test(appSrc));
+  // 取消生成：现在按「当前这张照片的任务」取消，不再用全局 aborter
+  // （别的照片的后台任务必须继续跑，否则用户已经花的钱就白扔了）
+  t('生成中取消走任务取消（只取消当前这张）',
+    /case 'cancel-gen':[\s\S]{0,300}cancelJobsForCurrentDoc\(/.test(appSrc));
   t('模式动作回到框选', /case 'mode':[\s\S]{0,200}S\.mode = 'select'/.test(appSrc));
   t('编辑中回首页', /case 'home':[\s\S]{0,80}goHome\(\)/.test(appSrc));
   // 处理失败时返回 false（宁可退出，也不要让用户卡在按返回没反应的界面里）
@@ -1211,7 +1236,12 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   // 最关键：卸载前必须先存档，否则用户「返回」一下就把刚才的修改丢了 ——
   // 那比退出应用更糟
   t('回首页前先保存作品', /function goHome[\s\S]{0,300}touchWork\(\)/.test(appSrc));
-  t('回首页会中止在途生成', /function goHome[\s\S]{0,600}S\.aborter\.abort\(\)/.test(appSrc));
+  // 回首页**不再**中止在途生成：任务要在后台跑完，结果落进作品记录。
+  // 这是「一张图进 AI 生图后可以放在后台处理下一张」的核心改动。
+  t('回首页不再中止在途生成（任务转后台）',
+    !/function goHome[\s\S]{0,900}S\.aborter\.abort\(\)/.test(appSrc));
+  t('回首页仍会让当前文档的操作序列作废',
+    /function goHome[\s\S]{0,900}S\.genToken\+\+/.test(appSrc));
   t('回首页递增 genToken（作废旧结果）', /function goHome[\s\S]{0,900}S\.genToken\+\+/.test(appSrc));
   t('回首页清空照片状态', /S\.img = null;/.test(appSrc));
   t('回首页清空画布引用', /S\.viewCanvas = null; S\.viewCtx = null;/.test(appSrc));
@@ -1254,19 +1284,55 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
 
   /* ---------- 类型与颜色表 ---------- */
 
-  t('引导线多了「自由绘制」类型', C.GUIDE_KINDS.length === 5, C.GUIDE_KINDS.length);
+  // 只有两类：直线 + 自由绘制。原来四种构图线（地平线/垂直线/对角线/主体位置）
+  // 差别只在文字措辞上，画出来都是「一条线段」，要求用户先声明类型是多余负担。
+  t('引导线只有两类', C.GUIDE_KINDS.length === 2, C.GUIDE_KINDS.length);
+  t('两类是「直线」和「自由绘制」',
+    C.GUIDE_KINDS.map((k) => k.id).join(',') === 'line,freehand');
   t('自由绘制被标记为 freehand', C.getGuideKind('freehand').freehand === true);
-  t('构图类型不带 freehand 标记', C.getGuideKind('horizon').freehand !== true);
+  t('直线不带 freehand 标记', C.getGuideKind('line').freehand !== true);
   t('isFreehandGuide 判定笔迹', C.isFreehandGuide({ kind: 'freehand' }) === true);
-  t('isFreehandGuide 判定构图线', C.isFreehandGuide({ kind: 'horizon' }) === false);
+  t('isFreehandGuide 判定直线', C.isFreehandGuide({ kind: 'line' }) === false);
   t('isFreehandGuide 空值不崩', C.isFreehandGuide(null) === false);
-  t('三种笔迹颜色', C.GUIDE_STROKE_COLORS.length === 3);
-  t('颜色含红/品红/青', C.GUIDE_STROKE_COLORS.map((c) => c.id).join(',') === 'red,magenta,cyan');
+  // 老数据（horizon 等）必须迁移成直线，不能静默变成别的类型
+  t('旧类型迁移为直线', C.migrateGuideKind('horizon') === 'line' &&
+    C.migrateGuideKind('vertical') === 'line' &&
+    C.migrateGuideKind('diagonal') === 'line' &&
+    C.migrateGuideKind('subject') === 'line');
+  t('新类型不被迁移', C.migrateGuideKind('freehand') === 'freehand' &&
+    C.migrateGuideKind('line') === 'line');
+  t('老数据经 normalizeGuide 后是直线',
+    C.normalizeGuide({ kind: 'horizon', x1: 0, y1: .5, x2: 1, y2: .5 }).kind === 'line');
+
+  /* ---------- 颜色按序号自动分配 ---------- */
+
+  t('六种颜色', C.GUIDE_COLORS.length === 6, C.GUIDE_COLORS.length);
+  t('色序：红→青→黄→品红→绿→橙',
+    C.GUIDE_COLORS.map((c) => c.id).join(',') === 'red,cyan,yellow,magenta,green,orange');
   t('每种颜色都有中文名与色值',
-    C.GUIDE_STROKE_COLORS.every((c) => c.zh && /^#[0-9a-f]{6}$/i.test(c.hex)));
+    C.GUIDE_COLORS.every((c) => c.zh && /^#[0-9a-f]{6}$/i.test(c.hex)));
+  t('第 1 条是红色', C.guideColorAt(0).id === 'red');
+  t('第 2 条是青色', C.guideColorAt(1).id === 'cyan');
+  t('第 3 条是黄色', C.guideColorAt(2).id === 'yellow');
+  t('超过六条循环回红色', C.guideColorAt(6).id === 'red');
+  t('序号为负不崩（当作第 1 条）', C.guideColorAt(-3).id === 'red');
   t('取颜色', C.getStrokeColor('magenta').hex === '#ff2df0');
   t('未知颜色退化为红色', C.getStrokeColor('nope').id === 'red');
   t('颜色空值不崩', C.getStrokeColor(null).id === 'red');
+  // 颜色必须跟着线条走：只按下标推的话，任何过滤/删除都会让后面的线整体换色
+  t('colorOfGuide 优先用线条自带的颜色',
+    C.colorOfGuide({ colorId: 'yellow' }, 0).id === 'yellow');
+  t('colorOfGuide 没带颜色时按下标推',
+    C.colorOfGuide({}, 1).id === 'cyan');
+  // 下一条线的颜色：不能按长度推，否则删掉中间一条后会撞色
+  t('空列表第一条是红色', C.nextGuideColor([]).id === 'red');
+  t('已有红线时下一条是青色', C.nextGuideColor([{ colorId: 'red' }]).id === 'cyan');
+  // 关键：删掉中间那条之后，长度会变小，按长度推就会撞上已有的黄色
+  t('删过线之后补空缺颜色（不撞色）',
+    C.nextGuideColor([{ colorId: 'red' }, { colorId: 'yellow' }]).id === 'cyan');
+  t('六色用满后循环', C.nextGuideColor(C.GUIDE_COLORS.map((c) => ({ colorId: c.id }))).id === 'red');
+  t('assignGuideColors 按序号配色',
+    C.assignGuideColors([{}, {}, {}]).map((g) => g.colorId).join(',') === 'red,cyan,yellow');
 
   /* ---------- 笔迹数据 ---------- */
 
@@ -1291,10 +1357,16 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
     const g = C.normalizeGuide({ kind: 'freehand', x1: .1, y1: .2, x2: .3, y2: .4 });
     return g.points.length === 0 && g.x1 === .1;
   })());
-  t('构图线不产生 points', (() => {
-    const g = C.normalizeGuide({ kind: 'horizon', x1: 0, y1: .5, x2: 1, y2: .5 });
+  t('直线不产生 points', (() => {
+    const g = C.normalizeGuide({ kind: 'line', x1: 0, y1: .5, x2: 1, y2: .5 });
     return g.points === undefined;
   })());
+  t('颜色跟着线条一起归一化',
+    C.normalizeGuide({ kind: 'line', colorId: 'green', x1: 0, y1: .5, x2: 1, y2: .5 })
+      .colorId === 'green');
+  t('脏颜色被纠正为合法值',
+    C.normalizeGuide({ kind: 'line', colorId: 'nope', x1: 0, y1: .5, x2: 1, y2: .5 })
+      .colorId === 'red');
 
   /* ---------- 吸附：笔迹不能被拉直 ---------- */
 
@@ -1307,10 +1379,17 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
     const g = C.snapGuide({ kind: 'freehand', points: [{ x: .1, y: .5 }, { x: .9, y: .51 }] });
     return g.y1 === .5 && g.y2 === .51;
   })());
-  t('构图线仍然吸附', (() => {
-    const g = C.snapGuide({ kind: 'horizon', x1: .1, y1: .5, x2: .9, y2: .52 });
+  t('直线仍然吸附到水平', (() => {
+    const g = C.snapGuide({ kind: 'line', x1: .1, y1: .5, x2: .9, y2: .52 });
     return Math.abs(g.y2 - g.y1) < 1e-9;
   })());
+  t('直线吸附到垂直', (() => {
+    const g = C.snapGuide({ kind: 'line', x1: .5, y1: .1, x2: .52, y2: .9 });
+    return Math.abs(g.x2 - g.x1) < 1e-9;
+  })());
+  // 只有一种直线类型了，吸附不该再改类型（以前会把「竖着画的地平线」改成垂直线）
+  t('吸附不改类型（方向由坐标表达）',
+    C.snapGuide({ kind: 'line', x1: .1, y1: .5, x2: .9, y2: .52 }).kind === 'line');
 
   /* ---------- 笔迹进图：坐标换算与裁剪 ---------- */
 
@@ -1335,10 +1414,56 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('斜向贯穿也被保留', mk([{ x: -.5, y: -.5 }, { x: 1.5, y: 1.5 }]).count === 1);
   t('从框外绕过去的笔迹被丢弃', mk([{ x: 2, y: .2 }, { x: 2, y: .8 }, { x: 3, y: .8 }]).count === 0);
 
-  t('构图线不参与笔迹进图', C.planStrokeOverlay({
-    guides: [{ kind: 'horizon', x1: 0, y1: .5, x2: 1, y2: .5 }],
-    rect, ctxRect: rect, colorId: 'red'
-  }).count === 0);
+  // 这是这次改动的核心：直线**也要画进请求图**。
+  // 只写进提示词时模型只能猜位置，落位常常偏；画进图它就直接看得见。
+  t('直线也画进请求图', C.planStrokeOverlay({
+    guides: [{ kind: 'line', x1: 0, y1: .5, x2: 1, y2: .5 }],
+    rect, ctxRect: rect
+  }).count === 1);
+  t('直线进图用的是两个端点', (() => {
+    const p = C.planStrokeOverlay({
+      guides: [{ kind: 'line', x1: 0, y1: .5, x2: 1, y2: .5 }],
+      rect, ctxRect: rect
+    });
+    return p.draw[0].points.length === 2 &&
+      p.draw[0].points[0].x === 0 && p.draw[0].points[0].y === 50 &&
+      p.draw[0].points[1].x === 100;
+  })());
+  t('两类混在一起时都被画进去', C.planStrokeOverlay({
+    guides: [
+      { kind: 'line', x1: 0, y1: .3, x2: 1, y2: .3 },
+      { kind: 'freehand', points: [{ x: .2, y: .7 }, { x: .8, y: .7 }] }
+    ],
+    rect, ctxRect: rect
+  }).count === 2);
+  // 颜色必须逐条对应：屏幕上第 2 条是青色，画进请求图的第 2 条也必须是青色
+  t('两条线的颜色按序号分配（红、青）', (() => {
+    const p = C.planStrokeOverlay({
+      guides: [
+        { kind: 'line', x1: 0, y1: .3, x2: 1, y2: .3 },
+        { kind: 'line', x1: 0, y1: .7, x2: 1, y2: .7 }
+      ],
+      rect, ctxRect: rect
+    });
+    return p.draw[0].color === '#ff2d2d' && p.draw[1].color === '#00e5ff';
+  })());
+  t('颜色跟着线条自带的 colorId（不按下标硬推）', (() => {
+    const p = C.planStrokeOverlay({
+      guides: [
+        { kind: 'line', colorId: 'yellow', x1: 0, y1: .3, x2: 1, y2: .3 },
+        { kind: 'line', colorId: 'red', x1: 0, y1: .7, x2: 1, y2: .7 }
+      ],
+      rect, ctxRect: rect
+    });
+    return p.draw[0].color === '#ffe100' && p.draw[1].color === '#ff2d2d';
+  })());
+  t('直线进图时也会被裁剪（不贴边拉直）', (() => {
+    const p = C.planStrokeOverlay({
+      guides: [{ kind: 'line', x1: -.5, y1: .5, x2: 1.5, y2: .5 }],
+      rect, ctxRect: rect
+    });
+    return p.count === 1 && p.draw[0].points[0].x === 0 && p.draw[0].points[1].x === 100;
+  })());
 
   t('开关关闭时不画进图', (() => {
     const p = mk([{ x: .2, y: .2 }, { x: .8, y: .8 }], { enabled: false });
@@ -1348,12 +1473,28 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
     const p = mk([{ x: .2, y: .2 }, { x: .8, y: .8 }]);
     return /画进请求图/.test(p.note) && /红色/.test(p.note);
   })());
+  // 说明里的颜色名必须和实际画进去的颜色一致（否则用户看到青色、提示词说红色）
   t('说明里的颜色名跟着实际颜色走', (() => {
-    const p = mk([{ x: .2, y: .2 }, { x: .8, y: .8 }], { colorId: 'cyan' });
-    return /青色/.test(p.note) && p.color.zh === '青色';
+    const p = mk([{ x: .2, y: .2 }, { x: .8, y: .8 }], {
+      guides: [{ kind: 'freehand', colorId: 'cyan', points: [{ x: .2, y: .2 }, { x: .8, y: .8 }] }]
+    });
+    return /青色/.test(p.note) && p.colors[0].zh === '青色' && p.draw[0].color === '#00e5ff';
   })());
-  t('笔迹颜色写进 draw 项', mk([{ x: .2, y: .2 }, { x: .8, y: .8 }], { colorId: 'magenta' })
-    .draw[0].color === '#ff2df0');
+  t('两条线时说明里两种颜色都在', (() => {
+    const p = C.planStrokeOverlay({
+      guides: [
+        { kind: 'line', x1: 0, y1: .3, x2: 1, y2: .3 },
+        { kind: 'line', x1: 0, y1: .7, x2: 1, y2: .7 }
+      ],
+      rect, ctxRect: rect
+    });
+    return /红色/.test(p.note) && /青色/.test(p.note);
+  })());
+  t('颜色写进 draw 项（第 1 条红）', mk([{ x: .2, y: .2 }, { x: .8, y: .8 }])
+    .draw[0].color === '#ff2d2d');
+  t('自带 colorId 时以它为准', mk([{ x: .2, y: .2 }, { x: .8, y: .8 }], {
+    guides: [{ kind: 'freehand', colorId: 'magenta', points: [{ x: .2, y: .2 }, { x: .8, y: .8 }] }]
+  }).draw[0].color === '#ff2df0');
   t('线宽随图大小缩放', (() => {
     const big = C.planStrokeOverlay({
       guides: [{ kind: 'freehand', points: [{ x: .2, y: .2 }, { x: .8, y: .8 }] }],
@@ -1409,12 +1550,12 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
 
   const freeDesc = C.describeGuides({
     guides: [{ kind: 'freehand', points: [{ x: .2, y: .3 }, { x: .5, y: .5 }, { x: .8, y: .4 }] }],
-    isZh: true, strokeColorZh: '红色'
+    isZh: true
   });
-  t('笔迹说明含「手绘草图」', /手绘草图/.test(freeDesc), freeDesc.slice(0, 60));
+  t('笔迹说明含「手绘走向」', /手绘走向/.test(freeDesc), freeDesc.slice(0, 60));
   t('笔迹说明要求沿笔迹生成内容', /沿着笔迹生成/.test(freeDesc));
-  t('笔迹说明含颜色名', /红色/.test(freeDesc));
-  t('笔迹说明明确禁止把线画进画面', /绝对不要把红色线条本身画进画面/.test(freeDesc));
+  t('笔迹说明含颜色名（第 1 条是红色）', /红色/.test(freeDesc));
+  t('笔迹说明明确禁止把线画进画面', /绝对不要把任何一条彩色线条画进最终画面/.test(freeDesc));
   t('笔迹说明描述走向', /基本横向|基本纵向|斜向|集中在一处/.test(freeDesc));
   t('笔迹说明描述范围（包围盒）', /横向 20%~80%/.test(freeDesc));
   t('笔迹说明不逐点念坐标', !/0\.2|0\.3/.test(freeDesc));
@@ -1422,25 +1563,57 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('英文版也有对应措辞', (() => {
     const d = C.describeGuides({
       guides: [{ kind: 'freehand', points: [{ x: .2, y: .3 }, { x: .8, y: .4 }] }],
-      isZh: false, strokeColorEn: 'red'
+      isZh: false
     });
-    return /Hand-drawn sketch/.test(d) && /never draw the red lines/i.test(d);
+    return /Hand-drawn flow/.test(d) && /never draw any of these colored lines/i.test(d);
   })());
-  t('颜色名跟着设置走（品红）', /品红色/.test(C.describeGuides({
-    guides: [{ kind: 'freehand', points: [{ x: .2, y: .3 }, { x: .8, y: .4 }] }],
-    isZh: true, strokeColorZh: '品红色'
+  // 颜色按序号走：第 4 条是品红色
+  t('颜色名跟着序号走（第 4 条是品红）', /品红色/.test(C.describeGuides({
+    guides: [
+      { kind: 'line', x1: 0, y1: .1, x2: 1, y2: .1 },
+      { kind: 'line', x1: 0, y1: .2, x2: 1, y2: .2 },
+      { kind: 'line', x1: 0, y1: .3, x2: 1, y2: .3 },
+      { kind: 'freehand', points: [{ x: .2, y: .8 }, { x: .8, y: .9 }] }
+    ],
+    isZh: true
   })));
-  // 构图线和笔迹可以共存，两段说明都要在
-  t('构图线与笔迹共存时两段都在', (() => {
+  // 直线也要有说明（以前直线只写提示词、不进图，现在两者都要）
+  const lineDesc = C.describeGuides({
+    guides: [{ kind: 'line', x1: 0, y1: .6, x2: 1, y2: .6 }], isZh: true
+  });
+  t('直线说明含「构图引导」', /构图引导/.test(lineDesc), lineDesc.slice(0, 60));
+  t('直线说明含序号与颜色', /第 1 条（红色，直线）/.test(lineDesc), lineDesc.slice(0, 120));
+  t('直线说明含位置百分比', /60%/.test(lineDesc));
+  t('直线说明含三分法参考', /三分之二处/.test(C.describeGuides({
+    guides: [{ kind: 'line', x1: 0, y1: 2 / 3, x2: 1, y2: 2 / 3 }], isZh: true
+  })));
+  t('直线说明要求内容与线对齐', /必须落在这一条线上/.test(lineDesc));
+  t('说明里明确「线是标注、不是画面内容」',
+    /不是照片里真实存在的东西/.test(lineDesc));
+  t('说明里禁止把线画进最终画面',
+    /绝对不要把任何一条彩色线条画进最终画面/.test(lineDesc));
+  // 直线和笔迹可以共存，两段说明都要在
+  t('直线与笔迹共存时两段都在', (() => {
     const d = C.describeGuides({
       guides: [
-        { kind: 'horizon', x1: 0, y1: .6, x2: 1, y2: .6 },
+        { kind: 'line', x1: 0, y1: .6, x2: 1, y2: .6 },
         { kind: 'freehand', points: [{ x: .2, y: .3 }, { x: .8, y: .4 }] }
-      ], isZh: true, strokeColorZh: '红色'
+      ], isZh: true
     });
-    return /构图引导/.test(d) && /手绘草图/.test(d);
+    return /构图引导/.test(d) && /手绘走向/.test(d);
   })());
   t('只有笔迹时不出现构图引导段', !/构图引导/.test(freeDesc));
+  // 混排时颜色序号必须按**原始顺序**，不能只数其中一类
+  t('混排时颜色序号按原始顺序', (() => {
+    const d = C.describeGuides({
+      guides: [
+        { kind: 'line', x1: 0, y1: .6, x2: 1, y2: .6 },
+        { kind: 'freehand', points: [{ x: .2, y: .3 }, { x: .8, y: .4 }] }
+      ], isZh: true
+    });
+    // 第 1 条（直线）红、第 2 条（笔迹）青
+    return /第 1 条（红色，直线）/.test(d) && /（青色，/.test(d);
+  })());
 
   /* ---------- 界面接线 ---------- */
 
@@ -1448,25 +1621,45 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   const appSrc8 = fs8.readFileSync(__dirname + '/../app/app.js', 'utf8');
   const html8 = fs8.readFileSync(__dirname + '/../app/index.html', 'utf8');
 
-  t('HTML 有笔迹颜色条', /id="guide-colors"/.test(html8));
+  t('HTML 没有颜色选择条（颜色按序号自动分配）', !/id="guide-colors"/.test(html8));
   t('HTML 有自由绘制专用提示', /id="guide-tip-free"/.test(html8));
   t('提示里说明了「会画进图片」', /会画进发给模型的图片/.test(html8));
   t('设置里有笔迹进图开关', /id="set-strokeimg"/.test(html8));
-  t('设置里有笔迹颜色选择', /id="set-strokecolor"/.test(html8));
+  t('设置里没有颜色选择（同上）', !/id="set-strokecolor"/.test(html8));
+  t('设置里说明了颜色按顺序自动分配', /第 1 条红、第 2 条青/.test(html8));
   t('设置里说明了怎么应对「线被画出来」', /关掉上面的开关/.test(html8));
-  t('开关会持久化', /'guideStrokeOverlay', 'guideStrokeColor'/.test(appSrc8));
+  t('开关会持久化', /'guideStrokeOverlay', 'barHeight'/.test(appSrc8));
   t('开关默认开启', /guideStrokeOverlay: true,/.test(appSrc8));
-  t('颜色默认红色', /guideStrokeColor: 'red',/.test(appSrc8));
-  t('颜色有类型校正（防脏数据）', /c\.guideStrokeColor = C\.getStrokeColor\(/.test(appSrc8));
+  // 颜色不再是配置项：按序号自动分配，用户选不了（选了就会撞色，指代失效）
+  t('颜色不再是配置项', !/guideStrokeColor/.test(appSrc8));
+  t('颜色选择器已从界面移除', !/id="guide-colors"/.test(html8));
   t('笔迹确实画进请求图', /C\.drawStrokeOverlay\(cx, sp\)/.test(appSrc8));
-  t('只在开关打开时画', /S\.cfg\.guideStrokeOverlay !== false && S\.guides\.length/.test(appSrc8));
-  t('换算以选区为基准（分块正确）', /const baseRect = lastSelRect \|\| rect;/.test(appSrc8));
-  t('生成开始时记录选区', /lastSelRect = rect;/.test(appSrc8));
-  t('颜色名传给提示词（与实际颜色一致）', /strokeColorZh: sc\.zh, strokeColorEn: sc\.en/.test(appSrc8));
+  // 引导线/开关/颜色现在由调用方**显式传入**（快照化，见后台生成任务一节）：
+  // 请求在发起那一刻就固化，之后用户改引导线或切颜色都不该影响它。
+  t('只在开关打开时画',
+    /if \(strokeOn && jobGuides\.length\)/.test(appSrc8) &&
+    /const strokeOn = \(strokeOverlay === undefined/.test(appSrc8));
+  t('引导线来自显式传入的快照（不读模块状态）',
+    /const jobGuides = \(guides !== undefined && guides !== null\) \? guides : S\.guides;/.test(appSrc8));
+  t('换算以选区为基准（调用方显式传入）',
+    /const strokeBase = baseRect \|\| rect;/.test(appSrc8) &&
+    /rect: strokeBase,/.test(appSrc8));
+  // 选区现在记在「任务」里（prepareJob → runGenerate 里赋给 lastSelRect），
+  // 而任务自带的 job.rect 才是真正发出去的那份快照
+  t('生成开始时记录选区', /lastSelRect = job\.rect;/.test(appSrc8));
+  // 颜色名不再由调用方传：每条线自带 colorId，describeGuides 按它逐条指代。
+  // 调用方另传一个全局颜色的话，两条线会被说成同一个颜色，指代就废了。
+  t('颜色不再由调用方指定（跟着线条走）',
+    /C\.describeGuides\(\{ guides: selGuides, isZh: lang === 'zh' \}\)/.test(appSrc8));
   t('笔迹绘制不画箭头圆点等装饰', !/arrow|arrowhead/i.test(
     appSrc8.slice(appSrc8.indexOf('function drawGuides'), appSrc8.indexOf('function screenToGuideNorm'))));
-  t('屏幕上笔迹用实色（和请求图同色）', /const lineColor = free \? strokeHex : '#3ddcc4'/.test(appSrc8));
-  t('请求自检里显示笔迹状态', /手绘草图：/.test(appSrc8));
+  // 屏幕、请求图、提示词三处必须用**同一个取色函数**，
+  // 有一处各算各的就会出现「屏幕青色、提示词说红色」的致命错位
+  t('屏幕颜色按序号取（与请求图同源）',
+    /const c = C\.colorOfGuide\(g, i\);/.test(appSrc8) &&
+    /const lineColor = c\.hex;/.test(appSrc8));
+  t('屏幕上不再有写死的青色构图线', !/#3ddcc4/.test(appSrc8));
+  t('请求自检里显示引导线状态', /引导线：/.test(appSrc8));
   t('拖动时对笔迹抽稀（防点数爆炸）', /minD/.test(appSrc8));
   t('单笔点数有硬上限', /pts\.length > 400/.test(appSrc8));
   t('笔迹按折线总长度判废（不是首尾距离）', /笔迹按「折线总长度」判废/.test(appSrc8));
@@ -1648,20 +1841,20 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
 
   /* ---------- 功能 3：引导线 ---------- */
 
-  t('引导线类型有 5 种（含自由绘制）', C.GUIDE_KINDS.length === 5);
-  t('取引导线类型', C.getGuideKind('vertical').zh === '垂直线');
-  t('未知类型退化为第一种', C.getGuideKind('nope').id === 'horizon');
-  t('未知类型 null 也不崩', C.getGuideKind(null).id === 'horizon');
+  t('引导线只有两类（直线 + 自由绘制）', C.GUIDE_KINDS.length === 2);
+  t('取引导线类型', C.getGuideKind('line').zh === '直线');
+  t('未知类型退化为第一种', C.getGuideKind('nope').id === 'line');
+  t('未知类型 null 也不崩', C.getGuideKind(null).id === 'line');
   // 归一化：夹取端点
   t('归一化夹取越界端点', (() => {
-    const g = C.normalizeGuide({ kind: 'horizon', x1: -1, y1: 2, x2: 3, y2: -5 });
+    const g = C.normalizeGuide({ kind: 'line', x1: -1, y1: 2, x2: 3, y2: -5 });
     return g.x1 === 0 && g.y1 === 1 && g.x2 === 1 && g.y2 === 0;
   })());
   t('归一化补齐缺失字段', (() => {
     const g = C.normalizeGuide({});
-    return g.kind === 'horizon' && g.x1 === 0 && g.y1 === 0 && g.x2 === 0 && g.y2 === 0;
+    return g.kind === 'line' && g.x1 === 0 && g.y1 === 0 && g.x2 === 0 && g.y2 === 0;
   })());
-  t('归一化空值不崩', C.normalizeGuide(null).kind === 'horizon');
+  t('归一化空值不崩', C.normalizeGuide(null).kind === 'line');
 
   t('水平判定', C.guideOrientation({ x1: 0, y1: .5, x2: 1, y2: .5 }) === 'horizontal');
   t('垂直判定', C.guideOrientation({ x1: .5, y1: 0, x2: .5, y2: 1 }) === 'vertical');
@@ -1670,37 +1863,48 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
 
   // 构图说明
   const gdesc = C.describeGuides({
-    guides: [{ kind: 'horizon', x1: 0, y1: .62, x2: 1, y2: .62 }], isZh: true
+    guides: [{ kind: 'line', x1: 0, y1: .62, x2: 1, y2: .62 }], isZh: true
   });
   t('引导线说明含百分比位置', /62%/.test(gdesc), gdesc);
   t('引导线说明含「构图引导」', /构图引导/.test(gdesc));
-  t('引导线说明含地平线', /地平线/.test(gdesc));
-  t('引导线说明要求不要画出线条', /不要.*画出任何线条/.test(gdesc));
+  t('引导线说明要求不要画出线条', /不要.*画进最终画面/.test(gdesc));
   t('三分法位置会点名', /三分之一处|三分之二处/.test(C.describeGuides({
-    guides: [{ kind: 'horizon', x1: 0, y1: 1 / 3, x2: 1, y2: 1 / 3 }], isZh: true
+    guides: [{ kind: 'line', x1: 0, y1: 1 / 3, x2: 1, y2: 1 / 3 }], isZh: true
   })));
   t('居中位置会点名', /居中/.test(C.describeGuides({
-    guides: [{ kind: 'vertical', x1: .5, y1: 0, x2: .5, y2: 1 }], isZh: true
+    guides: [{ kind: 'line', x1: .5, y1: 0, x2: .5, y2: 1 }], isZh: true
   })));
   t('英文版输出英文', /Composition guides/.test(C.describeGuides({
-    guides: [{ kind: 'horizon', x1: 0, y1: .6, x2: 1, y2: .6 }], isZh: false
+    guides: [{ kind: 'line', x1: 0, y1: .6, x2: 1, y2: .6 }], isZh: false
   })));
   t('空引导线返回空串', C.describeGuides({ guides: [], isZh: true }) === '');
   t('无参数返回空串', C.describeGuides() === '');
-  t('主体位置类型有专门文案', /主体应出现/.test(C.describeGuides({
-    guides: [{ kind: 'subject', x1: .3, y1: .4, x2: .3, y2: .4 }], isZh: true
+  // 方向不再靠类型表达，而是按实际角度说清楚（横/竖/斜）
+  t('竖向直线说明为纵向', /基本纵向/.test(C.describeGuides({
+    guides: [{ kind: 'line', x1: .5, y1: .1, x2: .5, y2: .9 }], isZh: true
   })));
-  t('斜线类型有专门文案', /斜向引导线/.test(C.describeGuides({
-    guides: [{ kind: 'diagonal', x1: 0, y1: 1, x2: 1, y2: 0 }], isZh: true
+  t('斜线说明为斜向', /斜向/.test(C.describeGuides({
+    guides: [{ kind: 'line', x1: 0, y1: 1, x2: 1, y2: 0 }], isZh: true
   })));
   t('多条引导线都写进说明', (() => {
     const d = C.describeGuides({
       guides: [
-        { kind: 'horizon', x1: 0, y1: .3, x2: 1, y2: .3 },
-        { kind: 'vertical', x1: .7, y1: 0, x2: .7, y2: 1 }
+        { kind: 'line', x1: 0, y1: .3, x2: 1, y2: .3 },
+        { kind: 'line', x1: .7, y1: 0, x2: .7, y2: 1 }
       ], isZh: true
     });
-    return /地平线/.test(d) && /垂直参考线/.test(d) && /2 条/.test(d);
+    return /第 1 条（红色，直线）/.test(d) && /第 2 条（青色，直线）/.test(d) && /2 条/.test(d);
+  })());
+  // 每条线的颜色都必须在提示词里出现一次 —— 指代唯一是这个设计的全部意义
+  t('每条线的颜色都在说明里', (() => {
+    const d = C.describeGuides({
+      guides: [
+        { kind: 'line', x1: 0, y1: .2, x2: 1, y2: .2 },
+        { kind: 'line', x1: 0, y1: .4, x2: 1, y2: .4 },
+        { kind: 'line', x1: 0, y1: .6, x2: 1, y2: .6 }
+      ], isZh: true
+    });
+    return /红色/.test(d) && /青色/.test(d) && /黄色/.test(d);
   })());
 
   // 坐标换算：引导线存在「相对选区」的坐标系里，发请求前必须换算到请求图坐标
@@ -1846,6 +2050,7 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   const appSrc7 = fs7.readFileSync(__dirname + '/../app/app.js', 'utf8');
   const html7 = fs7.readFileSync(__dirname + '/../app/index.html', 'utf8');
   const css7 = fs7.readFileSync(__dirname + '/../app/style.css', 'utf8');
+  const coreSrc = fs7.readFileSync(__dirname + '/../app/core.js', 'utf8');
 
   // 首页 = 修改历史
   t('HTML 有首页容器', /id="home"/.test(html7));
@@ -1875,13 +2080,33 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('轻点手柄可收起/展开', /function bindBarHandle/.test(appSrc7));
   t('拖动改变高度', /applyBarHeight\(drag\.h0 \+ dy, false\)/.test(appSrc7));
   t('拖动阈值避免误判（轻点与拖动共存）', /Math\.abs\(dy\) > 6/.test(appSrc7));
-  t('松手后吸附到收起或展开（不停在半路）',
-    /const target = collapsed \? C\.BAR_MIN : full;/.test(appSrc7));
+  // 无极拖动：松手停在哪里就是哪里，**不再**吸附到收起/展开两档。
+  // 旧实现吸附，于是用户想露出「工具行 + 一点参数」这种中间高度时，
+  // 一松手就被弹走，感觉像在拨档位 —— 这正是要修掉的问题。
+  t('拖动无级：松手停在松手位置（不吸附档位）',
+    /applyBarHeight\(h, \{ animate: false, collapsed: C\.isBarCollapsed\(h, full\), save: true \}\);/.test(appSrc7) &&
+    !/const target = collapsed \? C\.BAR_MIN : full;/.test(appSrc7));
+  t('无极拖动仍保留轻点切换（两档是轻点的行为，不是拖动的）',
+    /if \(C\.isBarCollapsed\(h, full\)\) expandToolbar\(undefined, false\);/.test(appSrc7) &&
+    /else collapseToolbar\(undefined, false\);/.test(appSrc7));
+  // 轻点必须**不保存**：它是「现在想多看一点照片」的临时动作。
+  // 若轻点也存下高度，用户收一次之后每张照片都从收起态打开 ——
+  // 他以为只是临时收了一下，实际成了永久设置。
+  t('轻点收起/展开不写配置（临时动作不覆盖偏好）',
+    !/expandToolbar\(undefined, true\)/.test(appSrc7) &&
+    !/collapseToolbar\(undefined, true\)/.test(appSrc7));
+  t('箭头按钮同样只做临时切换', /expandToolbar\(undefined, false\)[\s\S]{0,200}collapseToolbar\(undefined, false\)/.test(appSrc7));
   t('高度会记住（换图不重置）', /function saveBarHeight/.test(appSrc7) &&
-    /S\.cfg\.barHeight = S\.toolbarVisible \? S\.toolbarHeight : 0;/.test(appSrc7));
-  t('拖动结束才保存（不在 pointermove 里写存储）', /applyBarHeight\(target, \{ collapsed, save: true \}\)/.test(appSrc7));
-  t('轻点切换也保存', /expandToolbar\(undefined, true\)/.test(appSrc7));
-  t('barHeight 纳入持久化', /'guideStrokeOverlay', 'guideStrokeColor', 'barHeight',/.test(appSrc7));
+    /S\.cfg\.barHeight = S\.toolbarHeight;/.test(appSrc7));
+  // 中间高度也是用户的偏好：以前只有两档，收起记 0 表示「下次展开」；
+  // 现在若仍记 0，用户辛苦拖出来的高度下次打开就没了
+  t('中间高度也要记住（不再把矮高度记成 0）',
+    !/S\.cfg\.barHeight = S\.toolbarVisible \? S\.toolbarHeight : 0;/.test(appSrc7));
+  t('拖动结束才保存（不在 pointermove 里写存储）', /save: true \}\);/.test(appSrc7) &&
+    !/applyBarHeight\(drag\.h0 \+ dy, true\)/.test(appSrc7));
+  t('轻点切换不保存（见上：临时动作不覆盖偏好高度）',
+    /expandToolbar\(undefined, false\)/.test(appSrc7));
+  t('barHeight 纳入持久化', /'guideStrokeOverlay', 'barHeight',/.test(appSrc7));
   t('barHeight 有类型校正', /c\.barHeight = clampNum\(c\.barHeight, 0, 2000, 0\);/.test(appSrc7));
   t('进编辑页沿用上次高度', /const saved = Number\(S\.cfg\.barHeight\)/.test(appSrc7));
   t('高度用 maxHeight（内容变矮时自然收缩）', /bar\.style\.maxHeight = plan\.height/.test(appSrc7));
@@ -1891,6 +2116,55 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('收起态不再用 pointer-events:none（工具行仍可点）',
     !/#bottombar\.collapsed \{[^}]*pointer-events: none/.test(css7));
   t('手柄有 no-flex-gap 兜底', /\.ps-no-flex-gap #bar-handle/.test(css7));
+
+  /* ---------- 没有框选时默认处理整张图 ---------- */
+
+  // 需求：「没有框选的时候默认对整张图片进行调整」，且所有操作都算（含 AI 生图）。
+  // 关键是**收敛到唯一一个解析函数**：15 处 `if (!S.rect) toast(...)` 各写各的
+  // 必然出现「AI 生图能整图、调色却说我还没框选」这种不一致。
+  t('core 有整张图矩形构造', /function wholeRect\(W, H\)/.test(coreSrc) &&
+    /wholeRect, isWholeRect,/.test(coreSrc));
+  t('core 有整张图判定', /function isWholeRect\(rect, W, H\)/.test(coreSrc));
+  t('app 有统一的「实际处理区域」解析', /function effectiveRect\(\)/.test(appSrc7));
+  t('没有选区时解析成整张图', /if \(S\.rect\) return C\.clampRect\(S\.rect, S\.docW, S\.docH\);[\s\S]{0,80}return C\.wholeRect\(S\.docW, S\.docH\);/.test(appSrc7));
+  // 不能写回 S.rect：否则画面上会凭空多出一个铺满全图的选区框，
+  // 而且后续拖动变成「在整图上拖手柄」——用户只是没框选，不该被塞一个选区
+  t('解析结果不写回选区（不凭空多出选区框）',
+    /function effectiveRect\(\)[\s\S]{0,600}?\n  \}/.test(appSrc7) &&
+    !/function effectiveRect\(\)[\s\S]{0,600}S\.rect = C\.wholeRect/.test(appSrc7));
+  t('有整图判定包装', /function editingWholeImage\(rect\)/.test(appSrc7));
+
+  // 四个工具入口都要接受「没有选区」
+  t('AI 生图不要求先框选', /function generate\(\)[\s\S]{0,400}if \(!effectiveRect\(\)\)/.test(appSrc7) &&
+    !/function generate\(\)[\s\S]{0,400}toast\('先在照片上框选要修改的位置'\)/.test(appSrc7));
+  t('生成按钮不再要求选区', /btn-generate'\)\.disabled = on \|\| !S\.img \|\| !S\.docCanvas;/.test(appSrc7));
+  t('成本预估照常给（整图也要能看要花多少钱）',
+    /function currentEstimate\(\)[\s\S]{0,300}const rect = effectiveRect\(\);/.test(appSrc7));
+  t('调色不要求先框选', /function openGradeTool\(rect\)[\s\S]{0,500}if \(!effectiveRect\(\)\)/.test(appSrc7) &&
+    !/function openGradeTool[\s\S]{0,400}toast\('先在照片上框选要调色的区域'\)/.test(appSrc7));
+  t('调色预览与应允都用整图', /function previewGrade\(\)[\s\S]{0,400}const rect = effectiveRect\(\);/.test(appSrc7) &&
+    /function applyGrade\(\)[\s\S]{0,400}const rect = effectiveRect\(\);/.test(appSrc7));
+  t('画笔不要求先框选', /const rect = effectiveRect\(\);\s*\n\s*if \(!rect\) \{ toast\('先打开一张照片'\); return; \}\s*\n\s*if \(!C\.pointInRect\(ip, rect\)/.test(appSrc7));
+  t('引导线不要求先框选', /function drawGuides\(dim\)[\s\S]{0,400}const rect = effectiveRect\(\);/.test(appSrc7));
+  t('引导线命中测试用同一基准', /function hitGuide\(p\)[\s\S]{0,400}const rect = effectiveRect\(\);/.test(appSrc7));
+  t('引导线归一化用同一基准', /function screenToGuideNorm\(p\)[\s\S]{0,400}const rect = effectiveRect\(\);/.test(appSrc7));
+  t('整图时提示词走整体口径（不能说是局部裁切）',
+    /scope: whole \? 'global' : \$\('scope-select'\)\.value,/.test(appSrc7));
+  t('整图时界面明示「整张图」', /hud-pill whole/.test(appSrc7) && /未框选 → 调整整张图；/.test(appSrc7));
+
+  // 整张图**没有周围环境**：羽化/色彩匹配/融合都必须关掉，否则会出现
+  // 「四周留一圈没改」和「凭空多出暗角」——这两件事实测都踩到过
+  t('core 能识别整图铺满（不能误判成普通图层）',
+    /const whole = opts\.whole !== undefined/.test(coreSrc) &&
+    /const feather = whole \? 0/.test(coreSrc));
+  t('整图不做色彩匹配（没有外圈可采）', /const useCM = !!\(!whole && cm && cm\.strength > 0\);/.test(coreSrc));
+  t('整图不做无缝融合（没有环境可对齐）', /const useFusion = !!\(!whole && fus && fus\.strength > 0\);/.test(coreSrc));
+  t('整图调色不羽化（否则四周留一圈没调）',
+    /const alpha = C\.layerAlphaMap\(whole \? Object\.assign\(\{\}, edit, \{ feather: 0 \}\) : edit, r\.w, r\.h\);/.test(appSrc7));
+  t('融合取不到环带样本时不动画面（不拿 0 均值去减）',
+    /const hasRing = dstMom\.n > 0;/.test(coreSrc) && /: \[0, 0, 0\];/.test(coreSrc));
+  t('融合结果带 ok 标记（界面可据此不误报）', /ok: hasRing,/.test(coreSrc));
+  t('整图不报「接缝有色差」（整图没有接缝）', /if \(dstMom\.n <= 0\) return null;/.test(coreSrc));
 
   /* ---------- 工具提示只显示一次 ---------- */
 
@@ -1930,7 +2204,8 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('有清空按钮', /id="guide-clear"/.test(html7));
   t('有数量角标', /id="guide-count"/.test(html7));
   // 引导线会进提示词，所以必须常显（非引导模式下淡化），否则用户会忘了自己画过
-  t('画布上会画引导线', /if \(S\.guides\.length && S\.rect\) drawGuides\(S\.mode !== 'guide'\);/.test(appSrc7));
+  // 注意不能要求 S.rect：没有框选时引导线画在整张图上（见 effectiveRect）
+  t('画布上会画引导线', /if \(S\.guides\.length\) drawGuides\(S\.mode !== 'guide'\);/.test(appSrc7));
   t('非引导线模式下淡化显示', /function drawGuides\(dim\)/.test(appSrc7));
   t('引导线只在选区内画', /引导线只能画在选区内/.test(appSrc7));
   t('引导线存入状态', /S\.guides\.push\(draft\)/.test(appSrc7));
@@ -1951,19 +2226,23 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
     const g = C.snapGuide({ kind: 'diagonal', x1: 0, y1: 1, x2: 1, y2: 0 });
     return g.x1 === 0 && g.y1 === 1 && g.x2 === 1 && g.y2 === 0;
   })());
-  t('竖着画的「地平线」改判为垂直线', (() => {
-    const g = C.snapGuide({ kind: 'horizon', x1: 0.5, y1: 0.1, x2: 0.5, y2: 0.9 });
-    return g.kind === 'vertical';
+  // 现在只有一种直线类型，方向由坐标本身表达，吸附不该再改类型
+  t('竖向直线吸附后仍是直线类型', (() => {
+    const g = C.snapGuide({ kind: 'line', x1: 0.5, y1: 0.1, x2: 0.5, y2: 0.9 });
+    return g.kind === 'line' && Math.abs(g.x2 - g.x1) < 1e-9;
   })());
-  t('横着画的「垂直线」改判为地平线', (() => {
-    const g = C.snapGuide({ kind: 'vertical', x1: 0.1, y1: 0.5, x2: 0.9, y2: 0.5 });
-    return g.kind === 'horizon';
+  t('横向直线吸附后仍是直线类型', (() => {
+    const g = C.snapGuide({ kind: 'line', x1: 0.1, y1: 0.5, x2: 0.9, y2: 0.5 });
+    return g.kind === 'line' && Math.abs(g.y2 - g.y1) < 1e-9;
   })());
+  // 老数据（horizon）经吸附后应该变成 line，而不是保留旧类型
+  t('老类型经吸附迁移为直线',
+    C.snapGuide({ kind: 'horizon', x1: 0.1, y1: 0.5, x2: 0.9, y2: 0.52 }).kind === 'line');
   t('零长度线不崩', (() => {
     const g = C.snapGuide({ kind: 'horizon', x1: 0.5, y1: 0.5, x2: 0.5, y2: 0.5 });
     return g.x1 === 0.5 && g.y1 === 0.5;
   })());
-  t('吸附空值不崩', C.snapGuide(null).kind === 'horizon');
+  t('吸附空值不崩', C.snapGuide(null).kind === 'line');
   t('吸附后端点仍在 0~1', (() => {
     const g = C.snapGuide({ kind: 'horizon', x1: -1, y1: 5, x2: 2, y2: 5 });
     return g.x1 >= 0 && g.x2 <= 1 && g.y1 >= 0 && g.y2 <= 1;
@@ -2260,7 +2539,9 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
 
   t('返回时把菜单状态交给 planBackAction', /moremenu: moreMenuOpen\(\),/.test(appSrc));
   t('返回键能关掉菜单', /case 'moremenu': closeMoreMenu\(\);/.test(appSrc));
-  t('菜单在返回层级表里排第一', C.BACK_LAYERS[0].id === 'moremenu');
+  // 教程是全屏引导，盖在菜单之上；菜单仍是「面板类」里最靠前的一层
+  t('教程盖在最上面', C.BACK_LAYERS[0].id === 'tutorial');
+  t('菜单紧跟教程之后', C.BACK_LAYERS[1].id === 'moremenu');
   t('菜单 z-index 高于所有面板',
     C.BACK_LAYERS.slice(1).every((L) => C.BACK_LAYERS[0].z > L.z),
     C.BACK_LAYERS.map((L) => L.id + ':' + L.z));
@@ -2434,6 +2715,849 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('清单声明了 maskable/any 用途', /"purpose"/.test(manifest));
 })();
 // ===== 枫叶图标块结束 =====
+
+/* ---------- 导出保存位置（纯逻辑） ---------- */
+(() => {
+  // 三个位置：相册 / 下载 / 每次询问
+  t('保存位置有三个', Array.isArray(C.SAVE_LOCATIONS) && C.SAVE_LOCATIONS.length === 3,
+    C.SAVE_LOCATIONS && C.SAVE_LOCATIONS.length);
+  const ids = C.SAVE_LOCATIONS.map((x) => x.id);
+  t('位置 id 是 gallery/downloads/ask',
+    ids.join(',') === 'gallery,downloads,ask', ids);
+  t('每个位置都有标题与说明',
+    C.SAVE_LOCATIONS.every((x) => x.label && x.desc));
+
+  // 合法性判定：脏数据不能把导出导到不存在的地方
+  t('gallery 合法', C.isSaveLocation('gallery') === true);
+  t('downloads 合法', C.isSaveLocation('downloads') === true);
+  t('ask 合法', C.isSaveLocation('ask') === true);
+  t('未知值非法', C.isSaveLocation('nope') === false);
+  t('路径穿越非法', C.isSaveLocation('../../etc/passwd') === false);
+  t('null 非法', C.isSaveLocation(null) === false);
+  t('undefined 非法', C.isSaveLocation(undefined) === false);
+  t('数字非法', C.isSaveLocation(123) === false);
+  t('对象非法', C.isSaveLocation({}) === false);
+
+  // 取定义：非法时回落到相册（保证界面永远有选中项）
+  t('取 gallery 原样返回', C.getSaveLocation('gallery').id === 'gallery');
+  t('取 downloads 原样返回', C.getSaveLocation('downloads').id === 'downloads');
+  t('取 ask 原样返回', C.getSaveLocation('ask').id === 'ask');
+  t('取非法值回落到相册', C.getSaveLocation('../../etc/passwd').id === 'gallery');
+  t('取 null 回落到相册', C.getSaveLocation(null).id === 'gallery');
+  t('回落对象也是完整定义',
+    !!(C.getSaveLocation('bad').label && C.getSaveLocation('bad').desc));
+})();
+// ===== 导出保存位置块结束 =====
+
+/* ---------- 后台生成任务（纯逻辑） ---------- */
+(() => {
+  // 用户诉求：一张图进了 AI 生图后，可以放到后台去处理下一张。
+  // 最关键的是「结果不能落到错的照片上」「不能静默丢失」「界面不能假装在忙」。
+
+  // 1) 落地决策：五种组合都要有确定答案
+  const L = (o) => C.planJobLanding(o);
+
+  // a) 用户就在同一张照片的同一份状态上 → 走对比图（原来的流程）
+  t('同一文档 → 走对比图',
+    L({ jobWorkId: 'w1', jobDocVersion: 5, curWorkId: 'w1', curDocVersion: 5, hasPhoto: true, hasLibrary: true })
+      .target === 'compare');
+  t('同一文档的原因是 same-doc',
+    L({ jobWorkId: 'w1', jobDocVersion: 5, curWorkId: 'w1', curDocVersion: 5, hasPhoto: true, hasLibrary: true })
+      .reason === 'same-doc');
+
+  // b) 同一件作品但文档版本变了（用户又编辑/撤销过）→ 落库，不能贴
+  t('同作品但文档变了 → 落作品库',
+    L({ jobWorkId: 'w1', jobDocVersion: 5, curWorkId: 'w1', curDocVersion: 9, hasPhoto: true, hasLibrary: true })
+      .target === 'library');
+  t('同作品但文档变了的原因是 same-work-newer-doc',
+    L({ jobWorkId: 'w1', jobDocVersion: 5, curWorkId: 'w1', curDocVersion: 9, hasPhoto: true, hasLibrary: true })
+      .reason === 'same-work-newer-doc');
+  // 关键：这种情形**绝不能**走 compare —— 那会把用户中间的编辑盖掉
+  t('同作品但文档变了时绝不走对比图',
+    L({ jobWorkId: 'w1', jobDocVersion: 5, curWorkId: 'w1', curDocVersion: 9, hasPhoto: true, hasLibrary: true })
+      .target !== 'compare');
+
+  // c) 用户在别的照片上 → 落库（这是「处理下一张」的主路径）
+  t('在别的照片上 → 落作品库',
+    L({ jobWorkId: 'w1', jobDocVersion: 5, curWorkId: 'w2', curDocVersion: 7, hasPhoto: true, hasLibrary: true })
+      .target === 'library');
+  t('在别的照片上的原因是 other-photo',
+    L({ jobWorkId: 'w1', jobDocVersion: 5, curWorkId: 'w2', curDocVersion: 7, hasPhoto: true, hasLibrary: true })
+      .reason === 'other-photo');
+
+  // d) 用户回首页了（没有打开任何照片）→ 落库
+  t('在首页（没开照片）→ 落作品库',
+    L({ jobWorkId: 'w1', jobDocVersion: 5, curWorkId: null, curDocVersion: 0, hasPhoto: false, hasLibrary: true })
+      .target === 'library');
+  // 关键：不能因为「没打开照片」就判成 compare —— 那会把结果贴到空白画布上
+  t('首页时绝不走对比图',
+    L({ jobWorkId: 'w1', jobDocVersion: 5, curWorkId: null, curDocVersion: 0, hasPhoto: false, hasLibrary: true })
+      .target !== 'compare');
+  // 作品 id 为 null 的任务（发起时还没建记录）也要有确定去处
+  t('任务没有 workId 时不会误判成同一张',
+    L({ jobWorkId: null, jobDocVersion: 5, curWorkId: null, curDocVersion: 0, hasPhoto: false, hasLibrary: true })
+      .target === 'library');
+
+  // e) 无处可落 → 明确 drop（不假装成功）
+  t('没有作品库时判为 drop',
+    L({ jobWorkId: 'w1', jobDocVersion: 5, curWorkId: 'w2', curDocVersion: 7, hasPhoto: true, hasLibrary: false })
+      .target === 'drop');
+  t('planJobLanding 对 null 安全', typeof C.planJobLanding(null).target === 'string');
+  t('planJobLanding 对空参数安全', typeof C.planJobLanding({}).target === 'string');
+  t('所有分支都返回三种之一',
+    (() => {
+      const cases = [
+        {}, { hasPhoto: true, curDocVersion: 1, jobDocVersion: 1 },
+        { hasLibrary: true }, { hasLibrary: true, hasPhoto: true },
+        { hasLibrary: true, curWorkId: 'a', jobWorkId: 'a', curDocVersion: 1, jobDocVersion: 1, hasPhoto: true }
+      ];
+      return cases.every((c) => ['compare', 'library', 'drop'].indexOf(C.planJobLanding(c).target) >= 0);
+    })());
+
+  // 2) 角标文案：让用户一眼看出有几张在跑、几张好了
+  t('planJobBadge 对空安全', C.planJobBadge([]).total === 0 && C.planJobBadge(null).total === 0);
+  const b1 = C.planJobBadge([{ status: 'running' }, { status: 'running' }]);
+  t('统计生成中数量', b1.running === 2 && b1.total === 2, b1);
+  t('只有生成中时文案说「正在后台生成」', /2 张正在后台生成/.test(b1.text), b1.text);
+  const b2 = C.planJobBadge([{ status: 'done' }]);
+  t('统计完成数量', b2.done === 1, b2);
+  t('只有完成时文案说「已完成」', /已完成/.test(b2.text), b2.text);
+  const b3 = C.planJobBadge([{ status: 'running' }, { status: 'done' }, { status: 'done' }]);
+  t('混合时同时报两个数', b3.running === 1 && b3.done === 2, b3);
+  t('混合时文案两个数都在', /1 张生成中/.test(b3.text) && /2 张已完成/.test(b3.text), b3.text);
+  t('统计失败数量', C.planJobBadge([{ status: 'failed' }]).failed === 1);
+  t('已取消的不计入（用户自己取消的不该提醒）',
+    C.planJobBadge([{ status: 'canceled' }]).total === 0, C.planJobBadge([{ status: 'canceled' }]));
+  t('脏条目被跳过', C.planJobBadge([null, undefined, {}, { status: 'running' }]).running === 1);
+  // 优先级：有完成就优先说完成（那是行动召唤）
+  t('有完成时优先报完成',
+    /已完成/.test(C.planJobBadge([{ status: 'running' }, { status: 'done' }]).text),
+    C.planJobBadge([{ status: 'running' }, { status: 'done' }]).text);
+
+  // 3) 条目标记：告诉用户点进去有结果
+  const jobs = [
+    { workId: 'w1', status: 'running' },
+    { workId: 'w2', status: 'done' },
+    { workId: 'w3', status: 'failed' }
+  ];
+  t('生成中的条目标「生成中…」',
+    C.jobTagFor('w1', jobs).tag === 'running' && /生成中/.test(C.jobTagFor('w1', jobs).zh),
+    C.jobTagFor('w1', jobs));
+  t('完成的条目标「已生成」',
+    C.jobTagFor('w2', jobs).tag === 'done' && /点开看/.test(C.jobTagFor('w2', jobs).zh),
+    C.jobTagFor('w2', jobs));
+  t('失败的条目标「生成失败」',
+    C.jobTagFor('w3', jobs).tag === 'failed', C.jobTagFor('w3', jobs));
+  t('没有任务的条目返回 null', C.jobTagFor('w9', jobs) === null);
+  t('jobTagFor 对空安全', C.jobTagFor('w1', []) === null && C.jobTagFor('w1', null) === null);
+  // 优先级：同一张既有跑着的又有好了的 → 报「好了」（更重要）
+  t('同一张既有生成中又有完成时报完成',
+    C.jobTagFor('w1', [{ workId: 'w1', status: 'running' }, { workId: 'w1', status: 'done' }]).tag === 'done');
+  // 反过来（先完成后生成中）也要报完成
+  t('顺序不影响完成优先',
+    C.jobTagFor('w1', [{ workId: 'w1', status: 'done' }, { workId: 'w1', status: 'running' }]).tag === 'done');
+
+  // 4) busy 只反映「当前这张照片」—— 用户明确点出的「不能假装在忙」
+  const pj = (o) => C.planBusyForCurrent(o);
+  t('当前文档有任务 → busy',
+    pj({ jobs: [{ status: 'running', docVersion: 5 }], curDocVersion: 5, hasPhoto: true }).busy === true);
+  t('当前文档有任务 → 计数正确',
+    pj({ jobs: [{ status: 'running', docVersion: 5 }], curDocVersion: 5, hasPhoto: true }).count === 1);
+  // 关键：别的照片在跑时**不能**显示遮罩（会挡住首页，让人以为卡住）
+  t('别的文档有任务 → 不 busy',
+    pj({ jobs: [{ status: 'running', docVersion: 5 }], curDocVersion: 9, hasPhoto: true }).busy === false);
+  t('别的文档有任务 → 计数为 0',
+    pj({ jobs: [{ status: 'running', docVersion: 5 }], curDocVersion: 9, hasPhoto: true }).count === 0);
+  t('没打开照片 → 不 busy（首页不能被遮住）',
+    pj({ jobs: [{ status: 'running', docVersion: 5 }], curDocVersion: 0, hasPhoto: false }).busy === false);
+  t('没有任务 → 不 busy', pj({ jobs: [], curDocVersion: 5, hasPhoto: true }).busy === false);
+  t('已完成的任务不算 busy',
+    pj({ jobs: [{ status: 'done', docVersion: 5 }], curDocVersion: 5, hasPhoto: true }).busy === false);
+  t('已取消/失败的任务不算 busy',
+    pj({ jobs: [{ status: 'canceled', docVersion: 5 }, { status: 'failed', docVersion: 5 }],
+      curDocVersion: 5, hasPhoto: true }).busy === false);
+  t('多个任务都算进计数',
+    pj({ jobs: [{ status: 'running', docVersion: 5 }, { status: 'running', docVersion: 5 }],
+      curDocVersion: 5, hasPhoto: true }).count === 2);
+  t('planBusyForCurrent 对 null 安全', pj(null).busy === false);
+})();
+// ===== 后台生成任务块结束 =====
+
+/* ---------- 基础调色（纯像素数学） ---------- */
+(() => {
+  const mk = (r, g, b, a) => ({
+    data: new Uint8ClampedArray([r, g, b, a === undefined ? 255 : a]),
+    width: 1, height: 1
+  });
+  const px = (im) => [im.data[0], im.data[1], im.data[2], im.data[3]];
+  const lum = (p) => 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+
+  // 1) 参数定义：对称、有默认值、有中文名（界面按它渲染滑块）
+  t('调色参数是数组', Array.isArray(C.GRADE_PARAMS));
+  t('至少有 曝光/对比度/饱和度/色温/色调 五项', C.GRADE_PARAMS.length >= 5, C.GRADE_PARAMS.length);
+  for (const k of ['exposure', 'contrast', 'saturation', 'temperature', 'tint']) {
+    t('调色参数含 ' + k, C.GRADE_PARAMS.some((p) => p.key === k), C.GRADE_PARAMS.map((p) => p.key));
+  }
+  t('每项都有中文名与说明',
+    C.GRADE_PARAMS.every((p) => p.zh && p.hint), C.GRADE_PARAMS);
+  t('值域对称（0 = 不变）',
+    C.GRADE_PARAMS.every((p) => p.min === -p.max && p.def === 0),
+    C.GRADE_PARAMS.map((p) => [p.min, p.max, p.def]));
+
+  t('emptyGrade 全零', C.isGradeEmpty(C.emptyGrade()));
+  t('emptyGrade 字段齐备',
+    Object.keys(C.emptyGrade()).length === C.GRADE_PARAMS.length, Object.keys(C.emptyGrade()));
+  t('有非零参数时 isGradeEmpty 为假', C.isGradeEmpty({ exposure: 1 }) === false);
+  t('isGradeEmpty 对 null 为真', C.isGradeEmpty(null) === true);
+  t('isGradeEmpty 对脏值安全', C.isGradeEmpty({ exposure: 'x' }) === true);
+
+  // 2) 归一化：夹取 + 补默认 + 丢脏值
+  const ng = C.normalizeGrade({ exposure: 999, contrast: -999, saturation: 'x', temperature: 50 });
+  t('归一化夹到上限', ng.exposure === 100, ng.exposure);
+  t('归一化夹到下限', ng.contrast === -100, ng.contrast);
+  t('归一化丢掉脏值', ng.saturation === 0, ng.saturation);
+  t('归一化保留合法值', ng.temperature === 50, ng.temperature);
+  t('归一化补齐缺失字段', ng.tint === 0, ng.tint);
+  t('归一化对 null 安全', C.normalizeGrade(null).exposure === 0);
+
+  // 3) **恒等性**：全零调整 = 像素逐字节不变（这是「非破坏性」的技术底线）
+  const samples = [[0, 0, 0], [255, 255, 255], [128, 128, 128], [120, 80, 40], [1, 254, 128], [200, 10, 250]];
+  let allIdentical = true;
+  for (const [r, g, b] of samples) {
+    const out = C.gradePixels(mk(r, g, b), C.emptyGrade());
+    const p = px(out);
+    if (p[0] !== r || p[1] !== g || p[2] !== b || p[3] !== 255) {
+      allIdentical = false;
+      t('恒等：' + [r, g, b].join(',') + ' 不变', false, p);
+    }
+  }
+  t('恒等性：全零调整像素逐字节不变', allIdentical);
+  // 缺参、null、undefined 都等价于「不调」
+  t('缺参等价于不调', JSON.stringify(px(C.gradePixels(mk(120, 80, 40), {}))) === '[120,80,40,255]');
+  t('null 参数等价于不调', JSON.stringify(px(C.gradePixels(mk(120, 80, 40), null))) === '[120,80,40,255]');
+  t('undefined 参数等价于不调', JSON.stringify(px(C.gradePixels(mk(120, 80, 40), undefined))) === '[120,80,40,255]');
+
+  // 4) **单调性**：曝光越大越亮（对所有采样点都成立）
+  let monoOk = true;
+  for (const [r, g, b] of samples) {
+    const levels = [-100, -50, 0, 50, 100].map((v) => lum(px(C.gradePixels(mk(r, g, b), { exposure: v }))));
+    for (let i = 1; i < levels.length; i++) {
+      if (levels[i] < levels[i - 1] - 1e-9) { monoOk = false; t('曝光单调 ' + [r, g, b].join(',') + ' @' + i, false, levels); }
+    }
+  }
+  t('单调性：曝光越大越亮', monoOk);
+  t('曝光 +100 确实更亮', lum(px(C.gradePixels(mk(120, 80, 40), { exposure: 100 }))) >
+    lum(px(C.gradePixels(mk(120, 80, 40), C.emptyGrade()))));
+  t('曝光 -100 确实更暗', lum(px(C.gradePixels(mk(120, 80, 40), { exposure: -100 }))) <
+    lum(px(C.gradePixels(mk(120, 80, 40), C.emptyGrade()))));
+  // 曝光系数本身也要单调，且 ±100 是 ±2EV
+  t('曝光系数在 0 处为 1', Math.abs(C.gradeExposureFactor(0) - 1) < 1e-9);
+  t('曝光 +100 = 4 倍（+2EV）', Math.abs(C.gradeExposureFactor(100) - 4) < 1e-9,
+    C.gradeExposureFactor(100));
+  t('曝光 -100 = 1/4 倍（-2EV）', Math.abs(C.gradeExposureFactor(-100) - 0.25) < 1e-9,
+    C.gradeExposureFactor(-100));
+  t('曝光系数单调递增',
+    [-100, -50, 0, 50, 100].every((v, i, a) => i === 0 || C.gradeExposureFactor(v) > C.gradeExposureFactor(a[i - 1])));
+
+  // 5) **夹取**：不溢出、不绕回（绕回是「亮部烧成黑块」的经典 bug）
+  let noWrap = true;
+  const extremes = [
+    { exposure: 100 }, { exposure: -100 }, { contrast: 100 }, { contrast: -100 },
+    { saturation: 100 }, { saturation: -100 }, { temperature: 100 }, { temperature: -100 },
+    { tint: 100 }, { tint: -100 },
+    { exposure: 100, contrast: 100, saturation: 100, temperature: 100, tint: 100 },
+    { exposure: -100, contrast: -100, saturation: -100, temperature: -100, tint: -100 }
+  ];
+  for (const [r, g, b] of [[0, 0, 0], [255, 255, 255], [120, 80, 40]]) {
+    for (const grade of extremes) {
+      const p = px(C.gradePixels(mk(r, g, b), grade));
+      for (let k = 0; k < 3; k++) {
+        if (!(p[k] >= 0 && p[k] <= 255) || !Number.isFinite(p[k])) {
+          noWrap = false;
+          t('夹取 ' + [r, g, b].join(',') + ' ' + JSON.stringify(grade), false, p);
+        }
+      }
+      // 白色不能被「调」成黑色（那说明绕回了）
+      if (r === 255 && g === 255 && b === 255 && grade.exposure >= 0 && (p[0] < 200 || p[1] < 200)) {
+        noWrap = false;
+        t('白色在正向调整下不会绕回变黑', false, { grade, p });
+      }
+    }
+  }
+  t('夹取：所有极端组合都在 0~255 内（不绕回）', noWrap);
+  t('白色在 +100 曝光下仍是白（不绕回）',
+    px(C.gradePixels(mk(255, 255, 255), { exposure: 100 }))[0] === 255);
+  t('黑色在 -100 曝光下仍是黑（不绕回成白）',
+    px(C.gradePixels(mk(0, 0, 0), { exposure: -100 }))[0] <= 2);
+
+  // 6) 对比度：绕中灰（线性 0.18 → sRGB 约 118）旋转，中灰本身不动
+  const mid = px(C.gradePixels(mk(118, 118, 118), { contrast: 100 }));
+  t('对比度绕中灰：中灰几乎不动', Math.abs(mid[0] - 118) <= 2, mid);
+  t('对比度 +100 拉开亮部', px(C.gradePixels(mk(180, 180, 180), { contrast: 100 }))[0] > 180);
+  t('对比度 +100 压暗暗部', px(C.gradePixels(mk(60, 60, 60), { contrast: 100 }))[0] < 60);
+  t('对比度 -100 把一切压向中灰',
+    Math.abs(px(C.gradePixels(mk(180, 180, 180), { contrast: -100 }))[0] - 118) <= 2,
+    px(C.gradePixels(mk(180, 180, 180), { contrast: -100 })));
+  t('对比度单调：越加对比，亮部越亮',
+    px(C.gradePixels(mk(180, 180, 180), { contrast: 50 }))[0] <
+    px(C.gradePixels(mk(180, 180, 180), { contrast: 100 }))[0]);
+
+  // 7) 饱和度：-100 = 完全去色（三通道相等，且亮度不变）
+  const desat = px(C.gradePixels(mk(200, 80, 40), { saturation: -100 }));
+  t('饱和度 -100 得到灰度（三通道相等）',
+    desat[0] === desat[1] && desat[1] === desat[2], desat);
+  // 参照必须是**线性光**亮度守恒（物理正确的口径），不是 sRGB 数值的加权平均。
+  // 两者差很多（102.6 vs 118），用错参照会把正确实现判成 bug。
+  // 在 sRGB 上直接做加权平均等于把 gamma 编码当线性用，绿色会偏暗。
+  const linLum = (p) => 0.2126 * C.srgbToLinear(p[0]) + 0.7152 * C.srgbToLinear(p[1]) + 0.0722 * C.srgbToLinear(p[2]);
+  const linOfGray = C.linearToSrgb(linLum([200, 80, 40]));
+  t('去色后线性亮度守恒（物理正确的口径）',
+    Math.abs(desat[0] - linOfGray) <= 2, [desat[0], linOfGray]);
+  t('去色结果就是线性亮度对应的灰',
+    desat[0] === desat[1] && desat[1] === desat[2], desat);
+  t('饱和度 +100 增加色彩跨度', (() => {
+    const before = Math.max(200, 80, 40) - Math.min(200, 80, 40);
+    const after = px(C.gradePixels(mk(200, 80, 40), { saturation: 100 }));
+    return (Math.max(...after.slice(0, 3)) - Math.min(...after.slice(0, 3))) > before;
+  })());
+  t('灰度像素调饱和度不变（灰没有饱和度可调）', (() => {
+    const p = px(C.gradePixels(mk(120, 120, 120), { saturation: 100 }));
+    return Math.abs(p[0] - 120) <= 2 && Math.abs(p[1] - 120) <= 2 && Math.abs(p[2] - 120) <= 2;
+  })(), px(C.gradePixels(mk(120, 120, 120), { saturation: 100 })));
+
+  // 8) 色温：暖 = 红多蓝少，冷 = 反之；绿通道基本不动
+  const warm = px(C.gradePixels(mk(128, 128, 128), { temperature: 100 }));
+  const cool = px(C.gradePixels(mk(128, 128, 128), { temperature: -100 }));
+  t('色温偏暖时红 > 蓝', warm[0] > warm[2], warm);
+  t('色温偏冷时蓝 > 红', cool[2] > cool[0], cool);
+  t('色温不显著改变绿通道', Math.abs(warm[1] - 128) <= 3 && Math.abs(cool[1] - 128) <= 3,
+    [warm[1], cool[1]]);
+  t('色温单调：越暖红越多',
+    px(C.gradePixels(mk(128, 128, 128), { temperature: 50 }))[0] <
+    px(C.gradePixels(mk(128, 128, 128), { temperature: 100 }))[0]);
+  t('色温 ±0 时通道增益为 1',
+    Math.abs(C.gradeChannelGains(0, 0).r - 1) < 1e-9 && Math.abs(C.gradeChannelGains(0, 0).b - 1) < 1e-9);
+  t('色温 +100 时红增益 > 1、蓝增益 < 1', (() => {
+    const g = C.gradeChannelGains(100, 0);
+    return g.r > 1 && g.b < 1 && Math.abs(g.g - 1) < 1e-9;
+  })());
+
+  // 9) 色调：正 = 偏品红（减绿），负 = 偏绿（减红蓝）
+  const magenta = px(C.gradePixels(mk(128, 128, 128), { tint: 100 }));
+  const green = px(C.gradePixels(mk(128, 128, 128), { tint: -100 }));
+  t('色调偏品红时绿通道减少', magenta[1] < 128, magenta);
+  t('色调偏绿时绿通道相对更高', green[1] > magenta[1], [green[1], magenta[1]]);
+
+  // 10) 掩膜：权重 0 的地方一个像素都不动
+  const masked = C.gradePixels({
+    data: new Uint8ClampedArray([120, 80, 40, 255, 120, 80, 40, 255]),
+    width: 2, height: 1
+  }, { exposure: 100 }, { mask: new Float32Array([0, 1]) });
+  t('掩膜 0 的像素完全不动', masked.data[0] === 120 && masked.data[1] === 80 && masked.data[2] === 40,
+    [masked.data[0], masked.data[1], masked.data[2]]);
+  t('掩膜 1 的像素被调整', masked.data[4] > 120, masked.data[4]);
+  t('掩膜 0.5 的像素被调一半左右', (() => {
+    const half = C.gradePixels({
+      data: new Uint8ClampedArray([120, 80, 40, 255]), width: 1, height: 1
+    }, { exposure: 100 }, { mask: new Float32Array([0.5]) });
+    const full = px(C.gradePixels(mk(120, 80, 40), { exposure: 100 }));
+    return half.data[0] > 120 && half.data[0] < full[0];
+  })());
+  t('掩膜长度不足时不崩', (() => {
+    const r = C.gradePixels({ data: new Uint8ClampedArray([120, 80, 40, 255]), width: 1, height: 1 },
+      { exposure: 100 }, { mask: new Float32Array(0) });
+    return Number.isFinite(r.data[0]);
+  })());
+
+  // 11) 纯函数契约：不改入参
+  t('不改入参像素（默认复制一份）', (() => {
+    const src = mk(120, 80, 40);
+    const before = src.data[0];
+    C.gradePixels(src, { exposure: 100 });
+    return src.data[0] === before;
+  })());
+  t('inPlace 时才写回原数组', (() => {
+    const src = mk(120, 80, 40);
+    C.gradePixels(src, { exposure: 100 }, { inPlace: true });
+    return src.data[0] > 120;
+  })());
+  t('不改入参的 grade 对象', (() => {
+    const g = { exposure: 999 };
+    C.gradePixels(mk(120, 80, 40), g);
+    return g.exposure === 999;
+  })());
+
+  // 12) 全透明像素：没有颜色可调，不能给它编出假颜色
+  t('全透明像素保持全透明', (() => {
+    const r = C.gradePixels(mk(0, 0, 0, 0), { exposure: 100 });
+    return r.data[3] === 0;
+  })());
+  t('alpha 通道不被改动', (() => {
+    const r = C.gradePixels(mk(120, 80, 40, 137), { exposure: 100 });
+    return r.data[3] === 137;
+  })());
+
+  // 13) 脏输入不能让整块像素坏掉
+  t('空图不崩', C.gradePixels(null, { exposure: 100 }).width === 0);
+  t('data 为空不崩', C.gradePixels({ data: null, width: 5, height: 5 }, { exposure: 100 }).width === 5);
+  t('宽高为 0 不崩', C.gradePixels({ data: new Uint8ClampedArray(4), width: 0, height: 0 },
+    { exposure: 100 }).width === 0);
+  t('多像素图全部被处理', (() => {
+    const n = 64;
+    const data = new Uint8ClampedArray(n * 4);
+    for (let i = 0; i < n; i++) { data[i * 4] = 100; data[i * 4 + 1] = 100; data[i * 4 + 2] = 100; data[i * 4 + 3] = 255; }
+    const r = C.gradePixels({ data, width: 8, height: 8 }, { exposure: 100 });
+    for (let i = 0; i < n; i++) if (r.data[i * 4] <= 100) return false;
+    return true;
+  })());
+
+  // 14) 描述文案（界面与撤销记录都要显示）
+  t('全零描述为「未调整」', C.describeGrade(C.emptyGrade()) === '未调整');
+  t('描述含曝光', /曝光 \+30/.test(C.describeGrade({ exposure: 30 })), C.describeGrade({ exposure: 30 }));
+  t('描述含对比度', /对比/.test(C.describeGrade({ contrast: 20 })));
+  t('描述含饱和度', /饱和/.test(C.describeGrade({ saturation: 20 })));
+  t('描述用「偏暖」而不是正数', /偏暖/.test(C.describeGrade({ temperature: 30 })),
+    C.describeGrade({ temperature: 30 }));
+  t('描述用「偏冷」而不是负数', /偏冷/.test(C.describeGrade({ temperature: -30 })),
+    C.describeGrade({ temperature: -30 }));
+  t('描述用「偏绿」/「偏品红」', /偏品红/.test(C.describeGrade({ tint: 30 })) &&
+    /偏绿/.test(C.describeGrade({ tint: -30 })), [C.describeGrade({ tint: 30 }), C.describeGrade({ tint: -30 })]);
+  t('描述对 null 安全', C.describeGrade(null) === '未调整');
+  t('多项描述用 · 分隔', /·/.test(C.describeGrade({ exposure: 10, contrast: 10 })),
+    C.describeGrade({ exposure: 10, contrast: 10 }));
+
+  // 15) 多像素一致性：同样颜色在任意位置结果相同（不能有位置相关 bug）
+  t('同色像素结果一致（与位置无关）', (() => {
+    const n = 4;
+    const data = new Uint8ClampedArray(n * 4);
+    for (let i = 0; i < n; i++) { data[i * 4] = 120; data[i * 4 + 1] = 80; data[i * 4 + 2] = 40; data[i * 4 + 3] = 255; }
+    const r = C.gradePixels({ data, width: 4, height: 1 }, { exposure: 50, temperature: 30 });
+    const first = [r.data[0], r.data[1], r.data[2]];
+    for (let i = 1; i < n; i++) {
+      if (r.data[i * 4] !== first[0] || r.data[i * 4 + 1] !== first[1] || r.data[i * 4 + 2] !== first[2]) return false;
+    }
+    return true;
+  })());
+})();
+// ===== 基础调色块结束 =====
+
+/* ---------- 新手教程（纯逻辑） ---------- */
+(() => {
+  // 首次启动要能走一遍「打开照片 → 框选 → 写要求 → 生成 → 对比/贴回 → 导出」
+  t('教程步骤是数组', Array.isArray(C.TUTORIAL_STEPS));
+  t('步骤数量够走完主流程', C.TUTORIAL_STEPS.length >= 5, C.TUTORIAL_STEPS.length);
+  t('步数常量与数组一致', C.TUTORIAL_LEN === C.TUTORIAL_STEPS.length,
+    [C.TUTORIAL_LEN, C.TUTORIAL_STEPS.length]);
+  t('每步都有标题与说明',
+    C.TUTORIAL_STEPS.every((s) => s.title && s.title.length > 2 && s.body && s.body.length > 4));
+  t('每步都有摆位提示',
+    C.TUTORIAL_STEPS.every((s) => ['top', 'bottom', 'center'].indexOf(s.place) >= 0),
+    C.TUTORIAL_STEPS.map((s) => s.place));
+
+  // 用户明确列出的流程，每一步都要在
+  const targets = C.TUTORIAL_STEPS.map((s) => s.target).join(' ');
+  t('教程覆盖「打开照片」', /#btn-open/.test(targets), targets);
+  t('教程覆盖「框选」', /data-mode="select"/.test(targets), targets);
+  t('教程覆盖「写要求」', /#prompt/.test(targets), targets);
+  t('教程覆盖「生成」', /#btn-generate/.test(targets), targets);
+  t('教程覆盖「对比/贴回」', /#cmp-apply/.test(targets), targets);
+  t('教程覆盖「导出」', /#btn-save/.test(targets), targets);
+
+  // 1) 该不该自动弹：只在真正第一次启动时
+  t('首次启动要弹', C.planTutorial({ seen: false, hasPhoto: false }).show === true);
+  t('首次启动的原因是 first-run',
+    C.planTutorial({ seen: false, hasPhoto: false }).reason === 'first-run');
+  t('看过之后不再弹', C.planTutorial({ seen: true, hasPhoto: false }).show === false);
+  t('看过之后的原因是 seen',
+    C.planTutorial({ seen: true, hasPhoto: false }).reason === 'seen');
+  // 已经在编辑照片时不弹：用户显然会用了，而且盖住画布很讨厌
+  t('正在编辑照片时不弹', C.planTutorial({ seen: false, hasPhoto: true }).show === false);
+  t('正在编辑时不弹的原因说明了原因',
+    C.planTutorial({ seen: false, hasPhoto: true }).reason === 'editing');
+  t('planTutorial 对空参数安全', typeof C.planTutorial({}).show === 'boolean');
+  t('planTutorial 对 null 安全', typeof C.planTutorial(null).show === 'boolean');
+
+  // 2) 推进：下一步 / 上一步 / 结束
+  const n = C.TUTORIAL_LEN;
+  t('第 0 步的下一步是第 1 步', C.planTutorialStep(0, 'next').idx === 1);
+  t('第 0 步不是结束', C.planTutorialStep(0, 'next').done === false);
+  t('第 0 步处于开头', C.planTutorialStep(0, 'next').atStart === true);
+  t('最后一步的下一步 = 结束', C.planTutorialStep(n - 1, 'next').done === true);
+  t('结束后索引被夹在最后一步（不越界）',
+    C.planTutorialStep(n - 1, 'next').idx === n - 1, C.planTutorialStep(n - 1, 'next').idx);
+  t('最后一步被标为末尾', C.planTutorialStep(n - 1, 'next').atEnd === true);
+  t('上一步能退回', C.planTutorialStep(2, 'prev').idx === 1);
+  t('第 0 步的上一步不越界', C.planTutorialStep(0, 'prev').idx === 0);
+  t('第 0 步的上一步仍在开头', C.planTutorialStep(0, 'prev').atStart === true);
+  t('上一步不会「结束」', C.planTutorialStep(0, 'prev').done === false);
+  // 脏数据不能让界面卡住（索引 NaN / 越界）
+  t('索引为 NaN 时夹到第 0 步', C.planTutorialStep(NaN, 'next').idx === 1,
+    C.planTutorialStep(NaN, 'next'));
+  t('索引为 null 时夹到第 0 步', C.planTutorialStep(null, 'prev').idx === 0);
+  t('索引越界（大于步数）时夹到末尾',
+    C.planTutorialStep(999, 'prev').idx === n - 2, C.planTutorialStep(999, 'prev').idx);
+  t('索引为负时夹到开头', C.planTutorialStep(-5, 'next').idx === 1);
+  t('未知方向时原地不动', C.planTutorialStep(1, 'sideways').idx === 1);
+  t('方向为 undefined 时原地不动', C.planTutorialStep(1).idx === 1);
+  t('全部返回有限数字', (() => {
+    for (const i of [-1, 0, 1, n - 1, n, 1e9, 'x', null]) {
+      const r = C.planTutorialStep(i, 'next');
+      if (!Number.isFinite(r.idx) || r.idx < 0 || r.idx > n - 1) return false;
+    }
+    return true;
+  })());
+})();
+// ===== 新手教程块结束 =====
+
+/* ---------- 调用日志（纯逻辑） ---------- */
+(() => {
+  // 生图按次花钱，用户需要能自己核对「哪几次调用了、花了多少、为什么失败」。
+  const mk = (o) => Object.assign({
+    at: 1700000000000, provider: 'siliconflow', model: 'Qwen/Qwen-Image-Edit',
+    prompt: '把背景换成海边', imgW: 1024, imgH: 1024, imgBytes: 120000,
+    ms: 32000, ok: true, error: '', status: 200, costUsd: 0.04, costNote: ''
+  }, o || {});
+
+  // 1) 追加：最新的在前，且不改入参
+  const a = C.appendCallLog([], mk({ at: 1 }));
+  const b = C.appendCallLog(a, mk({ at: 2 }));
+  t('追加一条得到长度 1', a.length === 1, a.length);
+  t('再追加一条得到长度 2', b.length === 2, b.length);
+  t('最新的排在最前面（不用滚到底）', b[0].at === 2 && b[1].at === 1, b.map((e) => e.at));
+  t('追加不改原数组', a.length === 1 && a[0].at === 1, a.map((e) => e.at));
+  t('空/null 输入安全', C.appendCallLog(null, mk()).length === 1);
+  t('空 entry 也安全（补默认值）', (() => {
+    const r = C.appendCallLog([], null);
+    return r.length === 1 && r[0].ok === false && typeof r[0].at === 'number';
+  })());
+
+  // 2) 环形缓冲：上限之外的老条目必须被挤掉
+  let list = [];
+  for (let i = 1; i <= 150; i++) list = C.appendCallLog(list, mk({ at: i }));
+  t('条数被上限截住', list.length === C.CALL_LOG_MAX, list.length);
+  t('上限是 100 量级（不会把 localStorage 撑爆）',
+    C.CALL_LOG_MAX >= 20 && C.CALL_LOG_MAX <= 500, C.CALL_LOG_MAX);
+  t('保留的是最近的（最老的第 1 条已被挤掉）', list[list.length - 1].at === 51,
+    [list[0].at, list[list.length - 1].at]);
+  t('第一条就是最新的', list[0].at === 150, list[0].at);
+  // 自定义上限也要生效
+  const small = C.appendCallLog(C.appendCallLog([], mk({ at: 1 }), 2), mk({ at: 2 }), 2);
+  t('自定义上限生效', small.length === 2, small.length);
+  t('上限非法值不会变成 0 条', C.appendCallLog([mk()], mk(), 0).length === 1);
+
+  // 3) 提示词截断：完整提示词可能上千字，100 条就是几百 KB
+  const longPrompt = '改'.repeat(500);
+  const truncated = C.appendCallLog([], mk({ prompt: longPrompt }))[0];
+  t('提示词被截断', truncated.prompt.length <= C.CALL_LOG_PROMPT_CHARS + 1,
+    truncated.prompt.length);
+  t('截断后带省略号（看得出被截了）', /…$/.test(truncated.prompt), truncated.prompt.slice(-3));
+  t('记下了原始长度', truncated.promptLen === 500, truncated.promptLen);
+  t('短提示词原样保留', C.appendCallLog([], mk({ prompt: '改成红色' }))[0].prompt === '改成红色');
+  t('promptLen 可由调用方显式指定',
+    C.appendCallLog([], mk({ prompt: 'abc', promptLen: 999 }))[0].promptLen === 999);
+  t('truncateText 对 null 安全', C.truncateText(null, 10) === '');
+  t('truncateText 不截断短文本', C.truncateText('abc', 10) === 'abc');
+
+  // 4) 关键：绝不能把图片 base64 存进日志（那会让日志变成第二个存储黑洞）
+  const withBase = C.appendCallLog([], mk({ image: 'data:image/png;base64,' + 'A'.repeat(5000) }))[0];
+  t('日志条目里没有 base64 图片字段', !('image' in withBase) && !('base64' in withBase),
+    Object.keys(withBase));
+  t('日志条目里没有 dataUrl', !JSON.stringify(withBase).includes('base64'),
+    JSON.stringify(withBase).slice(0, 120));
+  t('图片只记尺寸与字节数', withBase.imgW === 1024 && withBase.imgBytes === 120000,
+    [withBase.imgW, withBase.imgBytes]);
+  // 单条日志的体积必须很小，100 条加起来才不至于占地方
+  t('单条日志体积 < 2KB', JSON.stringify(withBase).length < 2048, JSON.stringify(withBase).length);
+
+  // 5) 失败调用必须被记录，且带错误原因
+  const failed = C.appendCallLog([], mk({
+    ok: false, status: 401, error: 'HTTP 401 · API Key 无效', costUsd: null, costNote: '单价未知'
+  }))[0];
+  t('失败被记为 ok:false', failed.ok === false);
+  t('失败记下了 HTTP 状态', failed.status === 401, failed.status);
+  t('失败记下了错误原因', /API Key 无效/.test(failed.error), failed.error);
+  t('错误原因有长度上限（防止上游回一坨 HTML）',
+    C.appendCallLog([], mk({ error: 'x'.repeat(5000) }))[0].error.length <= 300,
+    C.appendCallLog([], mk({ error: 'x'.repeat(5000) }))[0].error.length);
+  t('单价未知记为 null（而不是 0）',
+    failed.costUsd === null, failed.costUsd);
+
+  // 6) 统计：成功/失败计数、花费累加、未知单价单独报
+  const st = C.callLogStats([
+    mk({ ok: true, costUsd: 0.04, ms: 30000 }),
+    mk({ ok: true, costUsd: 0.04, ms: 50000 }),
+    mk({ ok: false, costUsd: null, ms: 0 })
+  ]);
+  t('统计总数', st.count === 3, st.count);
+  t('统计成功数', st.ok === 2, st.ok);
+  t('统计失败数', st.failed === 1, st.failed);
+  t('花费只累加已知单价', Math.abs(st.usd - 0.08) < 1e-9, st.usd);
+  t('未知单价单独报条数（不能当成 0 混进去）', st.unknown === 1, st.unknown);
+  t('平均耗时按有耗时的条目算', st.avgMs === 40000, st.avgMs);
+  t('统计对空数组安全', C.callLogStats([]).count === 0 && C.callLogStats([]).usd === 0);
+  t('统计对 null 安全', C.callLogStats(null).count === 0);
+
+  // 7) 导出文本：人读的，必须带关键信息，且按时间正序
+  const text = C.callLogToText([
+    mk({ at: new Date(2024, 8, 23, 10, 0, 5).getTime(), prompt: '把背景换成海边' }),
+    mk({ at: new Date(2024, 8, 23, 10, 5, 30).getTime(), ok: false, error: 'HTTP 429 · 触发限流', costUsd: null })
+  ], { now: new Date(2024, 8, 23, 11, 0, 0).getTime(), version: '9.9.9' });
+  t('文本含标题', /调用日志/.test(text), text.slice(0, 40));
+  t('文本含导出时间', /2024-09-23 11:00:00/.test(text), text.slice(0, 200));
+  t('文本含版本号', /9\.9\.9/.test(text));
+  t('文本含总次数', /共 2 次/.test(text));
+  t('文本含成功失败数', /成功 1 次/.test(text) && /失败 1 次/.test(text));
+  t('文本含模型名', /Qwen\/Qwen-Image-Edit/.test(text));
+  t('文本含发送图片尺寸', /1024×1024/.test(text));
+  t('文本含耗时（秒）', /32\.0 秒/.test(text), text.match(/耗时[^\n]*/));
+  t('文本含花费', /\$0\.04/.test(text));
+  t('文本含提示词', /把背景换成海边/.test(text));
+  t('文本含失败原因', /HTTP 429/.test(text));
+  t('文本含单价未知的说明', /单价未知|未收录价格/.test(text));
+  // 内部存储是倒序（界面先看最新的），导出文本要翻成时间正序（人读日志的习惯）
+  const iFirst = text.indexOf('2024-09-23 10:00:05');
+  const iSecond = text.indexOf('2024-09-23 10:05:30');
+  t('文本按时间正序（早的在前）', iFirst >= 0 && iSecond > iFirst, [iFirst, iSecond]);
+  t('文本对空日志不崩', /还没有任何调用记录/.test(C.callLogToText([], {})));
+  t('文本对 null 不崩', typeof C.callLogToText(null, {}) === 'string');
+
+  // 8) 导出 JSON：必须是**合法 JSON**，且结构稳定（脚本要能直接读）
+  const json = C.callLogToJson([mk({ at: 1 }), mk({ at: 2, ok: false, error: 'x' })], {
+    now: 1700000000000, version: '1.2.3'
+  });
+  let parsed = null, parseErr = null;
+  try { parsed = JSON.parse(json); } catch (e) { parseErr = e; }
+  t('导出的 JSON 合法', !parseErr, parseErr && parseErr.message);
+  t('JSON 带应用标识', parsed && parsed.app === 'photo-studio', parsed && parsed.app);
+  t('JSON 带版本号', parsed && parsed.version === '1.2.3');
+  t('JSON 带导出时间', parsed && parsed.exportedAt === 1700000000000);
+  t('JSON 带统计头', parsed && parsed.stats && parsed.stats.count === 2, parsed && parsed.stats);
+  t('JSON 带条目数组', parsed && Array.isArray(parsed.entries) && parsed.entries.length === 2);
+  t('JSON 保留顺序（最新在前，与界面一致）',
+    parsed.entries[0].at === 2 && parsed.entries[1].at === 1,
+    parsed.entries.map((e) => e.at));
+  t('JSON 里失败的条目带 error', parsed.entries[0].ok === false && parsed.entries[0].error === 'x');
+  t('JSON 对空日志也合法', (() => {
+    try { return JSON.parse(C.callLogToJson([], {})).entries.length === 0; } catch (e) { return false; }
+  })());
+
+  // 9) 时间格式化
+  t('formatDateTime 补零', C.formatDateTime(new Date(2024, 0, 5, 9, 5, 3).getTime()) === '2024-01-05 09:05:03',
+    C.formatDateTime(new Date(2024, 0, 5, 9, 5, 3).getTime()));
+  t('formatDateTime 对 0 返回空', C.formatDateTime(0) === '');
+  t('formatDateTime 对脏值返回空', C.formatDateTime('x') === '');
+  t('formatDateTime 对 null 返回空', C.formatDateTime(null) === '');
+
+  // 10) 作品归属：日志要能对上「哪张照片」
+  t('记下了 workId（便于查「这张花了几次」）',
+    C.appendCallLog([], mk({ workId: 'w123' }))[0].workId === 'w123');
+  t('没有 workId 时是空串（不是 undefined）',
+    C.appendCallLog([], mk({}))[0].workId === '');
+})();
+// ===== 调用日志块结束 =====
+
+/* ---------- 作品库：历史记录必须存得住多张（纯逻辑） ---------- */
+(() => {
+  // 回归的 bug：修第 2 张时第 1 张整条被清理，修第 3 张时第 2 张被清理 ——
+  // 用户看到的就是「历史记录只保存得下一张」。
+  //
+  // 根因：只有一个总预算，且会话基准图是整张工作图的 JPEG（3072px 约 1.1MB，
+  // Base64 + UTF-16 后近 3MB），一条就超过 2.5MB 的总预算 →
+  // 每存一条新的就把上一条整条淘汰。
+  //
+  // 修复：会话单独一层预算 + 基准图缩到 2048px + 缩略图缩到 320px。
+
+  // 用**实测体积**构造记录，而不是随便编的数字 —— 编小了就测不出这个 bug。
+  // 数据来自 tools/regression-test.js 里的真实 canvas 测量。
+  const BASE_CHARS = Math.round(1.11 * 1024 * 1024 / 2);    // 2048px q0.75 基准图
+  const PATCH_CHARS = 60 * 1024;                            // 一次典型编辑的 patch
+  const THUMB_CHARS = Math.round(28 * 1024 / 2);             // 320px q0.68 缩略图
+  const realWork = (id, at) => ({
+    id, at, name: 'photo.jpg', thumb: 't'.repeat(THUMB_CHARS),
+    session: { base: 'b'.repeat(BASE_CHARS), items: [{ patch: 'p'.repeat(PATCH_CHARS) }] }
+  });
+  const opts = (pinned) => ({
+    maxBytes: C.LIBRARY_BUDGET_BYTES,
+    maxItems: C.LIBRARY_MAX_ITEMS,
+    sessionBudgetBytes: C.SESSION_BUDGET_BYTES,
+    pinnedId: pinned || null
+  });
+
+  // 1) 单条记录的体积必须远小于总预算 —— 否则「只存得下一张」是必然的
+  const oneBytes = C.estimateWorkBytes(realWork('a', 1));
+  t('单条记录体积 < 总预算的一半', oneBytes < C.LIBRARY_BUDGET_BYTES * 0.5,
+    { oneBytes, budget: C.LIBRARY_BUDGET_BYTES });
+  t('单条记录体积 >= 1MB（说明用的是真实照片的量级）', oneBytes >= 1024 * 1024, oneBytes);
+
+  // 2) 核心回归：连续导入 3 张照片、各改一次，三条都必须还在列表里
+  let lib = [];
+  for (let i = 0; i < 3; i++) {
+    lib.unshift(realWork('w' + i, 1000 + i));
+    const plan = C.planLibrary(lib, opts('w' + i));
+    if (plan.downgradeIds.length) for (const e of lib) if (plan.downgradeIds.includes(e.id)) e.session = null;
+    if (plan.evictIds.length) lib = lib.filter((e) => !plan.evictIds.includes(e.id));
+  }
+  t('3 张照片全部留在列表里', lib.length === 3, lib.map((e) => e.id));
+  t('3 张里没有一张被淘汰', lib.every((e) => e.id), lib.map((e) => e.id));
+  t('第 1 张没有被清理', lib.some((e) => e.id === 'w0'), lib.map((e) => e.id));
+  t('最新的那张可继续编辑', lib.filter((e) => e.session).some((e) => e.id === 'w2'),
+    lib.map((e) => ({ id: e.id, s: !!e.session })));
+  // 至少要能同时留住两张的会话 —— 只留最新一张的话，用户切回去就发现上一张改不了了
+  t('至少 2 张可继续编辑', lib.filter((e) => e.session).length >= 2,
+    lib.filter((e) => e.session).map((e) => e.id));
+
+  // 3) 继续加到 8 张：列表仍然全在（降级只丢会话，不丢条目）
+  for (let i = 3; i < 8; i++) {
+    lib.unshift(realWork('w' + i, 1000 + i));
+    const plan = C.planLibrary(lib, opts('w' + i));
+    if (plan.downgradeIds.length) for (const e of lib) if (plan.downgradeIds.includes(e.id)) e.session = null;
+    if (plan.evictIds.length) lib = lib.filter((e) => !plan.evictIds.includes(e.id));
+  }
+  t('8 张照片全部留在列表里', lib.length === 8, lib.length);
+  t('8 张里最新的两张可继续编辑',
+    lib.filter((e) => e.session).length >= 2, lib.filter((e) => e.session).map((e) => e.id));
+  t('占用不超总预算', C.workLibraryStats(lib).bytes <= C.LIBRARY_BUDGET_BYTES,
+    [C.workLibraryStats(lib).bytes, C.LIBRARY_BUDGET_BYTES]);
+
+  // 4) 会话预算真的在起作用：超过预算时降级最老的会话，**但不淘汰条目**
+  const many = [];
+  for (let i = 0; i < 10; i++) many.push(realWork('w' + i, 1000 + i));
+  const p = C.planLibrary(many, opts('w9'));
+  t('超会话预算时降级而不是淘汰', p.evictIds.length === 0, p.evictIds);
+  t('降级的是最老的几条', p.downgradeIds.indexOf('w0') >= 0, p.downgradeIds);
+  t('最新的不被降级', p.downgradeIds.indexOf('w9') < 0, p.downgradeIds);
+  t('降级后条数不变（列表全留）', p.keepIds.length === 10, p.keepIds.length);
+  t('降级后会话占用回到预算内', p.sessionBytes <= C.SESSION_BUDGET_BYTES,
+    [p.sessionBytes, C.SESSION_BUDGET_BYTES]);
+  t('降级后总体积不超总预算', p.bytes <= C.LIBRARY_BUDGET_BYTES,
+    [p.bytes, C.LIBRARY_BUDGET_BYTES]);
+
+  // 5) pinnedId（当前正在编辑的这张）**既不被淘汰也不被降级** ——
+  //    否则刚修完切回去，发现「这张不能继续编辑了」
+  const pinP = C.planLibrary(many, Object.assign(opts('w0'), { sessionBudgetBytes: 1 }));
+  t('置顶项不被淘汰（即便它最老）', pinP.evictIds.indexOf('w0') < 0, pinP.evictIds);
+  t('置顶项不被降级（即便预算极小）', pinP.downgradeIds.indexOf('w0') < 0, pinP.downgradeIds);
+  t('置顶项仍在保留列表里', pinP.keepIds.indexOf('w0') >= 0, pinP.keepIds);
+
+  // 6) 只有缩略图本身就装不下时，才整条淘汰（保留至少 1 条）
+  const hugeThumbs = [];
+  for (let i = 0; i < 5; i++) {
+    hugeThumbs.push({ id: 'w' + i, at: 1000 + i, thumb: 't'.repeat(3 * 1024 * 1024), session: null });
+  }
+  const ph = C.planLibrary(hugeThumbs, { maxBytes: 8 * 1024 * 1024, maxItems: 80 });
+  t('缩略图装不下时才会整条淘汰', ph.evictIds.length > 0, ph.evictIds.length);
+  t('缩略图超预算时也至少留 1 条', ph.keepIds.length >= 1, ph.keepIds.length);
+
+  // 7) 返回的 sessionBytes 口径要等于真实会话占用（降级的算 0）
+  const sb = C.planLibrary(many, opts('w9'));
+  const realSessionBytes = sb.keepIds.reduce((s, id) => {
+    const e = many.find((x) => x.id === id);
+    if (!e.session || sb.downgradeIds.indexOf(id) >= 0) return s;
+    return s + C.storageBytes(JSON.stringify(e.session));
+  }, 0);
+  t('sessionBytes 等于真实会话占用', sb.sessionBytes === realSessionBytes,
+    { got: sb.sessionBytes, want: realSessionBytes });
+
+  // 8) 纯函数契约：不改入参、不返回重复 id
+  t('planLibrary 不改原数组的 session', (() => {
+    const arr = [realWork('a', 1)];
+    const before = arr[0].session;
+    C.planLibrary(arr, opts());
+    return arr[0].session === before;
+  })());
+  t('keepIds 与 evictIds 不重叠', (() => {
+    const all = sb.keepIds.concat(sb.evictIds);
+    return new Set(all).size === all.length;
+  })());
+})();
+// ===== 作品库多张留档块结束 =====
+
+/* ---------- 滑块「只能拖滑块头」（纯几何判定） ---------- */
+(() => {
+  // 场景：设置页里滑块上下紧挨着别的设置项，想拖动时手指偏到轨道上，
+  // 原生行为会把值瞬间跳到点击位置（比如「融合强度」直接归零）。
+  // 这里验证「滑块头中心在哪 / 这次按下要不要拦」的判定。
+  const W = 200;      // 元素宽
+  const TW = 17;      // 滑块头宽
+  const L = 30;       // 元素左边（视口坐标）
+
+  // 1) 滑块头中心 = 左边缘 + 半个滑块头 + 进度 × (宽度 − 滑块头宽)
+  const mid = C.sliderThumbGeometry({
+    value: 50, min: 0, max: 100, rectLeft: L, rectWidth: W, thumbWidth: TW
+  });
+  t('滑块头在 50% 处居中', Math.abs(mid.thumbX - (L + TW / 2 + 0.5 * (W - TW))) < 1e-9, mid.thumbX);
+  t('轨道可用宽度扣掉滑块头', Math.abs(mid.trackWidth - (W - TW)) < 1e-9, mid.trackWidth);
+  t('进度比例正确', Math.abs(mid.ratio - 0.5) < 1e-9, mid.ratio);
+
+  // 2) 两端：值=min 时滑块头贴着左边缘；值=max 时贴着右边缘
+  const lo = C.sliderThumbGeometry({ value: 0, min: 0, max: 100, rectLeft: L, rectWidth: W, thumbWidth: TW });
+  const hi = C.sliderThumbGeometry({ value: 100, min: 0, max: 100, rectLeft: L, rectWidth: W, thumbWidth: TW });
+  t('值为 min 时滑块头中心 = 左边缘 + 半宽', Math.abs(lo.thumbX - (L + TW / 2)) < 1e-9, lo.thumbX);
+  t('值为 max 时滑块头中心 = 右边缘 − 半宽', Math.abs(hi.thumbX - (L + W - TW / 2)) < 1e-9, hi.thumbX);
+  t('滑块头中心不会超出元素', lo.thumbX >= L && hi.thumbX <= L + W, [lo.thumbX, hi.thumbX, L, L + W]);
+
+  // 3) 非 0 起始的区间（如「编辑历史内存上限」是 64~512）
+  const mem = C.sliderThumbGeometry({ value: 192, min: 64, max: 512, rectLeft: 0, rectWidth: 400, thumbWidth: TW });
+  const wantRatio = (192 - 64) / (512 - 64);
+  t('非 0 起点的区间按比例算', Math.abs(mem.ratio - wantRatio) < 1e-9, mem.ratio);
+  t('非 0 起点也能算出中心', mem.thumbX > 0 && mem.thumbX < 400, mem.thumbX);
+
+  // 4) 越界值 / 非法区间不能算出 NaN（NaN 会让判定全部失效 → 滑块拖不动）
+  const over = C.sliderThumbGeometry({ value: 999, min: 0, max: 100, rectLeft: 0, rectWidth: W, thumbWidth: TW });
+  const under = C.sliderThumbGeometry({ value: -999, min: 0, max: 100, rectLeft: 0, rectWidth: W, thumbWidth: TW });
+  t('值超上限时夹到 1', over.ratio === 1, over.ratio);
+  t('值超下限时夹到 0', under.ratio === 0, under.ratio);
+  const bad = C.sliderThumbGeometry({ value: 5, min: 100, max: 0, rectLeft: 0, rectWidth: W, thumbWidth: TW });
+  t('区间非法时不产生 NaN', Number.isFinite(bad.thumbX) && Number.isFinite(bad.ratio), bad);
+  const nan = C.sliderThumbGeometry({ value: 'x', min: 'y', max: 'z', rectLeft: 'a', rectWidth: 'b', thumbWidth: 'c' });
+  t('全部脏输入也不产生 NaN', Number.isFinite(nan.thumbX) && Number.isFinite(nan.distance), nan);
+  t('空参数不崩', Number.isFinite(C.sliderThumbGeometry().thumbX));
+
+  // 5) 判定：贴着滑块头 → 不拦；离得远 → 拦
+  const atThumb = C.planSliderHit({
+    value: 50, min: 0, max: 100, rectLeft: L, rectWidth: W, thumbWidth: TW,
+    pointerX: mid.thumbX
+  });
+  t('点在滑块头正中不拦（能正常拖动）', atThumb.block === false, atThumb);
+  const nearThumb = C.planSliderHit({
+    value: 50, min: 0, max: 100, rectLeft: L, rectWidth: W, thumbWidth: TW,
+    pointerX: mid.thumbX + 6      // 半个滑块头（8.5）以内
+  });
+  t('点在滑块头边缘不拦', nearThumb.block === false, nearThumb);
+  const farAway = C.planSliderHit({
+    value: 50, min: 0, max: 100, rectLeft: L, rectWidth: W, thumbWidth: TW,
+    pointerX: L + 3               // 轨道最左端，离滑块头很远
+  });
+  t('点在轨道远处要拦（防止跳值）', farAway.block === true, farAway);
+  t('拦下时给出距离（便于调试）', farAway.distance > 0, farAway.distance);
+
+  // 6) 边界：刚好等于 slack 不拦（「>」而不是「>=」，避免临界点行为飘忽）
+  const slack = TW / 2 + 6;
+  const exact = C.planSliderHit({
+    value: 50, min: 0, max: 100, rectLeft: L, rectWidth: W, thumbWidth: TW,
+    pointerX: mid.thumbX + slack
+  });
+  t('距离正好等于阈值时不拦', exact.block === false, exact);
+  const over1 = C.planSliderHit({
+    value: 50, min: 0, max: 100, rectLeft: L, rectWidth: W, thumbWidth: TW,
+    pointerX: mid.thumbX + slack + 1
+  });
+  t('超过阈值 1px 就拦', over1.block === true, over1);
+
+  // 7) 拿不到滑块头宽度时用常量兜底（老内核读不到自定义属性）
+  t('有滑块头宽度常量', C.SLIDER_THUMB_PX > 0, C.SLIDER_THUMB_PX);
+  const noThumbW = C.planSliderHit({
+    value: 50, min: 0, max: 100, rectLeft: L, rectWidth: W, pointerX: L + 3
+  });
+  t('缺 thumbWidth 时仍能判定', noThumbW.block === true, noThumbW);
+
+  // 8) 元素宽度为 0（隐藏 / 内核不做布局）时，中心退化成左边缘 + 半宽，
+  //    不产生 NaN —— app 侧对这种情况会直接放行（拦了滑块就彻底拖不动）
+  const zero = C.sliderThumbGeometry({ value: 50, min: 0, max: 100, rectLeft: 10, rectWidth: 0, thumbWidth: TW });
+  t('宽度为 0 时轨道宽度为 0', zero.trackWidth === 0, zero.trackWidth);
+  t('宽度为 0 时仍能算出中心', Number.isFinite(zero.thumbX), zero.thumbX);
+})();
+// ===== 滑块只能拖滑块头块结束 =====
 
 /* ---------- 检查更新 ---------- */
 console.log(`\n${pass} passed, ${fail} failed`);

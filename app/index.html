@@ -26,6 +26,7 @@
       <div id="file-name">未打开照片</div>
       <div id="file-meta">点「打开」导入手机里的照片</div>
     </div>
+
     <button class="tb-btn icon" id="btn-undo" title="撤销" disabled>
       <svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg>
     </button>
@@ -59,6 +60,12 @@
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-.3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
         <span class="mi-label">设置</span>
       </button>
+      <!-- 教程入口放在「更多」里：它是低频操作（看过一次就够了），
+           占顶栏位置不值得；但必须好找，所以不埋进设置页深处 -->
+      <button class="more-item" id="btn-tutorial" role="menuitem">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6"/><path d="M12 17.5v.01"/></svg>
+        <span class="mi-label">新手教程</span>
+      </button>
     </div>
   </header>
 
@@ -87,6 +94,12 @@
 
     <!-- 顶部提示条 -->
     <div id="toast" hidden></div>
+
+    <!-- 后台生成状态条：有几张在跑 / 几张好了。
+         没有它用户不敢离开 —— 看不到进度就等于不知道结果会不会丢。
+         刻意不放进顶栏：顶栏为「文件名可见」收敛过一次（固定占宽 252px），
+         再加一个按钮会把 320px 机型上的文件名重新挤没。 -->
+    <button id="job-badge" hidden></button>
 
     <!-- 生成中 -->
     <div id="busy" hidden>
@@ -160,6 +173,13 @@
         <span>引导线</span>
         <b id="guide-count" hidden>0</b>
       </button>
+      <!-- 调色：AI 改完之后常常还差一点颜色（偏冷偏暖/发灰/过艳），
+           这些纯数学能修，不该再花一次模型调用 -->
+      <button class="tool" data-mode="grade" id="btn-grade">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18 4.5 4.5 0 0 1 0-9 4.5 4.5 0 0 0 0-9z"/></svg>
+        <span>调色</span>
+        <b id="grade-count" hidden>0</b>
+      </button>
       <button class="tool" id="btn-fit">
         <svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M16 21h3a2 2 0 0 0 2-2v-3M8 21H5a2 2 0 0 1-2-2v-3"/></svg>
         <span>适应</span>
@@ -191,21 +211,30 @@
     </div>
     <div id="brush-tip" hidden>默认整块选区都会修改。涂抹过的地方会标成灰色，表示「这里不要动」。</div>
 
+    <!-- 调色参数：五个滑块 + 应用/重置。滑块由 app.js 按 GRADE_PARAMS 渲染，
+         这样「加一个调色参数」只要改 core 里的定义，不用动界面结构 -->
+    <div id="grade-bar" hidden>
+      <div id="grade-sliders"></div>
+      <div class="grade-actions">
+        <button class="chip" id="grade-reset">归零</button>
+        <span class="grade-note" id="grade-note"></span>
+        <button class="primary small" id="grade-apply">应用调色</button>
+      </div>
+    </div>
+    <div id="grade-tip" hidden>拖动滑块即时预览，<b>不调用模型、不花钱</b>。
+      满意后点「应用调色」把它记进修改记录（可随时撤销）。</div>
+
     <!-- 引导线参数 -->
     <div id="guide-bar" hidden>
       <span class="lbl">类型</span>
       <div class="chips" id="guide-kinds"></div>
       <button class="chip" id="guide-clear">清空</button>
     </div>
-    <div id="guide-color-bar" hidden>
-      <span class="lbl">笔迹颜色</span>
-      <div class="chips" id="guide-colors"></div>
-    </div>
-    <div id="guide-tip" hidden>在照片上拖一条线，告诉模型「地平线/主体应该在这里」。
-      比文字描述准确得多 —— 拖完点生成即可。</div>
+    <div id="guide-tip" hidden>拖一条直线，告诉模型「地平线 / 立柱 / 道路应该在这里」。
+      <b>线会画进发给模型的图片里</b>，模型能直接看到位置 —— 比文字描述准得多。</div>
     <div id="guide-tip-free" hidden>手画一笔，告诉模型「头发/水流/衣褶往这个方向走」。
       <b>这一笔会画进发给模型的图片里</b>，模型照着走向生成 —— 比文字描述准得多。
-      画完检查一下效果：万一模型把线也画出来了，去设置里关掉「笔迹画进请求图」。</div>
+      画完检查一下效果：万一模型把线也画出来了，去设置里关掉「引导线画进请求图」。</div>
 
     <!-- 选区参数 -->
     <div id="sel-bar">
@@ -317,6 +346,31 @@
 <!-- 作品大图预览 -->
 <div id="work-preview" hidden></div>
 
+<!-- ======================= 新手教程 ======================= -->
+<!--
+  首次启动弹一次，之后从「更多」菜单或设置里可以重看。
+  刻意不用「每步自动高亮 + 拦截点击」那套：这个应用的流程是「打开→框选→
+  写要求→生成→对比→导出」，用户很可能想边看边动手；拦截点击只会让人烦。
+  这里做成「半透明蒙层 + 指向箭头 + 说明气泡」，用户可以随时跳过。
+-->
+<div id="tutorial" hidden>
+  <div class="tut-mask"></div>
+  <div class="tut-spot" id="tut-spot"></div>
+  <div class="tut-card" id="tut-card">
+    <div class="tut-head">
+      <span class="tut-step" id="tut-step">第 1 / 6 步</span>
+      <button class="tut-skip" id="tut-skip">跳过</button>
+    </div>
+    <div class="tut-title" id="tut-title"></div>
+    <div class="tut-body" id="tut-body"></div>
+    <div class="tut-foot">
+      <button class="ghost small" id="tut-prev">上一步</button>
+      <div class="tut-dots" id="tut-dots"></div>
+      <button class="primary small" id="tut-next">下一步</button>
+    </div>
+  </div>
+</div>
+
 <!-- ======================= 照片信息面板 ======================= -->
 <div id="photoinfo" class="sheet" hidden>
   <div class="sheet-mask" data-close></div>
@@ -346,6 +400,12 @@
       <div class="st-card" id="exp-formats"></div>
       <div class="st-group">大小（长边像素）</div>
       <div class="st-card" id="exp-sizes"></div>
+      <!-- 保存位置：浏览器里下载目录由浏览器决定，所以这一组只在安卓壳里显示 -->
+      <div id="exp-save-group">
+        <div class="st-group">保存位置</div>
+        <div class="st-card" id="exp-saves"></div>
+        <div class="tip" id="exp-save-hint"></div>
+      </div>
       <div class="st-card" style="margin-top:9px">
         <label class="st-row" id="exp-custom-row" hidden>
           <span class="st-label">自定义长边 <i class="st-desc-inline">0 = 不缩放</i></span>
@@ -385,6 +445,44 @@
       </div>
       <div class="tip">导出用的是当前画面（含所有已应用的修改）。
         若工作分辨率低于原图，会先按原图尺寸重新合成一遍再导出，保证清晰度。</div>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= 调用日志面板 ======================= -->
+<!--
+  单独一个浮层而不是塞进设置页：日志可能有上百条，塞在设置里会把设置页撑得
+  又长又卡；而且用户看日志时的动作（核对花费、导出给客服）和改设置完全不同。
+-->
+<div id="calllog" class="sheet" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-body">
+    <div class="sheet-head">
+      <h3>调用日志</h3>
+      <button class="tb-btn icon" data-close>
+        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="sheet-scroll">
+      <div class="tip" style="margin:0 0 12px">
+        这里记录<b>每一次调用模型</b>：时间、模型、你写的要求、发送的图片尺寸、
+        耗时、成功还是失败、花了多少。<b>失败也会记</b> —— 有些接口失败也计费。
+        只保留最近 100 条。
+      </div>
+      <div id="calllog-summary" class="cl-summary"></div>
+      <div class="st-actions">
+        <button class="st-btn" id="calllog-export-json">导出 JSON</button>
+        <button class="st-btn" id="calllog-export-text">导出文本</button>
+      </div>
+      <div id="calllog-list"></div>
+      <div id="calllog-empty" class="tip" style="text-align:center;padding:20px 0" hidden>
+        还没有任何调用记录。生成一次后这里就会出现。
+      </div>
+      <div class="st-card" style="margin-top:14px">
+        <button class="st-row st-row-btn st-danger" id="calllog-clear">
+          <span class="st-label">清空调用日志</span>
+        </button>
+      </div>
     </div>
   </div>
 </div>
@@ -495,6 +593,10 @@
           <span class="st-label">请求附带环境特征 <i class="st-desc-inline">每次调用前测量周围环境并写进提示词</i></span>
           <input type="checkbox" class="st-switch" id="set-envfit" checked>
         </label>
+        <label class="st-row">
+          <span class="st-label">贴回后自动打开调色 <i class="st-desc-inline">对着同一块选区，纯数学微调颜色</i></span>
+          <input type="checkbox" class="st-switch" id="set-autograde" checked>
+        </label>
       </div>
       <div class="tip">融合做的是<b>像素级对齐</b>；环境特征是把<b>测出来的</b>周围情况写进提示词。
         两者都不重新调用模型，<b>不花钱</b>。</div>
@@ -565,6 +667,18 @@
       <div class="status" id="spend-status"></div>
       <div class="tip" id="price-tip"></div>
 
+      <!-- ============ 调用日志 ============ -->
+      <!-- 生图按次花钱，用户需要能自己核对「哪几次调用了、花了多少、为什么失败」 -->
+      <div class="st-group">调用日志</div>
+      <div class="st-card">
+        <button class="st-row st-row-btn" id="btn-calllog">
+          <span class="st-label">调用日志 <i class="st-desc-inline" id="calllog-brief">每次模型调用的记录</i></span>
+          <svg class="st-arrow" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
+        </button>
+      </div>
+      <div class="tip">记录每次调用模型的时间、模型、要求、发送尺寸、耗时、成败与花费。
+        只留最近 100 条，不会占多少空间。</div>
+
       <!-- ============ 生成参数 ============ -->
       <div class="st-group">生成参数</div>
       <div class="st-card">
@@ -607,21 +721,14 @@
       <div class="st-group">引导线 · 手绘草图</div>
       <div class="st-card">
         <label class="st-row">
-          <span class="st-label">把笔迹画进请求图 <i class="st-desc-inline">自由绘制的笔迹</i></span>
+          <span class="st-label">把引导线画进请求图 <i class="st-desc-inline">让模型直接看见</i></span>
           <input type="checkbox" class="st-switch" id="set-strokeimg" checked>
         </label>
-        <label class="st-row">
-          <span class="st-label">笔迹颜色</span>
-          <select class="st-value" id="set-strokecolor">
-            <option value="red">红色</option>
-            <option value="magenta">品红色</option>
-            <option value="cyan">青色</option>
-          </select>
-        </label>
         <div class="st-desc">
-          自由绘制的笔迹（发丝 / 水流 / 衣褶的走向）会画进发给模型的图片，模型照着走向生成。
-          <b>若发现模型把线条也画进了画面</b>，关掉上面的开关 —— 笔迹就只作为文字说明。
-          颜色请选与画面反差大的：红发上画红线等于没画。
+          画在照片上的引导线（直线 + 自由绘制）会画进发给模型的图片，模型直接看到位置和走向 ——
+          只靠文字描述时模型只能猜，落位常常偏。
+          <b>若发现模型把线条也画进了画面</b>，关掉上面的开关 —— 引导线就只作为文字说明。
+          颜色按画的顺序自动分配（第 1 条红、第 2 条青…），这样提示词里说「红线」时指代唯一。
         </div>
       </div>
 
@@ -634,6 +741,15 @@
         </label>
       </div>
       <div class="tip">照片只会发送到你自己配置的接口地址，本应用不做任何上传。</div>
+
+      <!-- ============ 帮助 ============ -->
+      <div class="st-group">帮助</div>
+      <div class="st-card">
+        <button class="st-row st-row-btn" id="btn-tutorial2">
+          <span class="st-label">新手教程 <i class="st-desc-inline">重新看一遍</i></span>
+          <svg class="st-arrow" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
+        </button>
+      </div>
 
       <!-- ============ 关于 ============ -->
       <div class="st-group">关于</div>

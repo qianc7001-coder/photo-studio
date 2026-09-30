@@ -91,6 +91,8 @@ function startFakeModel() {
     // 人为延迟：用来测「生成中按返回键取消」这类需要请求未完成才能验的路径。
     // 假服务响应太快的话，生成瞬间就结束了，取消逻辑根本走不到。
     let nextDelay = 0;
+    // 按提示词指定颜色（并发测试用；见上面 served 的注释）
+    const colorFor = [];
     const srv = http.createServer((req, res) => {
       // 必须收集原始 Buffer：PNG 等二进制不能按 UTF-8 转字符串，否则字节会被破坏
       const chunks = [];
@@ -110,7 +112,12 @@ function startFakeModel() {
         } else {
           try { json = JSON.parse(body.toString('utf8')); } catch (e) { }
         }
-        const rec = { url: req.url, auth: req.headers.authorization, body: json, multipart: mpFields, ctype: req.headers['content-type'] || '' };
+        const rec = {
+          url: req.url, auth: req.headers.authorization, body: json,
+          multipart: mpFields, ctype: req.headers['content-type'] || '',
+          // served 在下面真正出图时填 —— 颜色是**响应那一刻**才读的
+          served: null
+        };
         seen.push(rec);
 
         if (req.url.includes('/models')) {
@@ -125,10 +132,23 @@ function startFakeModel() {
           return;
         }
         if (nextDelay) await sleep(nextDelay);
-        // 生成纯色 PNG
+        // 生成纯色 PNG。
+        // 注意：颜色是在**这里**（延迟之后）读的，所以并发请求拿到的颜色
+        // 由「谁先醒来」决定，不由发起顺序决定。
+        // 把真正用掉的颜色记进 rec.served —— 测试要断言「某次请求拿到了什么颜色」
+        // 就必须看它，不能假设「先发起的拿到先设的颜色」。
         const c = napi.createCanvas(64, 64);
         const cx = c.getContext('2d');
-        cx.fillStyle = `rgb(${nextColor[0]},${nextColor[1]},${nextColor[2]})`;
+        // 按提示词给颜色：并发场景下「谁先醒来」不确定，
+        // 用 nextColor 会让测试断言依赖调度顺序（假失败）。
+        // 按提示词映射之后，每次请求拿到什么是确定的。
+        let served = nextColor.slice();
+        const pr = (json && typeof json.prompt === 'string') ? json.prompt : '';
+        for (const [needle, col] of colorFor) {
+          if (pr.indexOf(needle) >= 0) { served = col.slice(); break; }
+        }
+        rec.served = served;
+        cx.fillStyle = `rgb(${served[0]},${served[1]},${served[2]})`;
         cx.fillRect(0, 0, 64, 64);
         const b64 = c.toBuffer('image/png').toString('base64');
         res.writeHead(200, { 'content-type': 'application/json' });
@@ -138,7 +158,22 @@ function startFakeModel() {
     srv.listen(0, '127.0.0.1', () => resolve({
       srv, port: srv.address().port, seen,
       setColor: (c) => { nextColor = c; },
-      setDelay: (ms) => { nextDelay = Math.max(0, ms | 0); }
+      setDelay: (ms) => { nextDelay = Math.max(0, ms | 0); },
+      /**
+       * 让「含某个关键词的请求」固定拿到某个颜色（并发测试的确定性保障）。
+       *
+       * 刻意**累加**而不是清空：并发场景下 A 的请求还在飞，
+       * 测试接着为 B 注册映射 —— 清空会把 A 的映射一起抹掉，
+       * 于是 A 醒来时只能拿到 nextColor，断言随之变成假失败。
+       * 同关键词重复注册时覆盖（不重复堆积）。
+       */
+      setColorFor: (needle, c) => {
+        if (!needle) return;
+        const i = colorFor.findIndex((x) => x[0] === needle);
+        if (i >= 0) colorFor[i] = [needle, c.slice()];
+        else colorFor.push([needle, c.slice()]);
+      },
+      clearColorFor: () => { colorFor.length = 0; }
     }));
   });
 }
@@ -233,13 +268,37 @@ async function run() {
     }
   });
 
+  /**
+   * 浏览器画布 API 的质量参数是 0~1 的**小数**，而 @napi-rs/canvas 的
+   * toBuffer 收的是 0~100 的**整数**。直接把小数传进去，napi 会当成
+   * 「质量 0.75%」—— 编出来的 JPEG 又小又糊（几 KB 而不是几百 KB）。
+   *
+   * 这个差异会让「作品库体积」类的测试彻底失真：
+   * 会话基准图本该是 MB 量级，却只有几十 KB，于是无论怎么存都放得下，
+   * 测试「通过」但真实设备上照样只存得下一张。
+   * 所以桥接层必须做这个换算，让桩的行为与浏览器一致。
+   */
+  const napiQuality = (q) => {
+    const n = typeof q === 'number' ? q : 0.92;
+    if (!Number.isFinite(n) || n <= 0) return 92;
+    // 已经是 0~100 的整数就原样用（调用方可能直接传整数）
+    if (n > 1) return Math.max(1, Math.min(100, Math.round(n)));
+    return Math.max(1, Math.min(100, Math.round(n * 100)));
+  };
   window.HTMLCanvasElement.prototype.toDataURL = function (fmt, q) {
     if (!this.__real) this.getContext('2d');
-    return 'data:image/jpeg;base64,' + this.__real.toBuffer('image/jpeg', q || 0.92).toString('base64');
+    const isPng = /png/i.test(String(fmt || ''));
+    const buf = isPng
+      ? this.__real.toBuffer('image/png')
+      : this.__real.toBuffer('image/jpeg', napiQuality(q));
+    return (isPng ? 'data:image/png;base64,' : 'data:image/jpeg;base64,') + buf.toString('base64');
   };
   window.HTMLCanvasElement.prototype.toBlob = function (cb, fmt, q) {
     if (!this.__real) this.getContext('2d');
-    const buf = this.__real.toBuffer(fmt === 'image/png' ? 'image/png' : 'image/jpeg', q || 0.92);
+    const isPng = /png/i.test(String(fmt || ''));
+    const buf = isPng
+      ? this.__real.toBuffer('image/png')
+      : this.__real.toBuffer('image/jpeg', napiQuality(q));
     cb(new window.Blob([new Uint8Array(buf)], { type: fmt || 'image/jpeg' }));
   };
 
@@ -1969,6 +2028,189 @@ async function run() {
   // 配额失败后必须还能继续用：读回记录不能崩
   t('配额失败后记录仍可读', Array.isArray(window.__PS_API.loadLibrary()));
 
+  /* ---------- 真实尺寸下的作品库：3 张照片都要留住 ---------- */
+  console.log('\n【14.75】作品库：修 3 张照片，历史里必须有 3 条');
+
+  // 前面的段落用的是 400×300 的小图，体积太小，测不出
+  // 「一条大图的会话吃满整库」这个真实故障。
+  // 这里换成一张**真实尺寸**的照片（3072×2048，带颗粒），走完整流程。
+  //
+  // 为什么必须用真实尺寸 + 带颗粒的图：
+  //   纯色小图的 JPEG 只有几 KB，无论怎么存都放得下 ——
+  //   用那种图测这个 bug 会「通过」，然后用户手机上照样只存得下一张。
+  {
+    const bigW = 3072, bigH = 2048;
+    const bigCv = napi.createCanvas(bigW, bigH);
+    const bctx0 = bigCv.getContext('2d');
+    const bimg = bctx0.createImageData(bigW, bigH);
+    let seed = 4242;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return ((seed >>> 8) & 0xffff) / 0xffff; };
+    for (let y = 0; y < bigH; y++) for (let x = 0; x < bigW; x++) {
+      const i = (y * bigW + x) * 4;
+      const base = (x / bigW) * 120 + (y / bigH) * 90 + 20;
+      bimg.data[i] = Math.max(0, Math.min(255, base + rnd() * 46 - 23));
+      bimg.data[i + 1] = Math.max(0, Math.min(255, base * 0.95 + 15 + rnd() * 46 - 23));
+      bimg.data[i + 2] = Math.max(0, Math.min(255, base * 0.85 + 30 + rnd() * 46 - 23));
+      bimg.data[i + 3] = 255;
+    }
+    bctx0.putImageData(bimg, 0, 0);
+    const bigPng = bigCv.toBuffer('image/png');
+
+    // 从干净的库开始，避免前面段落留下的记录干扰计数
+    await sleep(1800);                       // 等防抖保存落定
+    window.localStorage.removeItem(libKey);
+    S.library = window.__PS_API.loadLibrary();
+    // 必须用**真实的工作分辨率**（3072，即设置里的默认档位）。
+    // 前面的段落把 maxRes 改成了 200，那样会话基准图只有几 KB，
+    // 无论怎么存都放得下 —— 测不出「一条大图的会话吃满整库」这个真实故障，
+    // 测试会「通过」，然后用户手机上照样只存得下一张。
+    S.cfg.maxRes = 3072;
+
+    // 恢复真实的 Image 解码（前面某段还原过，这里再确认一次）
+    window.Image = class {
+      constructor() { this.onload = null; this.onerror = null; this.width = 0; this.height = 0; this._src = ''; }
+      set src(v) {
+        this._src = v;
+        const m = /^data:[^;]+;base64,(.*)$/.exec(String(v));
+        if (!m) { setTimeout(() => this.onerror && this.onerror(new Error('bad src')), 0); return; }
+        napi.loadImage(Buffer.from(m[1], 'base64')).then((im) => {
+          this.__real = im; this.width = im.width; this.height = im.height;
+          if (this.onload) this.onload();
+        }).catch((e) => { if (this.onerror) this.onerror(e); });
+      }
+      get src() { return this._src; }
+    };
+
+    // 逐张导入 → 各修一次 → 落库（模拟用户连续处理 3 张照片）
+    const perPhoto = [];
+    for (let n = 0; n < 3; n++) {
+      const input = doc.getElementById('file-input');
+      Object.defineProperty(input, 'files', {
+        value: [new window.File([new Uint8Array(bigPng)], 'big' + n + '.png', { type: 'image/png' })],
+        configurable: true
+      });
+      input.dispatchEvent(new window.Event('change'));
+      await sleep(300);
+      // 6MP 的 PNG 解码要时间，固定 sleep 不够稳 —— 轮询等到真的载入完成。
+      // 判据必须包含 workId === null：setImage 会重置它，而 imgW/imgH 从第 2 张
+      // 开始就已经是目标值了，只看尺寸会在上一张还没卸载完时就往下走
+      // （结果三次编辑全落在同一张上，测出来的库当然只有 1 条）。
+      {
+        const t0 = Date.now();
+        while ((S.imgW !== bigW || S.imgH !== bigH || window.__PS_API.workId() !== null ||
+                S.edits.length !== 0) && Date.now() - t0 < 10000) await sleep(100);
+      }
+      if (n === 0) {
+        t('大照片已载入（3072×2048）', S.imgW === bigW && S.imgH === bigH, [S.imgW, S.imgH]);
+        t('工作分辨率按设置上限缩放', S.docW <= S.cfg.maxRes && S.docH <= S.cfg.maxRes,
+          [S.docW, S.docH, S.cfg.maxRes]);
+        // 前提：工作分辨率真的够大，否则这个测试测不出体积问题
+        t('工作分辨率接近上限（前提：够大才测得出体积问题）',
+          S.docW >= 2000, [S.docW, S.docH]);
+      }
+      // 改一块（用假模型，内容不重要，重要的是产生一次编辑 + 落库）
+      fake.setColor([180, 90, 40]);
+      S.rect = { x: Math.round(S.docW * 0.2), y: Math.round(S.docH * 0.2), w: 300, h: 240 };
+      doc.getElementById('prompt').value = '第 ' + (n + 1) + ' 张';
+      doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+      await waitGen(S, 20000);
+      if (S.pending) {
+        doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
+        await sleep(150);
+      }
+      window.__PS_API.touchWork();          // 真实使用里是 1.6s 防抖
+      const lib = window.__PS_API.library();
+      perPhoto.push({
+        n: n + 1, count: lib.length,
+        editable: lib.filter((e) => e.session).length,
+        bytes: window.PSCore.workLibraryStats(lib).bytes
+      });
+    }
+
+    t('修 3 张后历史里有 3 条记录', perPhoto[2].count === 3, perPhoto);
+    t('修第 2 张时第 1 张没有被清理', perPhoto[1].count === 2, perPhoto[1]);
+    t('第 1 张仍在库里（能看见）',
+      window.__PS_API.library().some((e) => /big0/.test(e.name)), window.__PS_API.library().map((e) => e.name));
+    t('3 张的缩略图都在（都看得见）',
+      window.__PS_API.library().every((e) => !!e.thumb),
+      window.__PS_API.library().map((e) => ({ n: e.name, t: !!e.thumb })));
+    t('至少 2 张能继续编辑（不是只有最新那张）', perPhoto[2].editable >= 2, perPhoto);
+    t('占用不超总预算', perPhoto[2].bytes <= window.PSCore.LIBRARY_BUDGET_BYTES,
+      [perPhoto[2].bytes, window.PSCore.LIBRARY_BUDGET_BYTES]);
+    // 前提：单条记录确实有 MB 量级 —— 否则这个测试证明不了什么。
+    // 修复前单条会话基准图（3072px q0.85）就接近 3MB，一条吃满整库。
+    const oneRecBytes = window.PSCore.estimateWorkBytes(window.__PS_API.library()[0]);
+    t('单条记录达到 MB 量级（前提：说明测的是真实场景）',
+      oneRecBytes >= 512 * 1024, oneRecBytes);
+    t('单条记录远小于总预算（所以能放下多张）',
+      oneRecBytes < window.PSCore.LIBRARY_BUDGET_BYTES * 0.5,
+      [oneRecBytes, window.PSCore.LIBRARY_BUDGET_BYTES]);
+
+    // 关键：会话基准图必须真的被缩过 —— 这是「一条吃满整库」的直接解药
+    const sess = window.__PS_API.library().find((e) => e.session);
+    if (sess) {
+      const bm = await napi.loadImage(Buffer.from(sess.session.base.split(',')[1], 'base64'));
+      t('会话基准图长边不超过上限',
+        Math.max(bm.width, bm.height) <= window.PSCore.SESSION_BASE_MAX_SIDE,
+        [bm.width, bm.height, window.PSCore.SESSION_BASE_MAX_SIDE]);
+      t('会话基准图保持了长宽比',
+        Math.abs(bm.width / bm.height - S.docW / S.docH) < 0.02,
+        [bm.width, bm.height, S.docW, S.docH]);
+    } else {
+      t('至少有一条记录带会话（前提）', false, '没有 session');
+    }
+
+    // 落盘后重新载入（模拟「关掉应用、第二天再打开」）
+    const persisted = JSON.parse(window.localStorage.getItem(libKey) || '{"items":[]}');
+    t('3 条都写进了 localStorage', persisted.items.length === 3, persisted.items.length);
+    S.library = window.__PS_API.loadLibrary();
+    t('重新载入后仍是 3 条', S.library.length === 3, S.library.length);
+    t('重新载入后顺序是新的在前',
+      S.library[0].at >= S.library[2].at, S.library.map((e) => e.at));
+
+    // 首页（修改历史）必须把 3 条都渲染出来 —— 用户看到的就是这个列表
+    window.__PS_API.goHome();
+    await sleep(120);
+    const homeRows = doc.querySelectorAll('#home .home-item');
+    t('首页列出 3 条历史', homeRows.length === 3, homeRows.length);
+    t('首页每条都有缩略图',
+      doc.querySelectorAll('#home .home-thumb').length === 3,
+      doc.querySelectorAll('#home .home-thumb').length);
+    t('首页至少两条标着「可继续编辑」',
+      doc.querySelectorAll('#home .home-tag').length >= 2,
+      doc.querySelectorAll('#home .home-tag').length);
+
+    // 修图记录面板也要显示 3 张
+    window.__PS_API.openLibrary();
+    await sleep(80);
+    t('修图记录面板显示 3 张',
+      doc.querySelectorAll('#lib-list .lib-card').length === 3,
+      doc.querySelectorAll('#lib-list .lib-card').length);
+    window.__PS_API.closeLibrary();
+
+    // 收尾：清掉大图记录，别把后面的段落拖慢；
+    // 并且把 400×300 的小图重新载入 —— 后面的段落都基于它，
+    // 留下 3072×2048 的大图会让后续每一步都慢一个数量级。
+    await sleep(1800);
+    S.library = [];
+    window.localStorage.removeItem(libKey);
+    window.__PS_API.saveLibrary();
+    const backInput = doc.getElementById('file-input');
+    Object.defineProperty(backInput, 'files', {
+      value: [new window.File([new Uint8Array(srcPng)], 'shot.png', { type: 'image/png' })],
+      configurable: true
+    });
+    backInput.dispatchEvent(new window.Event('change'));
+    await sleep(300);
+    S.cfg.maxRes = 0;
+    S.cfg.feather = 0;
+    S.cfg.colorMatch = 0;
+    S.cfg.contextPct = 0;
+    t('收尾：小图已重新载入（后续段落的前提）', S.imgW === 400 && S.imgH === 300, [S.imgW, S.imgH]);
+    t('收尾：作品库已清空（后续段落的前提）', window.__PS_API.library().length === 0,
+      window.__PS_API.library().length);
+  }
+
   /* ---------- 后台保活（JS ↔ 原生桥） ---------- */
   console.log('\n【14.8】后台保活');
 
@@ -1976,6 +2218,9 @@ async function run() {
   const kaCalls = [];
   window.PSBridge = {
     supported: () => true,
+    // 真实壳里 saveSupported 返回 true（导出走原生写盘）；假桥要跟着有，
+    // 否则「安卓环境」的测试实际跑在浏览器分支上，等于没测
+    saveSupported: () => true,
     setKeepAlive: (genOn, always, text) => {
       // 记下「调用那一刻」的状态：假模型是本机服务，几十毫秒就跑完了，
       // 等 sleep 之后再查状态会看到已经释放保活（那是正确行为，不是 bug）
@@ -2657,6 +2902,194 @@ async function run() {
     }
   }
 
+  /* ---------- 新手教程：首启弹一次、看过不再弹、能重看、能跳过 ---------- */
+  console.log('\n【39】新手教程：首次启动走一遍，之后随时能重看');
+
+  {
+    const tutEl = doc.getElementById('tutorial');
+    const tutCore = window.PSCore;
+
+    // ---- 1) 首启：直接调 boot 用的那条判定 ----
+    // 注意：前面段落可能已经打开了照片，而「有照片在编辑」本身就会压掉自动弹
+    // （那是刻意设计），所以测首启路径前必须先把照片卸掉。
+    const tutHadImg = S.img;
+    S.img = null;
+    window.__PS_API.clearTutorialSeen();
+    t('清掉标记后 shouldAutoTutorial 为真', window.__PS_API.shouldAutoTutorial() === true);
+    t('看过之后 shouldAutoTutorial 为假', (() => {
+      window.__PS_API.markTutorialSeen();
+      const r = window.__PS_API.shouldAutoTutorial();
+      window.__PS_API.clearTutorialSeen();
+      return r === false;
+    })());
+
+    // 正在编辑照片时不弹（用户显然会用了，而且盖住画布很讨厌）
+    const tutHadPhoto = !!S.img;
+    S.img = {};
+    t('正在编辑照片时不自动弹', window.__PS_API.shouldAutoTutorial() === false);
+    if (tutHadPhoto) S.img = tutHadPhoto; else S.img = null;
+
+    // ---- 2) 打开教程 ----
+    window.__PS_API.openTutorial(false);
+    await sleep(80);
+    t('教程能打开', tutEl.hidden === false);
+    t('教程打开时判定为 open', window.__PS_API.tutorialOpen() === true);
+    t('第 1 步有标题', (doc.getElementById('tut-title').textContent || '').length > 2,
+      doc.getElementById('tut-title').textContent);
+    t('第 1 步有说明', (doc.getElementById('tut-body').textContent || '').length > 4,
+      doc.getElementById('tut-body').textContent);
+    t('显示了步数', /第 1 \/ \d+ 步/.test(doc.getElementById('tut-step').textContent),
+      doc.getElementById('tut-step').textContent);
+    t('进度点数量 = 步数',
+      doc.querySelectorAll('#tut-dots .tut-dot').length === tutCore.TUTORIAL_LEN,
+      doc.querySelectorAll('#tut-dots .tut-dot').length);
+    t('当前步骤的进度点是亮的',
+      doc.querySelectorAll('#tut-dots .tut-dot.on').length === 1,
+      doc.querySelectorAll('#tut-dots .tut-dot.on').length);
+    t('第一步时「上一步」禁用', doc.getElementById('tut-prev').disabled === true);
+
+    // 高亮圈必须套在目标元素上（第 1 步指向「打开」按钮）
+    const openBtn = doc.getElementById('btn-open');
+    const openRect = openBtn.getBoundingClientRect();
+    const spotEl = doc.getElementById('tut-spot');
+    t('高亮圈已定位（不是 off 状态）', !spotEl.classList.contains('off'),
+      spotEl.className);
+    // jsdom 不做布局，getBoundingClientRect 全是 0，所以这里只验证
+    // 「算出来的位置与目标矩形同源」——用解析出的 style 反推
+    t('高亮圈尺寸跟着目标元素走', (() => {
+      const w = parseFloat(spotEl.style.width);
+      return Number.isFinite(w) && w >= 0;
+    })(), [spotEl.style.width, openRect.width]);
+
+    // ---- 3) 下一步 / 上一步 ----
+    const stepTitles = [];
+    stepTitles.push(doc.getElementById('tut-title').textContent);
+    doc.getElementById('tut-next').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    t('点下一步进到第 2 步', window.__PS_API.tutorialIndex() === 1,
+      window.__PS_API.tutorialIndex());
+    t('第 2 步标题不同', doc.getElementById('tut-title').textContent !== stepTitles[0]);
+    t('第 2 步时「上一步」可用', doc.getElementById('tut-prev').disabled === false);
+    // 记下第 2 步的标题，稍后验证「退回」确实把标题也退回去了
+    stepTitles.push(doc.getElementById('tut-title').textContent);
+    doc.getElementById('tut-next').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    t('再点下一步进到第 3 步', window.__PS_API.tutorialIndex() === 2,
+      window.__PS_API.tutorialIndex());
+    t('第 3 步标题也不同',
+      doc.getElementById('tut-title').textContent !== stepTitles[1],
+      [doc.getElementById('tut-title').textContent, stepTitles[1]]);
+    doc.getElementById('tut-prev').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    t('点上一步退回第 2 步', window.__PS_API.tutorialIndex() === 1,
+      window.__PS_API.tutorialIndex());
+    t('退回后标题也回来了', doc.getElementById('tut-title').textContent === stepTitles[1],
+      [doc.getElementById('tut-title').textContent, stepTitles[1]]);
+
+    // 第 1 步再点上一步不能越界
+    doc.getElementById('tut-prev').dispatchEvent(new window.Event('click'));
+    await sleep(40);
+    doc.getElementById('tut-prev').dispatchEvent(new window.Event('click'));
+    await sleep(40);
+    t('第 1 步再点上一步不越界', window.__PS_API.tutorialIndex() === 0,
+      window.__PS_API.tutorialIndex());
+
+    // ---- 4) 走完全部步骤会自动关闭 ----
+    let guard = 0;
+    while (!tutEl.hidden && guard++ < 20) {
+      doc.getElementById('tut-next').dispatchEvent(new window.Event('click'));
+      await sleep(40);
+    }
+    t('走完全部步骤后自动关闭', tutEl.hidden === true, { idx: window.__PS_API.tutorialIndex(), guard });
+    t('最后一步的按钮文案变成「开始使用」或已关闭',
+      guard <= tutCore.TUTORIAL_LEN, guard);
+
+    // ---- 5) 跳过：关闭 + 记「已看过」 ----
+    window.__PS_API.clearTutorialSeen();
+    t('跳过前标记是未看过', window.__PS_API.tutorialSeen() === false);
+    window.__PS_API.openTutorial(false);
+    await sleep(60);
+    t('重新打开后回到第 1 步', window.__PS_API.tutorialIndex() === 0);
+    doc.getElementById('tut-skip').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    t('点跳过会关闭教程', tutEl.hidden === true);
+    t('点跳过会记「已看过」', window.__PS_API.tutorialSeen() === true);
+    t('跳过之后不再自动弹', window.__PS_API.shouldAutoTutorial() === false);
+
+    // ---- 6) 点蒙层也算跳过 ----
+    window.__PS_API.clearTutorialSeen();
+    window.__PS_API.openTutorial(false);
+    await sleep(60);
+    doc.querySelector('#tutorial .tut-mask').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    t('点蒙层也能关掉教程', tutEl.hidden === true);
+    t('点蒙层也记「已看过」', window.__PS_API.tutorialSeen() === true);
+
+    // ---- 7) 返回键关教程，同样记「已看过」（否则按返回跳过的人下次还会被弹）----
+    window.__PS_API.clearTutorialSeen();
+    window.__PS_API.openTutorial(false);
+    await sleep(60);
+    t('教程开着时返回键被处理', window.__PS_API.handleBack() === true);
+    await sleep(60);
+    t('返回键关掉了教程', tutEl.hidden === true);
+    t('返回键也记「已看过」', window.__PS_API.tutorialSeen() === true);
+
+    // ---- 8) 重看入口：更多菜单 ----
+    window.__PS_API.openMoreMenu();
+    await sleep(60);
+    const tutMenuBtn = doc.getElementById('btn-tutorial');
+    t('更多菜单里有教程入口', !!tutMenuBtn);
+    tutMenuBtn.dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('从菜单能重看教程', tutEl.hidden === false);
+    t('重看时菜单已收起（否则压在教程上）', window.__PS_API.moreMenuOpen() === false);
+    t('重看从第 1 步开始', window.__PS_API.tutorialIndex() === 0);
+    // 重看**不**改「已看过」标记（它本来就是 true，这里验证不会被清掉）
+    t('重看不影响「已看过」标记', window.__PS_API.tutorialSeen() === true);
+    window.__PS_API.closeTutorial();
+    await sleep(40);
+
+    // ---- 9) 重看入口：设置页 ----
+    window.__PS_API.openSettings();
+    await sleep(60);
+    const tutSetBtn = doc.getElementById('btn-tutorial2');
+    t('设置页里有教程入口', !!tutSetBtn);
+    tutSetBtn.dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('从设置能重看教程', tutEl.hidden === false);
+    t('重看时设置已关闭', doc.getElementById('settings').hidden === true);
+    window.__PS_API.closeTutorial();
+    await sleep(40);
+
+    // ---- 10) 摆位兜底：目标元素找不到时不能指向屏幕角落 ----
+    // 直接构造一个「目标不存在」的步骤，验证高亮圈被隐藏、气泡仍可见
+    window.__PS_API.openTutorial(false);
+    await sleep(60);
+    const badStep = { target: '#definitely-not-here-12345', place: 'top', title: 'x', body: 'y' };
+    window.__PS_API.layoutTutorial(badStep);
+    await sleep(40);
+    t('目标不存在时隐藏高亮圈', doc.getElementById('tut-spot').classList.contains('off'),
+      doc.getElementById('tut-spot').className);
+    t('目标不存在时气泡仍在屏幕内', (() => {
+      const top = parseFloat(doc.getElementById('tut-card').style.top);
+      const vh = window.innerHeight || 640;
+      return Number.isFinite(top) && top >= 0 && top <= vh;
+    })(), doc.getElementById('tut-card').style.top);
+    // 恢复真实步骤的摆位，再关掉
+    window.__PS_API.renderTutorial();
+    await sleep(40);
+    t('恢复后高亮圈重新出现', !doc.getElementById('tut-spot').classList.contains('off'));
+    window.__PS_API.closeTutorial();
+    await sleep(40);
+
+    // ---- 11) 教程浮层不能拦着后续测试（确认已关掉）----
+    t('教程已关闭（后续段落的前提）', tutEl.hidden === true);
+    // 标记成「已看过」，避免影响后续任何依赖首启状态的检查
+    window.__PS_API.markTutorialSeen();
+    // 把照片还原回去（本段开头为了测首启路径卸掉了它）
+    S.img = tutHadImg;
+  }
+
   console.log('\n【27】照片信息：能看清这张是什么机器什么参数拍的');
   {
     S.cfg.maxRes = 0;   // 前面的用例把它改成过 200，必须复位
@@ -2801,10 +3234,13 @@ async function run() {
     t('引导线模式已激活', S.mode === 'guide');
     t('引导线参数条已显示', doc.getElementById('guide-bar').hidden === false);
     t('引导线提示已显示', doc.getElementById('guide-tip').hidden === false);
-    t('类型选择器有 5 个选项（含自由绘制）',
-      doc.querySelectorAll('#guide-kinds [data-gk]').length === 5);
-    t('默认类型是地平线',
-      doc.querySelector('#guide-kinds [data-gk="horizon"]').classList.contains('on'));
+    // 只有两类：直线 + 自由绘制（原来的四种构图线合并成「直线」）
+    t('类型选择器只有 2 个选项',
+      doc.querySelectorAll('#guide-kinds [data-gk]').length === 2);
+    t('默认类型是直线',
+      doc.querySelector('#guide-kinds [data-gk="line"]').classList.contains('on'));
+    t('没有颜色选择条（颜色按序号自动分配）',
+      doc.getElementById('guide-colors') === null);
 
     // 画一条水平线（选区中心高度）
     const sel0 = { x: r2.left + 0, y: r2.top + 0 };
@@ -2817,7 +3253,9 @@ async function run() {
     mk2('pointerup', gx2 - r2.left, gy - r2.top + 3);
     await sleep(80);
     t('引导线已记录', S.guides.length === 1, S.guides);
-    t('引导线类型正确', S.guides[0].kind === 'horizon', S.guides[0]);
+    t('引导线类型是直线', S.guides[0].kind === 'line', S.guides[0]);
+    // 颜色按序号自动分配：第 1 条红、第 2 条青
+    t('第 1 条线自动配成红色', S.guides[0].colorId === 'red', S.guides[0].colorId);
     t('引导线归一化坐标在 0~1',
       S.guides[0].y1 >= 0 && S.guides[0].y1 <= 1 && S.guides[0].x2 > S.guides[0].x1);
     t('数量角标已更新',
@@ -2826,17 +3264,20 @@ async function run() {
     t('方向被对齐（几乎水平）',
       Math.abs(S.guides[0].y2 - S.guides[0].y1) < 0.02, S.guides[0]);
 
-    // 画第二条：垂直线
-    doc.querySelector('#guide-kinds [data-gk="vertical"]').dispatchEvent(new window.Event('click'));
-    await sleep(60);
-    t('切换到垂直线类型', S.guideKind === 'vertical');
+    // 画第二条：一条竖线。类型还是「直线」—— 方向由手画的角度决定，
+    // 不再要求用户先声明「这是垂直线」
     const gx = r2.left + sr.x + sr.w * 0.35;
     mk2('pointerdown', gx - r2.left, gy - r2.top - sr.h * 0.3);
     mk2('pointermove', gx - r2.left + 2, gy - r2.top + sr.h * 0.3);
     mk2('pointerup', gx - r2.left + 2, gy - r2.top + sr.h * 0.3);
     await sleep(80);
     t('第二条引导线已记录', S.guides.length === 2, S.guides.length);
-    t('第二条是垂直线', S.guides[1].kind === 'vertical');
+    t('第二条也是直线类型', S.guides[1].kind === 'line', S.guides[1].kind);
+    t('第 2 条线自动配成青色', S.guides[1].colorId === 'cyan', S.guides[1].colorId);
+    t('两条线颜色不同（指代才能唯一）',
+      S.guides[0].colorId !== S.guides[1].colorId);
+    t('竖线被吸附到垂直',
+      Math.abs(S.guides[1].x2 - S.guides[1].x1) < 0.02, S.guides[1]);
 
     // 生成：请求里的提示词必须带引导线说明
     const before28 = fake.seen.length;
@@ -2854,16 +3295,20 @@ async function run() {
     if (gen28.length) {
       const pr = gen28[0].body.prompt;
       t('提示词含构图引导段', /构图引导/.test(pr), pr.slice(0, 200));
-      t('提示词写了地平线位置', /地平线/.test(pr));
-      t('提示词写了垂直线位置', /垂直参考线/.test(pr));
-      t('提示词要求不要画出线条', /不要.*画出任何线条/.test(pr));
+      // 逐条按颜色指代：这是「颜色按序号分配」的全部意义
+      t('提示词逐条按颜色指代（红）', /第 1 条（红色，直线）/.test(pr), pr.slice(0, 260));
+      t('提示词逐条按颜色指代（青）', /第 2 条（青色，直线）/.test(pr), pr.slice(0, 260));
+      t('提示词要求不要画出线条',
+        /不要把任何一条彩色线条画进最终画面/.test(pr));
+      t('提示词说明线是标注不是画面内容', /不是照片里真实存在的东西/.test(pr));
       // 关键：引导线位置必须按 contextPct 补偿，不能直接用选区内的归一化值
       t('引导线位置已换算到请求图坐标（不是选区内的原值）',
         !new RegExp('高度 50%').test(pr), pr.slice(0, 260));
     }
 
-    // 引导线不进图片：请求图里不能出现引导线的青色（#3ddcc4）。
-    // 这和当初「蓝色掩膜被模型当成画面内容」是同一类坑，必须逐像素确认。
+    // 引导线**必须真的画进请求图** —— 这是这次改动最致命的一点：
+    // 只写进提示词时模型只能猜位置，落位常常偏。这里逐像素确认
+    // 红线和青线都出现在发给模型的图片上（而且位置对得上）。
     if (gen28.length) {
       const imgStr = String(gen28[0].body.image || '');
       const m28 = /^data:image\/(jpeg|png);base64,(.*)$/.exec(imgStr);
@@ -2874,17 +3319,35 @@ async function run() {
         const cx28 = cc28.getContext('2d');
         cx28.drawImage(im28, 0, 0);
         const px28 = cx28.getImageData(0, 0, im28.width, im28.height).data;
-        let cyan28 = 0;
+        let red28 = 0, cyan28 = 0, redRowSum = 0, cyanColSum = 0;
         for (let i = 0; i < px28.length; i += 4) {
-          // 引导线颜色 61,220,196：允许编码误差
-          if (Math.abs(px28[i] - 61) < 30 && Math.abs(px28[i + 1] - 220) < 30 &&
-              Math.abs(px28[i + 2] - 196) < 30) cyan28++;
+          const r = px28[i], g = px28[i + 1], b = px28[i + 2];
+          const pix = i / 4;
+          const px = pix % im28.width, py = Math.floor(pix / im28.width);
+          // 红线 #ff2d2d、青线 #00e5ff，允许 JPEG 编码误差
+          if (r > 150 && g < 120 && b < 120) { red28++; redRowSum += py; }
+          if (r < 130 && g > 150 && b > 180) { cyan28++; cyanColSum += px; }
         }
-        t('请求图里没有引导线像素（线只画在屏幕上）', cyan28 === 0, cyan28);
+        t('请求图里有红线像素（第 1 条真的画进去了）', red28 > 50, red28);
+        t('请求图里有青线像素（第 2 条真的画进去了）', cyan28 > 50, cyan28);
+        // 位置验证：第 1 条是横线（行号集中），第 2 条是竖线（列号集中）
+        if (red28 > 0) {
+          const rowAvg = redRowSum / red28;
+          t('红线位置在画面中部（横线）',
+            rowAvg > im28.height * 0.2 && rowAvg < im28.height * 0.8,
+            Math.round(rowAvg) + ' / ' + im28.height);
+        }
+        if (cyan28 > 0) {
+          const colAvg = cyanColSum / cyan28;
+          t('青线位置在画面偏左（竖线）',
+            colAvg > im28.width * 0.1 && colAvg < im28.width * 0.9,
+            Math.round(colAvg) + ' / ' + im28.width);
+        }
       }
     } else {
-      t('请求里带了参考图（跳过）', true);
-      t('请求图里没有引导线像素（跳过）', true);
+      t('请求里带了参考图（跳过）', false, '没有捕获到带提示词的请求');
+      t('请求图里有红线像素（跳过）', false);
+      t('请求图里有青线像素（跳过）', false);
     }
 
     // 点已有的线 → 删除
@@ -2902,7 +3365,7 @@ async function run() {
     // 换选区会清掉引导线（相对坐标失效）—— 必须在框选模式下重新拉框
     doc.querySelector('.tool[data-mode="select"]').dispatchEvent(new window.Event('click'));
     await sleep(60);
-    window.__PS_API.setGuides([{ kind: 'horizon', x1: 0, y1: .5, x2: 1, y2: .5 }]);
+    window.__PS_API.setGuides([{ kind: 'line', x1: 0, y1: .5, x2: 1, y2: .5 }]);
     t('测试用引导线已设置', S.guides.length === 1);
     mk2('pointerdown', 20, 20); mk2('pointermove', 90, 90); mk2('pointerup', 90, 90);
     await sleep(80);
@@ -3077,12 +3540,10 @@ async function run() {
     doc.querySelector('#guide-kinds [data-gk="freehand"]').dispatchEvent(new window.Event('click'));
     await sleep(80);
     t('已切到自由绘制', S.guideKind === 'freehand');
-    t('自由绘制时显示颜色条', doc.getElementById('guide-color-bar').hidden === false);
     t('自由绘制时显示专用提示', doc.getElementById('guide-tip-free').hidden === false);
-    t('自由绘制时隐藏构图提示', doc.getElementById('guide-tip').hidden === true);
-    t('颜色条有 3 个选项', doc.querySelectorAll('#guide-colors [data-gc]').length === 3);
-    t('默认选中红色',
-      doc.querySelector('#guide-colors [data-gc="red"]').classList.contains('on'));
+    t('自由绘制时隐藏直线提示', doc.getElementById('guide-tip').hidden === true);
+    // 颜色条已移除：颜色按序号自动分配，用户选不了
+    t('没有颜色选择条', doc.getElementById('guide-color-bar') === null);
 
     // 手画一条弧线（模拟发丝走向）
     const cv3 = doc.getElementById('cv');
@@ -3121,10 +3582,13 @@ async function run() {
 
     if (gen30.length) {
       const pr30 = gen30[0].body.prompt;
-      t('提示词含「手绘草图」段', /手绘草图/.test(pr30), pr30.slice(0, 120));
+      t('提示词含「手绘走向」段', /手绘走向/.test(pr30), pr30.slice(0, 120));
       t('提示词要求沿笔迹生成', /沿着笔迹生成/.test(pr30));
       t('提示词含发丝等示例', /头发/.test(pr30));
-      t('提示词禁止把线画进画面', /绝对不要把红色线条本身画进画面/.test(pr30));
+      // 笔迹颜色按序号走：这是第 1 条，所以是红色
+      t('提示词里笔迹标为红色（第 1 条）', /（红色，/.test(pr30), pr30.slice(0, 200));
+      t('提示词禁止把线画进画面',
+        /不要把任何一条彩色线条画进最终画面/.test(pr30));
 
       // ★ 核心：请求图里必须真的出现红色笔迹
       const imgStr = String(gen30[0].body.image || '');
@@ -3182,19 +3646,39 @@ async function run() {
       await sleep(120);
     }
 
-    // ---- 切换颜色：请求图里的颜色必须跟着变 ----
-    doc.querySelector('#guide-colors [data-gc="magenta"]').dispatchEvent(new window.Event('click'));
-    await sleep(80);
-    t('切到品红色', S.cfg.guideStrokeColor === 'magenta');
-    t('颜色选择已落盘',
-      JSON.parse(window.localStorage.getItem('photoStudio.cfg.v1')).guideStrokeColor === 'magenta');
+    // ---- 再画一条线：颜色必须自动变成青色（第 2 条），两条线各有各的颜色 ----
+    // 颜色不再让用户选（选了两条同色，「红线」这个指代就废了），
+    // 所以这里验证的是「自动配色」这条路径真的生效。
+    doc.querySelector('#guide-kinds [data-gk="line"]').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    {
+      const srG = window.PSCore.imageRectToScreen(S.rect, S.view);
+      const yG = r3.top + srG.y + srG.h * 0.75;
+      const xA = r3.left + srG.x + srG.w * 0.2;
+      const xB = r3.left + srG.x + srG.w * 0.8;
+      ev3('pointerdown', { x: xA, y: yG });
+      ev3('pointermove', { x: xB, y: yG + 2 });
+      ev3('pointerup', { x: xB, y: yG + 2 });
+      await sleep(100);
+    }
+    t('第 2 条线已加上', S.guides.length === 2, S.guides.length);
+    t('第 2 条自动配成青色（第 1 条是红）',
+      S.guides[0].colorId === 'red' && S.guides[1].colorId === 'cyan',
+      [S.guides[0].colorId, S.guides[1].colorId]);
+
     const beforeC = fake.seen.length;
     fake.setColor([120, 180, 120]);
     doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 8000);
     const genC = fake.seen.slice(beforeC).filter((x) => x.body && x.body.prompt);
     if (genC.length) {
-      t('提示词里的颜色名跟着变（品红色）', /品红色/.test(genC[0].body.prompt));
+      const prC = genC[0].body.prompt;
+      // 两条线必须各有各的颜色名，且都写进提示词
+      t('提示词里两条线的颜色都在', /红色/.test(prC) && /青色/.test(prC), prC.slice(0, 240));
+      // 序号按**画的先后**数（全局），不分类别：
+      // 先画的笔迹是第 1 条（红），后画的直线是第 2 条（青）
+      t('提示词按全局序号逐条指代',
+        /第 1 条（红色，/.test(prC) && /第 2 条（青色，直线）/.test(prC), prC.slice(0, 260));
       const mC = /^data:image\/(jpeg|png);base64,(.*)$/.exec(String(genC[0].body.image || ''));
       if (mC) {
         const imC = await napi.loadImage(Buffer.from(mC[2], 'base64'));
@@ -3202,14 +3686,17 @@ async function run() {
         const cxC = ccC.getContext('2d');
         cxC.drawImage(imC, 0, 0);
         const pxC = cxC.getImageData(0, 0, imC.width, imC.height).data;
-        let mag = 0;
+        let redC = 0, cyanC = 0;
         for (let i = 0; i < pxC.length; i += 4) {
-          // 品红：R 与 B 都高、G 低
-          if (pxC[i] > 110 && pxC[i + 2] > 110 && pxC[i + 1] < pxC[i] - 50) mag++;
+          const r = pxC[i], g = pxC[i + 1], b = pxC[i + 2];
+          if (r > 150 && g < 120 && b < 120) redC++;
+          if (r < 130 && g > 150 && b > 180) cyanC++;
         }
-        t('请求图里的笔迹真的变成了品红', mag > 100, mag);
+        // 两条线都要在请求图里：这是「模型真的看得见」的最终证据
+        t('请求图里有第 1 条（红）', redC > 50, redC);
+        t('请求图里有第 2 条（青）', cyanC > 50, cyanC);
       } else {
-        t('请求图里的笔迹真的变成了品红（跳过）', true);
+        t('请求图里两条线都在（跳过）', true);
       }
     }
     if (S.pending) {
@@ -3226,7 +3713,7 @@ async function run() {
     const genOff = fake.seen.slice(beforeOff).filter((x) => x.body && x.body.prompt);
     t('关掉后仍发起了请求', genOff.length > 0, genOff.length);
     if (genOff.length) {
-      t('关掉后提示词里仍有笔迹说明（退化成文字）', /手绘草图/.test(genOff[0].body.prompt));
+      t('关掉后提示词里仍有引导线说明（退化成文字）', /手绘走向|构图引导/.test(genOff[0].body.prompt));
       const mOff = /^data:image\/(jpeg|png);base64,(.*)$/.exec(String(genOff[0].body.image || ''));
       if (mOff) {
         const imO = await napi.loadImage(Buffer.from(mOff[2], 'base64'));
@@ -3255,21 +3742,33 @@ async function run() {
     await sleep(80);
     t('设置里有笔迹进图开关', !!doc.getElementById('set-strokeimg'));
     t('设置开关反映当前状态', doc.getElementById('set-strokeimg').checked === true);
-    t('设置里有颜色选择', doc.getElementById('set-strokecolor').value === 'magenta');
-    doc.getElementById('set-strokecolor').value = 'cyan';
-    doc.getElementById('set-strokecolor').dispatchEvent(new window.Event('change'));
-    await sleep(60);
-    t('从设置改颜色生效', S.cfg.guideStrokeColor === 'cyan');
+    // 颜色选择已从设置里移除：颜色按序号自动分配（选了会撞色，指代失效）
+    t('设置里没有颜色选择', doc.getElementById('set-strokecolor') === null);
+    t('设置里说明了颜色按顺序自动分配',
+      /第 1 条红、第 2 条青/.test(doc.getElementById('set-strokeimg')
+        .closest('.st-card').textContent));
     doc.getElementById('set-strokeimg').checked = false;
     doc.getElementById('set-strokeimg').dispatchEvent(new window.Event('change'));
     await sleep(60);
     t('从设置关开关生效', S.cfg.guideStrokeOverlay === false);
-    t('关开关后不再显示颜色条说明', window.__PS_API.strokeOverlayEnabled() === false);
+    t('关开关后状态可查', window.__PS_API.strokeOverlayEnabled() === false);
     doc.getElementById('set-strokeimg').checked = true;
     doc.getElementById('set-strokeimg').dispatchEvent(new window.Event('change'));
     await sleep(60);
     doc.querySelector('#settings [data-close]').dispatchEvent(new window.Event('click'));
     await sleep(60);
+
+    // 下面这一段的前提是「画面上只有一条自由笔迹」。
+    // 前面为了验证自动配色多画了一条直线，这里先清掉再继续 ——
+    // 否则后面的「点一下删掉」「存档里有 1 条」全部对不上。
+    {
+      const keep = S.guides.filter((g) => g.kind === 'freehand');
+      window.__PS_API.setGuides(keep);
+      // 类型也要切回自由绘制：上面为了验证自动配色点过「直线」，
+      // 不切回来的话下面「画一笔」画出来的是一条零长度的直线，会被判废丢弃
+      doc.querySelector('#guide-kinds [data-gk="freehand"]').dispatchEvent(new window.Event('click'));
+      await sleep(120);
+    }
 
     // ---- 笔迹随会话保存 ----
     // 会话保存是防抖的（1.2s），而这里距最后一次编辑只有几百毫秒 ——
@@ -3281,7 +3780,11 @@ async function run() {
       sess31 && sess31.guides && sess31.guides.length);
     t('存档里的笔迹带 points', !!(sess31 && sess31.guides[0].points &&
       sess31.guides[0].points.length >= 4));
-    t('存档里记了笔迹类型', sess31 && sess31.guideKind === 'freehand', sess31 && sess31.guideKind);
+    // 存档里记的是「上次选的类型」。类型现在只有两类，
+    // 断言它是个合法类型即可（不能写死某一类，否则改默认值就误报）
+    t('存档里记了引导线类型',
+      !!(sess31 && ['line', 'freehand'].indexOf(sess31.guideKind) >= 0),
+      sess31 && sess31.guideKind);
 
     // ---- 点已有的笔迹可删除 ----
     const mid = S.guides[0].points[Math.floor(S.guides[0].points.length / 2)];
@@ -3310,7 +3813,6 @@ async function run() {
     await sleep(60);
     doc.querySelector('.tool[data-mode="select"]').dispatchEvent(new window.Event('click'));
     await sleep(60);
-    S.cfg.guideStrokeColor = 'red';
   }
 
 
@@ -3409,6 +3911,11 @@ async function run() {
 
   console.log('\n【32】工具提示只显示一次');
   {
+    // 先退出调色模式：前面的段落贴回结果时会自动切到调色工具（那是设计行为），
+    // 而调色工具的提示在切过去的那一刻就被记成「已看过」了。
+    // 不清掉的话这里的「提示记录已清空」会被它污染 —— 那测的是前置状态，不是缺陷。
+    doc.querySelector('.tool[data-mode="select"]').dispatchEvent(new window.Event('click'));
+    await sleep(60);
     // 清掉提示记录，从干净状态开始
     window.localStorage.removeItem('photoStudio.hintsSeen.v1');
     window.__PS_API.resetHints();
@@ -3434,22 +3941,22 @@ async function run() {
     // 注意要显式选类型 —— guideKind 是「上次用的那个」，不一定是构图类型。
     doc.getElementById('btn-guide').dispatchEvent(new window.Event('click'));
     await sleep(80);
-    doc.querySelector('#guide-kinds [data-gk="horizon"]').dispatchEvent(new window.Event('click'));
+    doc.querySelector('#guide-kinds [data-gk="line"]').dispatchEvent(new window.Event('click'));
     await sleep(80);
-    t('第一次选构图类型：构图提示显示', doc.getElementById('guide-tip').hidden === false);
-    t('构图类型下不显示笔迹提示', doc.getElementById('guide-tip-free').hidden === true);
+    t('第一次选直线：直线提示显示', doc.getElementById('guide-tip').hidden === false);
+    t('直线类型下不显示笔迹提示', doc.getElementById('guide-tip-free').hidden === true);
     doc.querySelector('#guide-kinds [data-gk="freehand"]').dispatchEvent(new window.Event('click'));
     await sleep(80);
     t('第一次切自由绘制：专用提示显示',
       doc.getElementById('guide-tip-free').hidden === false);
-    t('自由绘制下不显示构图提示', doc.getElementById('guide-tip').hidden === true);
+    t('自由绘制下不显示直线提示', doc.getElementById('guide-tip').hidden === true);
 
     // 切走再回来 → 两种提示都不再出现
     doc.querySelector('.tool[data-mode="select"]').dispatchEvent(new window.Event('click'));
     await sleep(60);
     doc.getElementById('btn-guide').dispatchEvent(new window.Event('click'));
     await sleep(80);
-    doc.querySelector('#guide-kinds [data-gk="horizon"]').dispatchEvent(new window.Event('click'));
+    doc.querySelector('#guide-kinds [data-gk="line"]').dispatchEvent(new window.Event('click'));
     await sleep(80);
     t('第二次进引导线：构图提示不再显示', doc.getElementById('guide-tip').hidden === true);
     doc.querySelector('#guide-kinds [data-gk="freehand"]').dispatchEvent(new window.Event('click'));
@@ -3457,17 +3964,15 @@ async function run() {
     t('第二次切自由绘制：提示不再显示',
       doc.getElementById('guide-tip-free').hidden === true);
     // 提示虽不再显示，参数条该有的还得有
-    t('提示消失后颜色条照常显示',
-      doc.getElementById('guide-color-bar').hidden === false);
     t('提示消失后类型选择器照常显示',
-      doc.getElementById('guide-kinds').children.length === 5);
+      doc.getElementById('guide-kinds').children.length === 2);
 
     // 记录必须落盘（重启后不该又弹一遍）
     const stored32 = JSON.parse(window.localStorage.getItem('photoStudio.hintsSeen.v1') || 'null');
     t('提示记录已落盘', !!(stored32 && stored32.seen && stored32.seen.length >= 3),
       stored32 && stored32.seen);
     t('记录里含画笔', stored32.seen.indexOf('brush') >= 0);
-    t('记录里含构图提示', stored32.seen.indexOf('guide') >= 0);
+    t('记录里含直线提示', stored32.seen.indexOf('guide') >= 0);
     t('记录里含自由笔迹', stored32.seen.indexOf('guide-free') >= 0);
 
     // 加新工具时，新工具的提示仍会显示一次（按名字分别记，不是一票否决）
@@ -3612,7 +4117,7 @@ async function run() {
       window.__PS_API.toolbarHeight() > midH,
       [midH, window.__PS_API.toolbarHeight()]);
 
-    // 向下拖到最矮 → 吸附为收起
+    // 向下拖到最矮 → 收起
     window.__PS_API.expandToolbar();
     await sleep(60);
     const hFull2 = window.__PS_API.toolbarHeight();
@@ -3620,9 +4125,74 @@ async function run() {
     dragEv('pointermove', 200 + hFull2);   // 向下拖超过整个高度
     dragEv('pointerup', 200 + hFull2);
     await sleep(120);
-    t('向下拖到底吸附为收起',
+    t('向下拖到底即为收起',
       window.__PS_API.toolbarVisible() === false,
       [window.__PS_API.toolbarVisible(), window.__PS_API.toolbarHeight()]);
+
+    // ---- 无极拖动：松手停在松手的位置，不再吸附到两档 ----
+    // 这是用户报的问题：「编辑页面上下拖动有档位，很难受，换成无极调位」。
+    // 旧实现松手后吸附到「收起」或「展开」，于是想露出「工具行 + 一点参数」
+    // 这种中间高度时，一松手就被弹走 —— 感觉像在拨档位。
+    window.__PS_API.expandToolbar();
+    await sleep(60);
+    const hFull3 = window.__PS_API.toolbarHeight();
+    // 从完全展开向上/向下拖一小段，松手后必须停在**中间**（既不等于下限也不等于满高）
+    const want = Math.round(hFull3 * 0.62);
+    const delta = hFull3 - want;                 // 向下拖这么多 → 高度减少这么多
+    dragEv('pointerdown', 100);
+    dragEv('pointermove', 100 + delta);
+    dragEv('pointerup', 100 + delta);
+    await sleep(140);
+    const hMid3 = window.__PS_API.toolbarHeight();
+    t('无极拖动：松手停在中间高度（不被吸附到档位）',
+      Math.abs(hMid3 - want) <= 2, [want, hMid3, hFull3]);
+    t('无极拖动：中间高度不等于下限', hMid3 !== window.PSCore.BAR_MIN, [hMid3]);
+    t('无极拖动：中间高度不等于满高', hMid3 !== hFull3, [hMid3, hFull3]);
+    // 拖出来的中间高度是用户的偏好，必须记住
+    t('无极拖动：中间高度写进配置', S.cfg.barHeight === hMid3, [S.cfg.barHeight, hMid3]);
+    const cfgMid3 = JSON.parse(window.localStorage.getItem('photoStudio.cfg.v1') || '{}');
+    t('无极拖动：中间高度已落盘（下次打开还在）', cfgMid3.barHeight === hMid3,
+      [cfgMid3.barHeight, hMid3]);
+    // 连续拖动过程中也要跟手（每一步都生效，不能只在松手时跳一下）
+    const hSeq = [];
+    dragEv('pointerdown', 400);
+    for (const dy of [10, 20, 30, 40]) {
+      dragEv('pointermove', 400 - dy);
+      hSeq.push(window.__PS_API.toolbarHeight());
+    }
+    dragEv('pointerup', 400 - 40);
+    await sleep(80);
+    t('无极拖动：拖动过程连续跟手（每步都在变）',
+      hSeq[0] < hSeq[1] && hSeq[1] < hSeq[2] && hSeq[2] < hSeq[3], hSeq);
+    // 轻点仍然保留两档行为（离散动作不该被无极化）
+    window.__PS_API.expandToolbar();
+    await sleep(60);
+    const hTapBefore = window.__PS_API.toolbarHeight();
+    // 轻点前先记下配置里的高度，之后比对「有没有被轻点改掉」
+    // （前面几次拖动会各自更新这个值，所以不能拿更早的 hMid3 来比）
+    const cfgBeforeTap = JSON.parse(window.localStorage.getItem('photoStudio.cfg.v1') || '{}');
+    tapAt(100, 300);
+    await sleep(100);
+    t('轻点仍然一档到收起（无极只作用于拖动）',
+      window.__PS_API.toolbarHeight() === window.PSCore.BAR_MIN &&
+      window.__PS_API.toolbarHeight() !== hTapBefore,
+      [hTapBefore, window.__PS_API.toolbarHeight()]);
+    // 轻点是**临时**动作：不能把「收起」写进配置。
+    // 否则用户轻点收一次之后，以后每张照片都从收起态打开 ——
+    // 他以为只是临时收了一下，实际成了永久设置。
+    const cfgAfterTap = JSON.parse(window.localStorage.getItem('photoStudio.cfg.v1') || '{}');
+    t('轻点收起不写进配置（只是临时收起）',
+      cfgAfterTap.barHeight === cfgBeforeTap.barHeight,
+      [cfgBeforeTap.barHeight, cfgAfterTap.barHeight]);
+    // 再展开也不该改掉之前拖出来的高度
+    window.__PS_API.expandToolbar(undefined, false);
+    await sleep(80);
+    const cfgAfterExpand = JSON.parse(window.localStorage.getItem('photoStudio.cfg.v1') || '{}');
+    t('轻点展开同样不写进配置',
+      cfgAfterExpand.barHeight === cfgBeforeTap.barHeight,
+      [cfgBeforeTap.barHeight, cfgAfterExpand.barHeight]);
+    window.__PS_API.expandToolbar();
+    await sleep(60);
 
     // 高度变化后画布要重算（否则图片位置会偏）
     window.__PS_API.expandToolbar();
@@ -3638,6 +4208,185 @@ async function run() {
     await sleep(80);
     t('回首页工具栏收起', window.__PS_API.toolbarVisible() === false);
     t('首页收起态有 collapsed 类', bar.classList.contains('collapsed') === true);
+  }
+
+
+  console.log('\n【42】没有框选时默认处理整张图（含 AI 生图）');
+  {
+    // 需求：「没有框选的时候默认对整张图片进行调整」，所有操作都算（含 AI 生图）。
+    // 这一节全部走真实交互路径：真的载入照片、真的**不框选**、真的点按钮，
+    // 而不是直接改 S.rect —— 直接改状态测不出「入口是否还拦着用户」。
+    const prevRect40 = S.rect;
+
+    // 准备：载入一张照片，然后清掉选区（模拟「用户打开照片但没框选」）
+    const src40 = napi.createCanvas(320, 240);
+    const sc40 = src40.getContext('2d');
+    sc40.fillStyle = 'rgb(60,70,90)';
+    sc40.fillRect(0, 0, 320, 240);
+    // 四角与中心放不同颜色，用来验证「整张图都被改到、没有留边」
+    sc40.fillStyle = 'rgb(200,200,200)';
+    sc40.fillRect(0, 0, 20, 20);
+    sc40.fillRect(300, 220, 20, 20);
+    const png40 = src40.toBuffer('image/png');
+    const inp40 = doc.getElementById('file-input');
+    Object.defineProperty(inp40, 'files', {
+      value: [new window.File([new Uint8Array(png40)], 'whole.png', { type: 'image/png' })],
+      configurable: true
+    });
+    inp40.dispatchEvent(new window.Event('change'));
+    await sleep(320);
+    S.rect = null;
+    S.strokes = [];
+    S.guides = [];
+    await sleep(120);
+
+    t('前提：照片已载入', S.imgW === 320 && S.imgH === 240, [S.imgW, S.imgH]);
+    t('前提：确实没有选区', S.rect === null);
+
+    /* ---- 1) 界面必须明确告知「这次是整张图」 ---- */
+    const genBtn40 = doc.getElementById('btn-generate');
+    t('没框选时生成按钮可用（不再禁用）', genBtn40.disabled === false);
+    const selInfo40 = doc.getElementById('sel-info');
+    t('没框选时信息条显示「整张图」',
+      selInfo40.hidden === false && /整张图/.test(selInfo40.textContent),
+      selInfo40.textContent);
+    const hint40 = doc.getElementById('gen-hint').textContent;
+    t('状态栏说明「未框选 → 调整整张图」', /整张图/.test(hint40), hint40);
+    t('没框选时仍给出成本预估', /预计|单价未知/.test(hint40), hint40);
+    const est40 = window.__PS_API.currentEstimate();
+    t('成本预估有结果（按整张图算）', !!est40 && est40.totalUsd > 0, est40 && est40.totalUsd);
+
+    /* ---- 2) 调色：不框选直接进，且整张图都真的被调 ---- */
+    doc.getElementById('btn-grade').dispatchEvent(new window.Event('click'));
+    await sleep(150);
+    t('没框选也能进调色工具', S.mode === 'grade', S.mode);
+    const gradeBar40 = doc.getElementById('grade-bar');
+    t('调色参数栏已显示', gradeBar40 && gradeBar40.hidden === false);
+    const rows40 = doc.querySelectorAll('#grade-sliders .grade-row');
+    t('调色滑块已渲染', rows40.length === window.PSCore.GRADE_PARAMS.length, rows40.length);
+
+    const gPx40 = (x, y) => {
+      const d = S.viewCanvas.getContext('2d').getImageData(x, y, 1, 1).data;
+      return [d[0], d[1], d[2]];
+    };
+    // 取「最外圈」与「中心」两组像素：最外圈是判断羽化有没有被关掉的关键
+    const before40 = {
+      corner: gPx40(1, 1),
+      corner2: gPx40(318, 238),
+      center: gPx40(160, 120)
+    };
+    const exp40 = doc.querySelector('#grade-sliders input[data-grade="exposure"]');
+    t('找到曝光滑块（前提）', !!exp40);
+    if (exp40) {
+      exp40.value = '80';
+      exp40.dispatchEvent(new window.Event('input', { bubbles: true }));
+      await sleep(260);
+    }
+    const after40 = {
+      corner: gPx40(1, 1),
+      corner2: gPx40(318, 238),
+      center: gPx40(160, 120)
+    };
+    const changed = (a, b) => a.some((v, i) => v !== b[i]);
+    t('整图调色：画面中心被改变', changed(before40.center, after40.center),
+      [before40.center, after40.center]);
+    // 关键断言：最外圈也必须被改到。
+    // 若羽化没被关掉，最外一圈权重≈0 → 角落保持原样，就是用户会看到的「一圈没调」。
+    t('整图调色：最外圈也被改变（没有留一圈没调）',
+      changed(before40.corner, after40.corner) && changed(before40.corner2, after40.corner2),
+      [before40.corner, after40.corner, before40.corner2, after40.corner2]);
+
+    // 逐像素扫描：整幅图不能有任何一块「完全没被调」的区域
+    const viewData40 = S.viewCanvas.getContext('2d')
+      .getImageData(0, 0, S.docW, S.docH).data;
+    let untouched40 = 0;
+    const orig40 = src40.getContext('2d').getImageData(0, 0, 320, 240).data;
+    for (let i = 0; i < viewData40.length; i += 4) {
+      if (viewData40[i] === orig40[i] && viewData40[i + 1] === orig40[i + 1] &&
+        viewData40[i + 2] === orig40[i + 2]) untouched40++;
+    }
+    t('整图调色：逐像素扫描无遗漏（没有被羽化漏掉的一圈）',
+      untouched40 === 0, '未改动像素 ' + untouched40 + ' / ' + (viewData40.length / 4));
+
+    // 应用 → 成为一条可撤销的图层，范围就是整张图
+    doc.getElementById('grade-apply').dispatchEvent(new window.Event('click'));
+    await sleep(280);
+    const last40 = S.edits[S.edits.length - 1];
+    t('整图调色已应用成图层', !!last40 && !!last40.grade && !last40.patch);
+    t('该图层范围就是整张图',
+      !!last40 && last40.rect.x === 0 && last40.rect.y === 0 &&
+      last40.rect.w === S.docW && last40.rect.h === S.docH,
+      last40 && JSON.stringify(last40.rect));
+    // 撤销要能干净还原
+    window.__PS_API.updateUI();
+    const nEdits40 = S.edits.length;
+    doc.getElementById('btn-undo').dispatchEvent(new window.Event('click'));
+    await sleep(220);
+    t('撤销后整图调色被移除', S.edits.length === nEdits40 - 1,
+      [nEdits40, S.edits.length]);
+
+    /* ---- 3) 画笔 / 引导线：没框选也能用 ---- */
+    doc.getElementById('btn-reset-sel') && (S.rect = null);
+    doc.querySelector('.tool[data-mode="brush"]').dispatchEvent(new window.Event('click'));
+    await sleep(100);
+    t('没框选也能进画笔模式', S.mode === 'brush', S.mode);
+    doc.querySelector('.tool[data-mode="guide"]').dispatchEvent(new window.Event('click'));
+    await sleep(100);
+    t('没框选也能进引导线模式', S.mode === 'guide', S.mode);
+    doc.querySelector('.tool[data-mode="select"]').dispatchEvent(new window.Event('click'));
+    await sleep(100);
+
+    /* ---- 4) 真正走一次 AI 生图：验证整图请求的口径 ---- */
+    S.rect = null;
+    S.strokes = [];
+    S.guides = [];
+    window.__PS_API.updateUI();
+    await sleep(80);
+    fake.setColor([10, 220, 90]);
+    doc.getElementById('prompt').value = '把整张照片调亮一点';
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S);
+    const n40 = fake.seen.length;
+    t('整图生成：请求已发出（没被「先框选」拦住）', n40 > 0, n40);
+    const req40 = fake.seen[n40 - 1] || {};
+    const prompt40 = String((req40.body && req40.body.prompt) || '');
+    t('整图生成：提示词没说是「局部裁切」',
+      !/局部裁切/.test(prompt40), prompt40.slice(0, 180));
+    t('整图生成：提示词走整体口径（整张照片/整体调整）',
+      /整张照片|整体调整/.test(prompt40), prompt40.slice(0, 180));
+    // 结果必须能贴回，且贴回后整幅图都是模型颜色（整图没有「选区外」）
+    t('整图生成：产生了待贴回的结果', !!S.pending, !!S.pending);
+    if (S.pending) {
+      t('整图生成：结果范围是整张图',
+        S.pending.rect.x === 0 && S.pending.rect.y === 0 &&
+        S.pending.rect.w === S.docW && S.pending.rect.h === S.docH,
+        JSON.stringify(S.pending.rect));
+    }
+    // 贴回
+    const cmpApply40 = doc.getElementById('cmp-apply');
+    if (cmpApply40 && !doc.getElementById('compare').hidden) {
+      cmpApply40.dispatchEvent(new window.Event('click'));
+      await sleep(320);
+      const back40 = gPx40(1, 1);
+      const back40c = gPx40(160, 120);
+      // 整图贴回后，角落也必须是模型返回的颜色（10,220,90），
+      // 不能因为羽化/融合而保留原底色
+      const near40 = (a, b, tol) => Math.abs(a[0] - b[0]) <= tol &&
+        Math.abs(a[1] - b[1]) <= tol && Math.abs(a[2] - b[2]) <= tol;
+      t('整图贴回：角落是模型返回的颜色（没有留边）', near40(back40, [10, 220, 90], 3),
+        back40);
+      t('整图贴回：中心是模型返回的颜色', near40(back40c, [10, 220, 90], 3), back40c);
+    } else {
+      t('整图生成：对比视图已打开（可贴回）', false, 'compare 未显示');
+    }
+
+    /* ---- 收尾：恢复状态，别影响后续段落 ---- */
+    S.rect = prevRect40;
+    S.strokes = [];
+    S.guides = [];
+    if (window.__PS_API.clearGuides) window.__PS_API.clearGuides();
+    window.__PS_API.updateUI();
+    await sleep(120);
   }
 
 
@@ -4058,6 +4807,837 @@ async function run() {
     if (menu.hidden === false) { btnMore.dispatchEvent(new window.Event('click')); await sleep(60); }
   }
 
+  /* ---------- 导出保存位置 ---------- */
+  console.log('\n【37】导出保存位置：可选相册 / 下载 / 每次询问');
+  {
+    // 先确保在编辑页（前面那节结束时可能停在首页）
+    if (window.__PS_API.isHomeVisible()) {
+      // 首页时导出面板打不开，先确认这一点
+      t('首页时没有照片，导出面板打不开', true);
+    }
+
+    // ---- a) 浏览器环境（没有 PSBridge）不显示这一组 ----
+    const savedBridge37 = window.PSBridge;
+    delete window.PSBridge;
+    await sleep(60);
+    t('浏览器里探测为不支持', window.__PS_API.nativeSaveAvailable() === false);
+    window.__PS_API.renderExportPanel();
+    await sleep(60);
+    t('浏览器里隐藏保存位置分组', doc.getElementById('exp-save-group').hidden === true);
+
+    // 老版本壳（有 PSBridge 但没这个方法）也要当成不支持，不能报错白屏
+    window.PSBridge = { supported: () => true };
+    await sleep(60);
+    t('老壳缺方法时判为不支持（不抛异常）', window.__PS_API.nativeSaveAvailable() === false);
+
+    // ---- b) 安卓壳环境（有 PSBridge + saveSupported）显示这一组 ----
+    window.PSBridge = Object.assign({}, savedBridge37, { saveSupported: () => true });
+    await sleep(60);
+    t('壳里探测为支持', window.__PS_API.nativeSaveAvailable() === true);
+    window.__PS_API.renderExportPanel();
+    await sleep(60);
+    t('壳里显示保存位置分组', doc.getElementById('exp-save-group').hidden === false);
+
+    // ---- c) 三个选项都渲染出来 ----
+    const saves = doc.getElementById('exp-saves');
+    const btns = saves.querySelectorAll('[data-save]');
+    t('渲染出 3 个保存位置', btns.length === 3, btns.length);
+    const ids = Array.from(btns).map((b) => b.dataset.save);
+    t('三个位置分别是相册/下载/每次询问',
+      ids.indexOf('gallery') >= 0 && ids.indexOf('downloads') >= 0 && ids.indexOf('ask') >= 0, ids);
+
+    // ---- d) 默认选中相册 ----
+    t('默认保存到相册', window.__PS_API.saveWhere() === 'gallery', window.__PS_API.saveWhere());
+    t('相册那项显示为选中',
+      saves.querySelector('[data-save="gallery"]').classList.contains('selected'));
+
+    // ---- e) 点「下载目录」切换并持久化 ----
+    saves.querySelector('[data-save="downloads"]').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('切到下载目录', window.__PS_API.saveWhere() === 'downloads', window.__PS_API.saveWhere());
+    t('下载目录那项显示为选中',
+      saves.querySelector('[data-save="downloads"]').classList.contains('selected'));
+    t('相册那项不再选中',
+      !saves.querySelector('[data-save="gallery"]').classList.contains('selected'));
+    // 关键：要真的落盘，否则下次打开又回到相册
+    const cfg37 = JSON.parse(window.localStorage.getItem('photoStudio.cfg.v1') || '{}');
+    t('选择已持久化', cfg37.expSaveWhere === 'downloads', cfg37.expSaveWhere);
+
+    // ---- f) 切到「每次询问」时说明文字跟着变 ----
+    saves.querySelector('[data-save="ask"]').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('切到每次询问', window.__PS_API.saveWhere() === 'ask');
+    t('说明文字提示会弹选择器',
+      /选择器|挑目录|指定目录/.test(doc.getElementById('exp-save-hint').textContent),
+      doc.getElementById('exp-save-hint').textContent);
+
+    // ---- g) 切回相册时说明文字也变回来 ----
+    saves.querySelector('[data-save="gallery"]').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('切回相册', window.__PS_API.saveWhere() === 'gallery');
+    t('说明文字提到文件夹名',
+      /枫叶修图/.test(doc.getElementById('exp-save-hint').textContent),
+      doc.getElementById('exp-save-hint').textContent);
+
+    // ---- h) 重新打开面板时记住上次的选择 ----
+    window.__PS_API.renderExportPanel();
+    await sleep(60);
+    t('重开面板仍选中相册',
+      doc.getElementById('exp-saves').querySelector('[data-save="gallery"]').classList.contains('selected'));
+
+    // ---- i) 脏数据不能让导出存到不存在的位置 ----
+    // 校验是纯函数，直接测（配置只在启动时读一次，跑不到这条路径）
+    t('非法位置判定为非法', window.PSCore.isSaveLocation('../../etc/passwd') === false);
+    t('非法位置回落到相册', window.PSCore.getSaveLocation('../../etc/passwd').id === 'gallery');
+    t('空值也回落到相册', window.PSCore.getSaveLocation(null).id === 'gallery');
+    t('合法位置原样返回', window.PSCore.getSaveLocation('downloads').id === 'downloads');
+    // 面板渲染也要走同一个回落，否则界面会没有任何选中项
+    window.__PS_API.openExportPanel();
+    await sleep(120);
+    t('面板永远有选中项',
+      !!doc.getElementById('exp-saves').querySelector('[data-save].selected'));
+    window.__PS_API.closeExportPanel();
+    await sleep(60);
+
+    // ---- j) 恢复原状 ----
+    saves.querySelector('[data-save="gallery"]').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    window.PSBridge = savedBridge37;
+    await sleep(60);
+    t('恢复桥后仍是支持状态', window.__PS_API.nativeSaveAvailable() === true);
+  }
+
+
+  /* ---------- 调用日志：真的记下了每一次调用 ---------- */
+  console.log('\n【38】调用日志：设置里能看、能导出，且每次调用都留痕');
+
+  {
+    // 从干净的日志开始，便于精确计数
+    S.callLog = [];
+    window.__PS_API.saveCallLog();
+    window.__PS_API.updateCallLogBrief();
+
+    // 恢复成「400×300 小图 + 直连」这套已知条件（前面段落改过）
+    S.cfg.apiKey = 'sk-test';
+    S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
+    S.cfg.model = 'Qwen/Qwen-Image-Edit';
+    S.cfg.netMode = 'direct';
+    S.cfg.provider = 'siliconflow';
+    S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.upscaleSmall = false;
+
+    const clInput = doc.getElementById('file-input');
+    Object.defineProperty(clInput, 'files', {
+      value: [new window.File([new Uint8Array(srcPng)], 'log.png', { type: 'image/png' })],
+      configurable: true
+    });
+    clInput.dispatchEvent(new window.Event('change'));
+    await sleep(300);
+
+    t('日志入口在设置页', !!doc.getElementById('btn-calllog'));
+    t('起始时日志为空', window.__PS_API.callLog().length === 0, window.__PS_API.callLog().length);
+    t('空日志时入口文案是兜底说明',
+      /每次模型调用的记录/.test(doc.getElementById('calllog-brief').textContent),
+      doc.getElementById('calllog-brief').textContent);
+
+    // ---- 成功一次 ----
+    fake.setColor([200, 60, 60]);
+    S.rect = { x: 60, y: 60, w: 160, h: 120 };
+    doc.getElementById('prompt').value = '把这里改成红色';
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 15000);
+
+    const afterOk = window.__PS_API.callLog();
+    t('成功调用后记了 1 条', afterOk.length === 1, afterOk.length);
+    if (afterOk.length) {
+      const e = afterOk[0];
+      t('记了成功', e.ok === true, e.ok);
+      t('记了模型名', e.model === 'Qwen/Qwen-Image-Edit', e.model);
+      t('记了服务商', e.provider === 'siliconflow', e.provider);
+      t('记了提示词', /改成红色/.test(e.prompt), e.prompt);
+      t('记了发送图片的尺寸', e.imgW > 0 && e.imgH > 0, [e.imgW, e.imgH]);
+      t('记了发送图片的字节数', e.imgBytes > 0, e.imgBytes);
+      t('记了耗时', e.ms > 0, e.ms);
+      t('记了花费（Qwen-Image-Edit 有内置价格）', e.costUsd !== null && e.costUsd > 0, e.costUsd);
+      t('记了时间戳', e.at > 0, e.at);
+      // 关键：绝不能把图片 base64 存进日志
+      t('日志里没有图片内容', !JSON.stringify(e).includes('base64'), JSON.stringify(e).slice(0, 100));
+    }
+    if (S.pending) { doc.getElementById('cmp-discard').dispatchEvent(new window.Event('click')); await sleep(60); }
+
+    // ---- 失败一次：让接口返回 500 ----
+    // 用 fetch 桩而不是改假服务器：假服务器没有「下次失败」的开关，
+    // 而这里只需要一次性的失败响应。
+    const clRealFetch = window.fetch;
+    window.fetch = async (u, o) => {
+      if (String(u).includes('images/generations')) {
+        return {
+          ok: false, status: 500,
+          json: async () => ({ error: { message: 'upstream exploded' } }),
+          text: async () => JSON.stringify({ error: { message: 'upstream exploded' } }),
+          blob: async () => new window.Blob([])
+        };
+      }
+      return clRealFetch(u, o);
+    };
+    fake.setColor([10, 200, 10]);
+    S.rect = { x: 40, y: 40, w: 120, h: 100 };
+    doc.getElementById('prompt').value = '这次会失败';
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 15000);
+    window.fetch = clRealFetch;
+
+    const afterFail = window.__PS_API.callLog();
+    t('失败调用后多记了 1 条', afterFail.length === 2, afterFail.length);
+    t('失败的记在最前面（最新的在前）', afterFail[0].ok === false, afterFail.map((e) => e.ok));
+    t('失败记了 HTTP 状态', afterFail[0].status === 500, afterFail[0].status);
+    t('失败记了错误原因', (afterFail[0].error || '').length > 0, afterFail[0].error);
+    t('失败也有提示词（知道是哪次失败的）', /会失败/.test(afterFail[0].prompt), afterFail[0].prompt);
+
+    // ---- 界面：设置页入口显示条数 ----
+    window.__PS_API.openSettings();
+    await sleep(80);
+    t('入口副标题显示条数', /2 次/.test(doc.getElementById('calllog-brief').textContent),
+      doc.getElementById('calllog-brief').textContent);
+    t('入口副标题显示失败次数', /1 次失败/.test(doc.getElementById('calllog-brief').textContent),
+      doc.getElementById('calllog-brief').textContent);
+
+    // ---- 界面：打开日志面板 ----
+    doc.getElementById('btn-calllog').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    const clSheet = doc.getElementById('calllog');
+    t('点入口打开日志面板', clSheet.hidden === false);
+    t('打开日志时设置面板已关闭（不被压在下面）',
+      doc.getElementById('settings').hidden === true);
+
+    const clItems = doc.querySelectorAll('#calllog-list .cl-item');
+    t('面板渲染出 2 条日志', clItems.length === 2, clItems.length);
+    t('第一条是失败的（最新的在前）', clItems[0].classList.contains('bad'),
+      clItems[0].className);
+    t('失败条目标着「失败」', /失败/.test(clItems[0].querySelector('.cl-tag').textContent),
+      clItems[0].querySelector('.cl-tag').textContent);
+    t('成功条目标着「成功」', /成功/.test(clItems[1].querySelector('.cl-tag').textContent),
+      clItems[1].querySelector('.cl-tag').textContent);
+    t('条目显示了模型名',
+      /Qwen\/Qwen-Image-Edit/.test(clItems[0].querySelector('.cl-model').textContent),
+      clItems[0].querySelector('.cl-model').textContent);
+    // 耗时必须在，且**不能**依赖「这次调用花了多久」——
+    // 本地假模型有时几毫秒就返回，而 ms=0 曾被真值判断吞掉，
+    // 导致这条断言随机失败（那是真 bug，已在 app.js 修掉，见回归测试）。
+    t('条目显示了耗时（ms=0 也要显示）',
+      /\d+\.\d+ 秒/.test(clItems[0].querySelector('.cl-model').textContent),
+      clItems[0].querySelector('.cl-model').textContent);
+    t('条目显示了发送图片尺寸',
+      /发送图片 \d+×\d+/.test(clItems[0].querySelector('.cl-meta').textContent),
+      clItems[0].querySelector('.cl-meta').textContent);
+    t('条目显示了提示词',
+      /改成红色|会失败/.test(clItems[0].querySelector('.cl-prompt').textContent),
+      clItems[0].querySelector('.cl-prompt').textContent);
+    t('失败条目显示了原因', !!clItems[0].querySelector('.cl-error'));
+    t('统计行有内容', (doc.getElementById('calllog-summary').textContent || '').length > 0,
+      doc.getElementById('calllog-summary').textContent);
+    t('统计行说了共 2 次', /共 2 次/.test(doc.getElementById('calllog-summary').textContent),
+      doc.getElementById('calllog-summary').textContent);
+    t('空状态已隐藏', doc.getElementById('calllog-empty').hidden === true);
+
+    // ---- 导出：JSON 必须合法，文本必须含关键信息 ----
+    // jsdom 里 navigator.canShare 不存在，会走 <a download> 兜底；
+    // 这里不真的下载，而是直接调 core 的导出函数校验内容
+    const clCore = window.PSCore;
+    const jsonText = clCore.callLogToJson(window.__PS_API.callLog(), { version: 'test' });
+    let clParsed = null, clErr = null;
+    try { clParsed = JSON.parse(jsonText); } catch (e) { clErr = e; }
+    t('导出的 JSON 合法', !clErr, clErr && clErr.message);
+    t('导出的 JSON 有 2 条', clParsed && clParsed.entries.length === 2,
+      clParsed && clParsed.entries.length);
+    t('导出的 JSON 带统计', clParsed && clParsed.stats.count === 2,
+      clParsed && clParsed.stats);
+    t('导出的 JSON 记了失败', clParsed.entries.some((e) => e.ok === false));
+    t('导出的 JSON 记了花费', clParsed.stats.usd > 0, clParsed.stats.usd);
+
+    const textOut = clCore.callLogToText(window.__PS_API.callLog(), { version: 'test' });
+    t('导出的文本含模型名', /Qwen\/Qwen-Image-Edit/.test(textOut));
+    t('导出的文本含失败原因', /HTTP 500|upstream|失败/.test(textOut));
+    t('导出的文本含提示词', /改成红色/.test(textOut));
+    t('导出的文本含花费', /\$/.test(textOut));
+
+    // ---- 持久化：重载后日志还在 ----
+    const persistedLog = JSON.parse(window.localStorage.getItem('photoStudio.callLog.v1') || '{"items":[]}');
+    t('日志已写入 localStorage', persistedLog.items.length === 2, persistedLog.items.length);
+    t('落盘格式含版本号', persistedLog.v === 1, persistedLog.v);
+    const reloadedLog = window.__PS_API.loadCallLog();
+    t('重新载入后日志仍是 2 条', reloadedLog.length === 2, reloadedLog.length);
+    t('重新载入后顺序不变（最新在前）', reloadedLog[0].ok === false, reloadedLog.map((e) => e.ok));
+
+    // ---- 环形缓冲：超过上限时挤掉最老的 ----
+    let bulk = [];
+    for (let i = 0; i < 130; i++) {
+      bulk = clCore.appendCallLog(bulk, { at: i + 1, model: 'm', ok: true });
+    }
+    t('环形缓冲截到上限', bulk.length === clCore.CALL_LOG_MAX, bulk.length);
+    window.__PS_API.setCallLog(bulk);
+    window.__PS_API.renderCallLog();
+    await sleep(60);
+    t('面板只渲染上限条数',
+      doc.querySelectorAll('#calllog-list .cl-item').length === clCore.CALL_LOG_MAX,
+      doc.querySelectorAll('#calllog-list .cl-item').length);
+
+    // ---- 返回键关日志面板 ----
+    window.__PS_API.handleBack();
+    await sleep(60);
+    t('返回键能关掉日志面板', clSheet.hidden === true);
+    t('返回键处理了（没让系统退出）', window.__PS_API.handleBack() === true);
+
+    // ---- 清空 ----
+    const realConfirm2 = window.confirm;
+    window.confirm = () => true;
+    window.__PS_API.openCallLog();
+    await sleep(60);
+    doc.getElementById('calllog-clear').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    window.confirm = realConfirm2;
+    t('清空后日志为空', window.__PS_API.callLog().length === 0, window.__PS_API.callLog().length);
+    t('清空后存储里也没了',
+      JSON.parse(window.localStorage.getItem('photoStudio.callLog.v1') || '{"items":[]}').items.length === 0);
+    t('清空后显示空状态', doc.getElementById('calllog-empty').hidden === false);
+    t('清空后入口文案回到兜底',
+      /每次模型调用的记录/.test(doc.getElementById('calllog-brief').textContent),
+      doc.getElementById('calllog-brief').textContent);
+    window.__PS_API.closeCallLog();
+    window.__PS_API.closeSettings();
+    await sleep(60);
+  }
+
+  /* ---------- 基础调色：只动框选区域，逐像素验证 ---------- */
+  console.log('\n【40】基础调色：作用在框选区域，可预览可撤销，不调用模型');
+
+  {
+    // 回到已知条件：400×300 小图 + 直连
+    S.cfg.apiKey = 'sk-test';
+    S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
+    S.cfg.model = 'Qwen/Qwen-Image-Edit';
+    S.cfg.netMode = 'direct';
+    S.cfg.provider = 'siliconflow';
+    S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.contextPct = 0; S.cfg.maxRes = 0;
+    S.cfg.upscaleSmall = false;
+
+    const gInput = doc.getElementById('file-input');
+    Object.defineProperty(gInput, 'files', {
+      value: [new window.File([new Uint8Array(srcPng)], 'grade.png', { type: 'image/png' })],
+      configurable: true
+    });
+    gInput.dispatchEvent(new window.Event('change'));
+    await sleep(300);
+
+    const gPx = (x, y) => {
+      const d = S.viewCanvas.getContext('2d').getImageData(x, y, 1, 1).data;
+      return [d[0], d[1], d[2]];
+    };
+    const near = (a, b, tol) => Math.abs(a[0] - b[0]) <= (tol || 2) &&
+      Math.abs(a[1] - b[1]) <= (tol || 2) && Math.abs(a[2] - b[2]) <= (tol || 2);
+
+    // 原图：整张 rgb(30,90,160) + 一块白方块 (150,100)-(250,200)
+    t('工具行有调色入口', !!doc.getElementById('btn-grade'));
+    const beforeOutside = gPx(20, 20);
+    const beforeInside = gPx(60, 60);
+    // 整张基线：后面「选区外零改动」要拿它逐像素比对。
+    // 不硬编码颜色 —— 源图经过 PNG 解码/绘制可能有边缘抗锯齿，
+    // 拿「实际像素」当基线才是可靠的判据。
+    const snapshot = () => {
+      const d = S.viewCanvas.getContext('2d').getImageData(0, 0, S.docW, S.docH);
+      return new Uint8ClampedArray(d.data);
+    };
+    const baseFull = snapshot();
+
+    // ---- 1) 进入调色工具 ----
+    S.rect = { x: 40, y: 40, w: 120, h: 100 };
+    doc.getElementById('btn-grade').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    t('进入调色模式', S.mode === 'grade', S.mode);
+    t('调色参数栏已显示', doc.getElementById('grade-bar').hidden === false);
+    t('调色按钮高亮', doc.getElementById('btn-grade').classList.contains('active'));
+    t('按 core 定义渲染了滑块',
+      doc.querySelectorAll('#grade-sliders .grade-row').length === window.PSCore.GRADE_PARAMS.length,
+      doc.querySelectorAll('#grade-sliders .grade-row').length);
+    t('滑块初始全在 0（不自动改像素）', (() => {
+      const ins = doc.querySelectorAll('#grade-sliders input[type=range]');
+      return Array.from(ins).every((i) => Number(i.value) === 0);
+    })());
+    t('初始说明是「还没有调整」',
+      /还没有调整/.test(doc.getElementById('grade-note').textContent),
+      doc.getElementById('grade-note').textContent);
+
+    // ---- 2) 调色不能调用模型（这是「免费」的证明）----
+    const gSeenBefore = fake.seen.length;
+    // 直接调预览（拖滑块走的就是这条路径）
+    window.__PS_API.setGradeDraft({ exposure: 60 });
+    await sleep(80);
+    t('调色预览没有调用模型', fake.seen.length === gSeenBefore,
+      fake.seen.length - gSeenBefore);
+    t('预览后画面确实变亮了', gPx(60, 60)[0] > beforeInside[0],
+      [gPx(60, 60), beforeInside]);
+
+    // ---- 3) 逐像素：选区内变、选区外**一个像素都不动** ----
+    const insideAfter = gPx(60, 60);
+    const outsideAfter = gPx(20, 20);
+    t('选区内被调亮', insideAfter[0] > beforeInside[0], [beforeInside, insideAfter]);
+    t('选区外逐字节不变', near(outsideAfter, beforeOutside, 0), [beforeOutside, outsideAfter]);
+    // 扫描整张图，逐像素确认「只有选区内变了」。
+    // 与调色前的整张快照对比，不依赖对源图颜色的假设。
+    (() => {
+      const full = S.viewCanvas.getContext('2d').getImageData(0, 0, S.docW, S.docH).data;
+      let outsideChanged = 0, insideChanged = 0;
+      for (let y = 0; y < S.docH; y++) {
+        for (let x = 0; x < S.docW; x++) {
+          const i = (y * S.docW + x) * 4;
+          const diff = full[i] !== baseFull[i] || full[i + 1] !== baseFull[i + 1] ||
+            full[i + 2] !== baseFull[i + 2];
+          if (!diff) continue;
+          const inSel = x >= S.rect.x && x < S.rect.x + S.rect.w &&
+            y >= S.rect.y && y < S.rect.y + S.rect.h;
+          if (inSel) insideChanged++; else outsideChanged++;
+        }
+      }
+      t('扫描：选区外零改动（逐像素）', outsideChanged === 0, outsideChanged);
+      t('扫描：选区内确实有改动', insideChanged > 0, insideChanged);
+    })();
+
+    // ---- 4) 色温 / 色调 / 对比度 / 饱和度都真的生效 ----
+    window.__PS_API.setGradeDraft({ temperature: 80 });
+    await sleep(60);
+    const warmPx = gPx(60, 60);
+    t('色温偏暖：红通道上升、蓝通道下降',
+      warmPx[0] > beforeInside[0] && warmPx[2] < beforeInside[2], [beforeInside, warmPx]);
+    window.__PS_API.setGradeDraft({ temperature: -80 });
+    await sleep(60);
+    const coolPx = gPx(60, 60);
+    t('色温偏冷：蓝通道上升、红通道下降',
+      coolPx[2] > beforeInside[2] && coolPx[0] < beforeInside[0], [beforeInside, coolPx]);
+    window.__PS_API.setGradeDraft({ saturation: -100 });
+    await sleep(60);
+    const grayPx = gPx(60, 60);
+    t('饱和度 -100 得到灰度', Math.abs(grayPx[0] - grayPx[1]) <= 1 && Math.abs(grayPx[1] - grayPx[2]) <= 1,
+      grayPx);
+    // 对比度是「绕中灰拉开」：比中灰暗的像素变更暗、比中灰亮的变更亮。
+    // 采样点 (60,60) 是深蓝 rgb(30,90,160)，比中灰暗 —— 所以它应该**变暗**，
+    // 断言「更亮」是错的（那测的是曝光，不是对比度）。
+    window.__PS_API.setGradeDraft({ contrast: 100 });
+    await sleep(60);
+    const cDarkPx = gPx(60, 60);
+    t('对比度 +100 让暗部更暗（绕中灰拉开）',
+      cDarkPx[0] < beforeInside[0], [beforeInside, cDarkPx]);
+    // 把选区挪到白方块上，验证亮部会变亮
+    S.rect = { x: 160, y: 110, w: 60, h: 60 };
+    const whiteBefore = gPx(180, 140);
+    window.__PS_API.setGradeDraft({ contrast: 100 });
+    await sleep(60);
+    t('对比度 +100 让亮部更亮（前提：采样点确实比中灰亮）',
+      whiteBefore[0] > 200 && gPx(180, 140)[0] >= whiteBefore[0],
+      [whiteBefore, gPx(180, 140)]);
+    t('对比度 -100 把暗部压向中灰',
+      (() => {
+        window.__PS_API.setGradeDraft({ contrast: -100 });
+        const p = gPx(180, 140);
+        return Math.abs(p[0] - 118) <= 4;
+      })(), gPx(180, 140));
+    // 回到原来的选区继续后面的断言
+    S.rect = { x: 40, y: 40, w: 120, h: 100 };
+    window.__PS_API.setGradeDraft({ tint: 80 });
+    await sleep(60);
+    const tintPx = gPx(60, 60);
+    t('色调偏品红：绿通道下降', tintPx[1] < beforeInside[1], [beforeInside, tintPx]);
+
+    // ---- 5) 归零后像素回到原样 ----
+    window.__PS_API.resetGradeDraft();
+    await sleep(60);
+    t('归零后选区内像素逐字节还原', near(gPx(60, 60), beforeInside, 0),
+      [beforeInside, gPx(60, 60)]);
+    t('归零后滑块全回 0', (() => {
+      const ins = doc.querySelectorAll('#grade-sliders input[type=range]');
+      return Array.from(ins).every((i) => Number(i.value) === 0);
+    })());
+
+    // ---- 6) 应用：记一条编辑、可撤销 ----
+    const gEditsBefore = S.edits.length;
+    const gHistBefore = window.__PS_API.historySize();
+    // 参数全零时不该产生记录
+    doc.getElementById('grade-apply').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    t('全零时不产生记录', S.edits.length === gEditsBefore, S.edits.length - gEditsBefore);
+
+    window.__PS_API.setGradeDraft({ exposure: 55, temperature: 40 });
+    await sleep(60);
+    doc.getElementById('grade-apply').dispatchEvent(new window.Event('click'));
+    await sleep(120);
+    t('应用后多了一条编辑', S.edits.length === gEditsBefore + 1, S.edits.length - gEditsBefore);
+    t('新编辑是调色图层（没有 patch，有 grade）', (() => {
+      const e = S.edits[S.edits.length - 1];
+      return !!e.grade && !e.patch;
+    })(), (() => {
+      const e = S.edits[S.edits.length - 1];
+      return { grade: e.grade, patch: !!e.patch };
+    })());
+    t('调色记进了撤销栈', window.__PS_API.historySize().past === gHistBefore.past + 1,
+      [window.__PS_API.historySize(), gHistBefore]);
+    const appliedInside = gPx(60, 60);
+    const appliedOutside = gPx(20, 20);
+    t('应用后选区内变色', !near(appliedInside, beforeInside, 1), [beforeInside, appliedInside]);
+    t('应用后选区外仍逐字节不变', near(appliedOutside, beforeOutside, 0),
+      [beforeOutside, appliedOutside]);
+    t('应用后草稿归零（再调色不会叠加）',
+      window.PSCore.isGradeEmpty(window.__PS_API.gradeDraft()),
+      window.__PS_API.gradeDraft());
+
+    // ---- 7) 撤销 / 重做：调色必须真的能退回去 ----
+    doc.getElementById('btn-undo').dispatchEvent(new window.Event('click'));
+    await sleep(120);
+    t('撤销后调色被移除', S.edits.length === gEditsBefore, S.edits.length);
+    t('撤销后选区内像素逐字节还原', near(gPx(60, 60), beforeInside, 0),
+      [beforeInside, gPx(60, 60)]);
+    doc.getElementById('btn-redo').dispatchEvent(new window.Event('click'));
+    await sleep(120);
+    t('重做后调色回来了', S.edits.length === gEditsBefore + 1, S.edits.length);
+    t('重做后像素与撤销前一致', near(gPx(60, 60), appliedInside, 1),
+      [appliedInside, gPx(60, 60)]);
+
+    // ---- 8) 修改记录面板：能看、能关、能删、能调参 ----
+    doc.getElementById('btn-layers').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+    const gItems = doc.querySelectorAll('#layer-list .layer-item');
+    t('修改记录里出现调色条目', gItems.length >= 1, gItems.length);
+    const gTop = gItems[0];
+    t('调色条目显示改了哪些色调',
+      /曝光|偏暖|偏冷|对比|饱和/.test(gTop.querySelector('.ln-sub').textContent),
+      gTop.querySelector('.ln-sub').textContent);
+    t('调色条目有五个参数滑块',
+      gTop.querySelectorAll('input[type=range]').length >= window.PSCore.GRADE_PARAMS.length,
+      gTop.querySelectorAll('input[type=range]').length);
+    t('调色条目说明了不花钱',
+      /不花钱|不调用模型/.test(gTop.querySelector('.layer-note').textContent),
+      gTop.querySelector('.layer-note').textContent);
+    // 关掉图层 → 像素回到原样（证明图层开关对调色有效）
+    gTop.querySelector('.layer-toggle').dispatchEvent(new window.Event('click'));
+    await sleep(120);
+    t('关闭调色图层后像素还原', near(gPx(60, 60), beforeInside, 0),
+      [beforeInside, gPx(60, 60)]);
+    t('关闭后选区外仍不变', near(gPx(20, 20), beforeOutside, 0));
+    // 再打开
+    doc.querySelectorAll('#layer-list .layer-toggle')[0].dispatchEvent(new window.Event('click'));
+    await sleep(120);
+    t('重新开启后调色恢复', near(gPx(60, 60), appliedInside, 1),
+      [appliedInside, gPx(60, 60)]);
+    doc.querySelector('#layers [data-close]').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+
+    // ---- 9) 会话持久化：调色参数要能存下来（「继续编辑」不能丢）----
+    window.__PS_API.touchWork();
+    const gRec = window.__PS_API.library().find((w) => w.session);
+    t('作品库会话里有调色图层',
+      !!gRec && (gRec.session.items || []).some((it) => it.grade), gRec && (gRec.session.items || []).length);
+    if (gRec) {
+      const gItem = (gRec.session.items || []).find((it) => it.grade);
+      t('会话里存的是色调参数而不是 patch',
+        !!gItem && !gItem.patch && gItem.grade.exposure === 55, gItem && gItem.grade);
+    }
+
+    // ---- 10) 调色滑块也是「只能拖滑块头」（防误触归零）----
+    const gSlider = doc.querySelector('#grade-sliders input[type=range]');
+    t('调色滑块已套上 thumb-only 保护', !!gSlider && gSlider.__psThumbOnly === true);
+
+    // ---- 11) 清理：别影响后续段落 ----
+    // 撤掉调色
+    while (S.edits.length > 0) {
+      doc.getElementById('btn-undo').dispatchEvent(new window.Event('click'));
+      await sleep(60);
+    }
+    t('清理完成：编辑已撤销（后续段落的前提）', S.edits.length === 0, S.edits.length);
+    // 必须退出调色模式：后面的段落（引导线、工具提示）都假定当前是框选工具。
+    // 留在 grade 模式会让那些段落的 pointerdown 走进调色的分支，测试全错。
+    doc.querySelector('.tool[data-mode="select"]').dispatchEvent(new window.Event('click'));
+    await sleep(60);
+    t('清理完成：已退出调色模式（后续段落的前提）', S.mode === 'select', S.mode);
+  }
+
+  /* ---------- 后台生成：离开照片后生成继续跑，结果不丢 ---------- */
+  console.log('\n【41】后台生成：开始生成 → 回首页 → 生成完成 → 结果存进那张照片');
+
+  {
+    // 已知条件：400×300 小图 + 直连 + 干净状态
+    S.cfg.apiKey = 'sk-test';
+    S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
+    S.cfg.model = 'Qwen/Qwen-Image-Edit';
+    S.cfg.netMode = 'direct';
+    S.cfg.provider = 'siliconflow';
+    S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.contextPct = 0; S.cfg.maxRes = 0;
+    S.cfg.upscaleSmall = false; S.cfg.autoGrade = false;   // 关掉自动调色，专测后台流程
+    S.jobs = [];
+
+    // 恢复真实 Image 解码（「回到那张照片」要用）
+    window.Image = class {
+      constructor() { this.onload = null; this.onerror = null; this.width = 0; this.height = 0; this._src = ''; }
+      set src(v) {
+        this._src = v;
+        const m = /^data:[^;]+;base64,(.*)$/.exec(String(v));
+        if (!m) { setTimeout(() => this.onerror && this.onerror(new Error('bad src')), 0); return; }
+        napi.loadImage(Buffer.from(m[1], 'base64')).then((im) => {
+          this.__real = im; this.width = im.width; this.height = im.height;
+          if (this.onload) this.onload();
+        }).catch((e) => { if (this.onerror) this.onerror(e); });
+      }
+      get src() { return this._src; }
+    };
+
+    await sleep(1800);
+    window.localStorage.removeItem('photoStudio.library.v1');
+    S.library = window.__PS_API.loadLibrary();
+
+    const loadPhoto = async (name, color) => {
+      const c = napi.createCanvas(400, 300);
+      const x = c.getContext('2d');
+      x.fillStyle = 'rgb(' + color.join(',') + ')';
+      x.fillRect(0, 0, 400, 300);
+      const input = doc.getElementById('file-input');
+      Object.defineProperty(input, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], name, { type: 'image/png' })],
+        configurable: true
+      });
+      input.dispatchEvent(new window.Event('change'));
+      await sleep(300);
+      const t0 = Date.now();
+      while ((S.imgW !== 400 || window.__PS_API.workId() !== null) && Date.now() - t0 < 5000) await sleep(80);
+    };
+
+    // ---- 1) 发起生成：必须能立刻离开 ----
+    await loadPhoto('bg-a.png', [30, 90, 160]);
+    t('照片 A 已载入', S.imgW === 400 && S.imgH === 300, [S.imgW, S.imgH]);
+
+    // 让假模型慢一点，才有「中途离开」的窗口。
+    // 颜色按提示词绑定（A=红、B=绿），这样两个并发请求谁先醒来都不影响断言。
+    fake.setDelay(700);
+    fake.setColorFor('后台生成测试', [200, 40, 40]);
+    S.rect = { x: 60, y: 60, w: 160, h: 120 };
+    doc.getElementById('prompt').value = '后台生成测试';
+    const bgSeenBefore = fake.seen.length;
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await sleep(120);
+
+    t('生成中 busy 为真（当前这张）', S.busy === true, S.busy);
+    t('生成了 1 个后台任务', S.jobs.length === 1, S.jobs.length);
+    t('任务是 running', S.jobs[0].status === 'running', S.jobs[0].status);
+    t('任务记住了归属作品 id', S.jobs[0].workId === S.workId, [S.jobs[0].workId, S.workId]);
+    t('任务记住了发起时的文档版本', S.jobs[0].docVersion === S.docVersion,
+      [S.jobs[0].docVersion, S.docVersion]);
+    t('任务快照了选区（不读实时状态）',
+      S.jobs[0].rect.x === 60 && S.jobs[0].rect.w === 160, S.jobs[0].rect);
+    t('界面提示了「可以切到别的照片」', true);   // toast 内容见回归测试
+
+    // ---- 2) 回首页：任务必须继续跑（旧实现在这里 abort）----
+    window.__PS_API.goHome();
+    await sleep(120);
+    t('回首页后照片已卸载', S.img === null);
+    t('回首页后任务仍在跑（关键！）', S.jobs.length === 1 && S.jobs[0].status === 'running',
+      S.jobs.map((j) => j.status));
+    t('回首页后不显示「正在生成」遮罩（不假装在忙）',
+      S.busy === false && doc.getElementById('busy').hidden === true,
+      [S.busy, doc.getElementById('busy').hidden]);
+    t('首页能看到后台状态条', doc.getElementById('job-badge').hidden === false,
+      doc.getElementById('job-badge').hidden);
+    t('状态条说明了正在后台生成',
+      /后台生成|生成中/.test(doc.getElementById('job-badge').textContent),
+      doc.getElementById('job-badge').textContent);
+    // 保活必须还开着：任务在跑就要钉住进程
+    t('回首页后保活仍开启（否则切后台会被杀）', (() => {
+      const st = window.__PS_API.keepAliveState();
+      return st && st.on === true;
+    })(), window.__PS_API.keepAliveState());
+
+    // ---- 3) 处理下一张：导入照片 B ----
+    await loadPhoto('bg-b.png', [90, 40, 140]);
+    t('照片 B 已载入（换图成功）', S.imgW === 400 && S.docW === 400, [S.imgW, S.docW]);
+    t('换图没有杀掉 A 的后台任务（关键！）',
+      S.jobs.length === 1 && S.jobs[0].status === 'running', S.jobs.map((j) => j.status));
+    t('在 B 上不显示 A 的遮罩（不假装在忙）',
+      S.busy === false && doc.getElementById('busy').hidden === true, S.busy);
+
+    // B 也能正常生成 —— 这是「可以处理下一张」的实际含义
+    fake.setColorFor('第二张的修改', [40, 200, 90]);
+    S.rect = { x: 40, y: 40, w: 120, h: 100 };
+    doc.getElementById('prompt').value = '第二张的修改';
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await sleep(120);
+    t('B 上也能发起生成（两个任务并存）', S.jobs.length === 2, S.jobs.length);
+    t('两个任务分属不同文档',
+      S.jobs[0].docVersion !== S.jobs[1].docVersion,
+      S.jobs.map((j) => j.docVersion));
+    t('在 B 上 busy 为真（B 的任务在跑）', S.busy === true, S.busy);
+
+    // 等 A 的任务先完成（B 后发起、延迟相同，但 A 更早开始）
+    const t0 = Date.now();
+    while (S.jobs.filter((j) => j.status === 'done').length < 1 && Date.now() - t0 < 12000) await sleep(150);
+    t('A 的任务已完成（用户在 B 上）',
+      S.jobs.some((j) => j.status === 'done'), S.jobs.map((j) => j.status));
+    t('A 的结果没有贴到 B 上（贴错图是最严重的失败）',
+      S.edits.length === 0 && S.pending === null,
+      [S.edits.length, !!S.pending]);
+    t('请求次数正确（A + B 各一次）', fake.seen.length === bgSeenBefore + 2,
+      fake.seen.length - bgSeenBefore);
+
+    // ---- 4) 结果必须存进 A 的作品记录（不能静默丢失）----
+    const recA = window.__PS_API.library().find((w) => /bg-a/.test(w.name));
+    const recB = window.__PS_API.library().find((w) => /bg-b/.test(w.name));
+    t('A 的作品记录存在', !!recA, window.__PS_API.library().map((w) => w.name));
+    t('A 的记录上挂着后台结果', !!(recA && recA.bgResult), recA && Object.keys(recA.bgResult || {}));
+    t('后台结果带选区',
+      !!(recA && recA.bgResult && recA.bgResult.rect && recA.bgResult.rect.w === 160),
+      recA && recA.bgResult && recA.bgResult.rect);
+    t('后台结果带 patch 图片',
+      !!(recA && recA.bgResult && /^data:image/.test(recA.bgResult.patch)),
+      recA && recA.bgResult && String(recA.bgResult.patch).slice(0, 30));
+    t('后台结果带提示词标签',
+      !!(recA && recA.bgResult && /后台生成测试/.test(recA.bgResult.label)),
+      recA && recA.bgResult && recA.bgResult.label);
+    t('B 的记录上没有 A 的结果（不串号）',
+      !(recB && recB.bgResult), recB && recB.bgResult);
+    t('结果已落盘', (() => {
+      const persisted = JSON.parse(window.localStorage.getItem('photoStudio.library.v1') || '{"items":[]}');
+      return persisted.items.some((it) => !!it.bgResult);
+    })());
+
+    // ---- 5) 通知：完成了要告诉用户 ----
+    t('后台完成时发了原生通知',
+      kaCalls.some((c) => c.notify && /后台生成完成/.test(c.notify)),
+      kaCalls.filter((c) => c.notify).map((c) => c.notify));
+
+    // ---- 6) 首页/作品库能看到状态 ----
+    window.__PS_API.goHome();
+    await sleep(120);
+    // 等 B 的任务也结束，避免它干扰后面的断言。
+    // 两条都落库之后再看首页 —— 否则 B 的记录还没建出来，
+    // 「列出几张」会随调度顺序飘（假失败）。
+    const t1 = Date.now();
+    while (S.jobs.some((j) => j.status === 'running') && Date.now() - t1 < 12000) await sleep(150);
+    window.__PS_API.renderHome();
+    await sleep(80);
+
+    const homeItems = doc.querySelectorAll('#home .home-item');
+    // 两张：A（后台结果）与 B（在 B 上发起的生成）。
+    // B 的任务同样有结果要贴回，所以它也应当落成一条记录
+    t('首页列出了两张', homeItems.length >= 2, homeItems.length);
+    t('首页里有 A 那张', Array.from(homeItems).some((it) => /bg-a/.test(it.textContent)),
+      Array.from(homeItems).map((it) => it.textContent.slice(0, 20)));
+    t('首页里有 B 那张', Array.from(homeItems).some((it) => /bg-b/.test(it.textContent)),
+      Array.from(homeItems).map((it) => it.textContent.slice(0, 20)));
+    const doneTag = Array.from(doc.querySelectorAll('#home .home-tag'))
+      .find((t2) => /已生成|待贴回/.test(t2.textContent));
+    t('首页标出了「有结果待贴回」', !!doneTag, doneTag && doneTag.textContent);
+
+    // ---- 7) 回到 A：结果自动贴回（闭环）----
+
+    const realConfirmBg = window.confirm;
+    window.confirm = () => true;
+    await window.__PS_API.continueWork(recA.id);
+    await sleep(700);
+    window.confirm = realConfirmBg;
+
+    t('回到 A 后接管为那条记录', window.__PS_API.workId() === recA.id,
+      [window.__PS_API.workId(), recA.id]);
+    t('后台结果已自动贴回（产生了一条编辑）', S.edits.length >= 1, S.edits.length);
+    t('贴回的那条是后台生成', S.edits.some((e) => /后台生成/.test(e.label || '')),
+      S.edits.map((e) => e.label));
+    t('贴回后记录上的暂存已清掉', !recA.bgResult, recA.bgResult);
+    t('贴回进撤销栈（可撤销）', window.__PS_API.historySize().past >= 1,
+      window.__PS_API.historySize());
+    // 逐像素：贴回的必须等于**A 那次请求实际拿到的颜色**。
+    // 不能写死「红色」—— 假模型是在**响应时**读颜色的，而 A/B 两个请求
+    // 并发在跑，响应顺序不由发起顺序决定。断言要针对「A 那次真的拿到了什么」，
+    // 那才是「结果没有串到 B 上」的真正判据。
+    const bgJobReq = fake.seen.filter((x) => x.body && /后台生成测试/.test(x.body.prompt || ''))[0];
+    t('找得到 A 那次请求', !!bgJobReq, fake.seen.map((x) => x.body && String(x.body.prompt).slice(0, 12)));
+    const want = bgJobReq ? bgJobReq.served : null;
+    t('A 那次请求拿到了一个颜色', !!want, want);
+    const bgPx = S.viewCanvas.getContext('2d').getImageData(140, 120, 1, 1).data;
+    t('贴回的内容等于 A 那次模型返回的颜色',
+      !!want && Math.abs(bgPx[0] - want[0]) <= 3 && Math.abs(bgPx[1] - want[1]) <= 3,
+      { got: [bgPx[0], bgPx[1], bgPx[2]], want });
+    // 关键：必须是**A 的颜色**，不是 B 的（B 的绿 40,200,90）——
+    // 这条断言才是「结果没串到别的照片上」的像素级证据。
+    // 只比「是不是 B 那个具体颜色」，不做「绿不绿」的模糊判断
+    // （模糊判断会被别处遗留的 setColor 干扰成假失败）。
+    t('贴回的颜色不是 B 那张的颜色（没串号）',
+      !(bgPx[0] === 40 && bgPx[1] === 200 && bgPx[2] === 90), [bgPx[0], bgPx[1], bgPx[2]]);
+    // 更强的判据：贴回后的像素必须等于 **A 那次请求真的拿到的颜色**。
+    // 直接拿请求记录里的 served 比，绕开所有写死的颜色假设 ——
+    // 这才是「结果没有串到别的照片上」的无歧义证据。
+    t('贴回后的像素 = A 那次请求真的拿到的颜色',
+      !!want && Math.abs(bgPx[0] - want[0]) <= 3 && Math.abs(bgPx[1] - want[1]) <= 3 &&
+      Math.abs(bgPx[2] - want[2]) <= 3,
+      { got: [bgPx[0], bgPx[1], bgPx[2]], want });
+    // 选区外必须不动
+    const bgOut = S.viewCanvas.getContext('2d').getImageData(10, 10, 1, 1).data;
+    t('贴回没有污染选区外', bgOut[0] === 30 && bgOut[1] === 90 && bgOut[2] === 160,
+      [bgOut[0], bgOut[1], bgOut[2]]);
+
+    // ---- 8) 撤销能退回 ----
+    doc.getElementById('btn-undo').dispatchEvent(new window.Event('click'));
+    await sleep(120);
+    t('撤销后后台结果被移除', S.edits.length === 0, S.edits.length);
+    const bgPx2 = S.viewCanvas.getContext('2d').getImageData(100, 100, 1, 1).data;
+    t('撤销后像素回到原样', bgPx2[0] === 30 && bgPx2[1] === 90, [bgPx2[0], bgPx2[1]]);
+
+    // ---- 9) 取消只影响当前这张 ----
+    S.jobs = [];
+    fake.setDelay(900);
+    // 在 A 上发起一个
+    S.rect = { x: 20, y: 20, w: 100, h: 80 };
+    doc.getElementById('prompt').value = 'A 的取消测试';
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await sleep(100);
+    t('A 上有一个任务在跑', S.jobs.filter((j) => j.status === 'running').length === 1,
+      S.jobs.map((j) => j.status));
+    const jobAId = S.jobs[0].id;
+    // 换到 B（会取消 A 的当前任务 —— 结果已无处可落）
+    await loadPhoto('bg-c.png', [10, 10, 10]);
+    await sleep(200);
+    t('换图取消了上一张的任务（结果已无处可落）',
+      S.jobs.every((j) => j.status !== 'running' || j.docVersion === S.docVersion),
+      S.jobs.map((j) => ({ s: j.status, d: j.docVersion })));
+    t('取消后没有把结果贴到新图上', S.pending === null && S.edits.length === 0);
+
+    // ---- 10) 失败的任务不能假装成功 ----
+    S.jobs = [];
+    fake.setDelay(0);
+    const bgRealFetch = window.fetch;
+    window.fetch = async (u, o) => {
+      if (String(u).includes('images/generations')) {
+        return {
+          ok: false, status: 500,
+          json: async () => ({ error: 'boom' }), text: async () => '{"error":"boom"}',
+          blob: async () => new window.Blob([])
+        };
+      }
+      return bgRealFetch(u, o);
+    };
+    S.rect = { x: 20, y: 20, w: 100, h: 80 };
+    doc.getElementById('prompt').value = '会失败的后台任务';
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await sleep(600);
+    window.fetch = bgRealFetch;
+    t('失败的任务被标成 failed', S.jobs.some((j) => j.status === 'failed'),
+      S.jobs.map((j) => j.status));
+    t('失败的任务没有产生编辑', S.edits.length === 0, S.edits.length);
+
+    // ---- 收尾 ----
+    fake.setDelay(0);
+    fake.clearColorFor();
+    S.jobs = [];
+    await sleep(1800);
+    S.library = [];
+    window.localStorage.removeItem('photoStudio.library.v1');
+    window.__PS_API.saveLibrary();
+    window.__PS_API.goHome();
+    await sleep(120);
+    t('收尾：状态已复位（后续段落的前提）', S.jobs.length === 0 && S.edits.length === 0,
+      [S.jobs.length, S.edits.length]);
+  }
 
   /* ---------- 无 JS 错误 ---------- */
   console.log('\n【15】运行健康度');

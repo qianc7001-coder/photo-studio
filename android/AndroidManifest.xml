@@ -7,6 +7,9 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Android 9 及以下往相册/下载写文件需要这条；10 起是分区存储，不再需要 -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
     <!-- 后台保活（前台服务）。
          生图要 30~60 秒，切走就可能被杀，请求白花钱，所以生成期间用前台服务钉住进程。

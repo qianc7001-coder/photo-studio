@@ -59,6 +59,12 @@ public class LocalServer {
 
     public interface Ready { void onReady(int port, String error); }
 
+    /** 保存图片的实现由 Activity 提供（要写 MediaStore / 弹系统文件选择器） */
+    public interface Saver { String save(byte[] data, String name, String where); }
+
+    private Saver saver;
+    public void setSaver(Saver s) { this.saver = s; }
+
     public LocalServer(Context ctx) {
         this.ctx = ctx.getApplicationContext();
         this.assets = this.ctx.getAssets();
@@ -173,6 +179,8 @@ public class LocalServer {
                         bytes("{\"ok\":true,\"name\":\"photo-studio\",\"engine\":\"android-native\"}"));
             } else if ("/api/generate".equals(path)) {
                 handleProxy(out, headers, body);
+            } else if ("/api/save".equals(path)) {
+                handleSave(out, rawPath, body);
             } else if ("GET".equals(method) || "HEAD".equals(method)) {
                 serveAsset(out, path, "HEAD".equals(method));
             } else {
@@ -228,6 +236,46 @@ public class LocalServer {
         if (n.endsWith(".webp")) return "image/webp";
         if (n.endsWith(".ico")) return "image/x-icon";
         return "application/octet-stream";
+    }
+
+    /* ==================== 保存导出图片 ==================== */
+
+    private void handleSave(OutputStream out, String rawPath, byte[] body) throws IOException {
+        if (saver == null) {
+            respondCors(out, 500, "application/json",
+                    bytes("{\"ok\":false,\"error\":\"当前环境不支持原生保存\"}"));
+            return;
+        }
+        if (body == null || body.length == 0) {
+            respondCors(out, 400, "application/json",
+                    bytes("{\"ok\":false,\"error\":\"没有收到图片数据\"}"));
+            return;
+        }
+        String name = queryParam(rawPath, "name");
+        String where = queryParam(rawPath, "where");
+        if (name == null || name.isEmpty()) name = "retouched.jpg";
+        if (where == null || where.isEmpty()) where = "gallery";
+        String json;
+        try {
+            json = saver.save(body, name, where);
+        } catch (Exception e) {
+            json = "{\"ok\":false,\"error\":" + quote(String.valueOf(e.getMessage())) + "}";
+        }
+        if (json == null) json = "{\"ok\":false,\"error\":\"保存失败\"}";
+        respondCors(out, 200, "application/json", bytes(json));
+    }
+
+    private static String queryParam(String rawPath, String key) {
+        int q = rawPath.indexOf('?');
+        if (q < 0) return null;
+        for (String kv : rawPath.substring(q + 1).split("&")) {
+            int e = kv.indexOf('=');
+            if (e <= 0) continue;
+            if (!key.equals(kv.substring(0, e))) continue;
+            try { return URLDecoder.decode(kv.substring(e + 1), "UTF-8"); }
+            catch (Exception ex) { return kv.substring(e + 1); }
+        }
+        return null;
     }
 
     /* ==================== 生图请求代理 ==================== */
