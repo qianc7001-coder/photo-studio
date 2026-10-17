@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-3669%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-3674%20passed-brightgreen.svg)](#测试)
 
 给摄影师用的**局部修图**工具：在照片上框选任意区域，交给生图模型修改，结果自动贴回原位置。
 
 **核心特点**：结果无缝融合，非破坏性可调，保留拍摄信息。
 
-> 最新版本 **v3.5.5** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
+> 最新版本 **v3.5.6** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
 
 ---
 
@@ -301,7 +301,7 @@ node tools/migrate-test.js     # 配置迁移（模拟老用户升级路径）
 node tools/e2e-test.js         # 端到端（jsdom + 真实 canvas，逐像素校验）
 ```
 
-当前规模：**3669 项**（1320 单元 + 1340 回归 + 17 配置迁移 + 992 端到端）。
+当前规模：**3674 项**（1321 单元 + 1345 回归 + 17 配置迁移 + 991 端到端）。
 
 端到端测试会：
 - 启动一个假生图模型服务器
@@ -427,7 +427,8 @@ WebView 里用 `file://` 打开页面时，跨域请求会被拦截，而且 `lo
 
 | 版本 | 主要变化 |
 |---|---|
-| **v3.5.5** | 引导线大改：线真的画进请求图（模型直接看得见位置）；颜色按顺序自动分配（第 1 条红、第 2 条青…），提示词逐条指代；类型只留「直线 + 自由绘制」两类，旧类型自动迁移 |
+| **v3.5.6** | 修复 GPT 看不到引导线（关键）：删掉「引导线画进请求图」开关 —— 它一旦被关掉就永久记住，屏幕上看得见线、发给模型的图里却没有；同时修正「支持参考图」的模型判断，Nano Banana / seedream-4 等不该被判成纯文生图而整张图都不发；真用了文生图模型时会明确提示「照片和引导线都不会发出去」 |
+| [v3.5.5](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.5.5) | 引导线大改：线真的画进请求图（模型直接看得见位置）；颜色按顺序自动分配（第 1 条红、第 2 条青…），提示词逐条指代；类型只留「直线 + 自由绘制」两类，旧类型自动迁移 |
 | [v3.5.4](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.5.4) | 工具栏改成无级调节（松手停在哪里就是哪里，不再吸附两档）；没有框选时默认处理整张图（AI 生图/调色/画笔/引导线都算）；修复整张图处理时凭空多出暗角、四周留一圈没改 |
 | [v3.5.3](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.5.3) | 后台生图（提交后去修下一张）；修复历史记录只能保存一张；基础调色工具；调用日志；新手教程；滑块防误触。**含 v3.5.2 的全部改动**（导出可选保存位置 + 修复安卓版导出其实存不下来）—— v3.5.2 没有单独发版，改动都并进这一版 |
 | [v3.5.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.5.0) | 改名「枫叶修图」+ 手绘枫叶图标；修复顶栏溢出（低频入口收进「更多」菜单） |

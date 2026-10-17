@@ -289,7 +289,9 @@
       // 保存位置：历史脏数据/手改 localStorage 不能让导出存到不存在的位置
       if (!C.isSaveLocation(c.expSaveWhere)) c.expSaveWhere = 'gallery';
       // 笔迹颜色：历史脏数据/手改 localStorage 不能让取色失败（退化成红色）
-      c.guideStrokeOverlay = c.guideStrokeOverlay !== false;
+      // 引导线必须进入发给模型的图片：旧版本允许关闭，旧设置里可能保存了 false。
+      // 强制恢复为 true，避免「屏幕上看得到、模型图片里看不到」的致命分叉。
+      c.guideStrokeOverlay = true;
       c.barHeight = clampNum(c.barHeight, 0, 2000, 0);
       c.expPresetChosen = c.expPresetChosen === true;
       if (!c.baseUrl && c.provider) {
@@ -2165,8 +2167,7 @@
         d.x1 = nrm.x1; d.y1 = nrm.y1; d.x2 = nrm.x2; d.y2 = nrm.y2;
         d.points = nrm.points;
         updateGuideBadge();
-        toast('已加草图：' + (d.points ? d.points.length : 0) + ' 个点' +
-          (S.cfg.guideStrokeOverlay === false ? '（笔迹进图已关闭，只作为文字说明）' : ''));
+        toast('已加草图：' + (d.points ? d.points.length : 0) + ' 个点（会画进模型请求图）');
       } else {
         // 吸附到常见方向，模型拿到的是干净的构图意图而不是手抖斜线
         const snapped = C.snapGuide(d);
@@ -2455,7 +2456,7 @@
    *   画到请求图上的位置整体偏掉（实测偏到 20%~40% 而不是 25%~75%）。
    *   所以必须由调用方把基准显式传进来。
    */
-  function buildRequestImage(rect, mask, baseRect, guides, strokeOverlay) {
+  function buildRequestImage(rect, mask, baseRect, guides) {
     const pct = Number(S.cfg.contextPct) || 0;
     const padX = Math.round(rect.w * pct / 100), padY = Math.round(rect.h * pct / 100);
     const ctxRect = C.clampRect({ x: rect.x - padX, y: rect.y - padY, w: rect.w + padX * 2, h: rect.h + padY * 2 }, S.docW, S.docH);
@@ -2514,25 +2515,23 @@
     // 要修改的范围通过提示词里的文字描述表达（见 buildPrompt 的 centerPct）。
     // 蓝色只保留在屏幕预览上（drawMaskOverlay），永远不会进入发给模型的图片。
     //
-    // 唯一的例外是**自由笔迹**（引导线里的 freehand 类型）：
-    // 「头发往这个方向飘」这类要求用文字根本说不明白（模型看不到我们的坐标系，
-    // 也读不了几十个点），只能把笔迹画在图上让模型直接看。
+    // 引导线（直线 + 自由笔迹两类）是**唯一**会画进请求图的标注，原因：
+    // 「地平线放在这里」「头发往这个方向飘」这类要求，文字根本说不明白 ——
+    // 模型看不到我们的坐标系，也无法把「下方三分之一」对应到像素。
+    // 画在图上让它直接看，是唯一可靠的做法。
     // 它和当初的蓝色掩膜有本质区别：蓝色掩膜标的是「改哪一块」（文字能说清），
-    // 笔迹标的是「生成成什么走向」（文字说不清）。
-    // 风险仍然存在（某些模型会把线画进画面），所以设置里可以一键关掉。
-    // 引导线与开关都从调用方传进来（默认回落到当前状态）。
+    // 引导线标的是「生成成什么位置/走向」（文字说不清）。
+    //
+    // 引导线快照由调用方传入（默认回落到当前状态）：
     // 快照化之后，即使随后换了图/改了引导线，这次请求也不受影响。
     const jobGuides = (guides !== undefined && guides !== null) ? guides : S.guides;
-    const strokeOn = (strokeOverlay === undefined || strokeOverlay === null)
-      ? (S.cfg.guideStrokeOverlay !== false)
-      : (strokeOverlay !== false);
+    // 这里**不读任何开关**：早期那个「笔迹进图」开关一旦被存成 false，
+    // 就会出现「屏幕上看得见线、模型收到的图里却没有」——
+    // 用户反馈的「GPT 看不到我画的引导线」正是这么来的。
+    // 所以现在只有一条规则：画了引导线就画进请求图。
+    const strokeOn = jobGuides.length > 0;
     let strokeNote = '';
-    // 关掉开关但画了引导线时也要留痕：否则用户以为线带上了，
-    // 生成结果不对却找不到原因（自检面板里必须能看到「这次没带引导线」）
-    if (!strokeOn && jobGuides.length) {
-      strokeNote = '引导线未画进图片（已关闭，只作为文字说明）';
-    }
-    if (strokeOn && jobGuides.length) {
+    if (strokeOn) {
       // 引导线的坐标是相对**整个选区**存的，换算时必须以选区为基准。
       // 基准由调用方传入（见函数注释：不能读模块级的 lastSelRect）
       const strokeBase = baseRect || rect;
@@ -2544,8 +2543,7 @@
         // 线宽按请求图短边给：图越大线越粗，视觉粗细才一致
         width: Math.max(4, Math.round(Math.min(ctxRect.w, ctxRect.h) * 0.012))
       });
-      // 无论画没画都要记录：关掉时也要如实告诉用户「这次没带上引导线」，
-      // 否则他以为线生效了，结果生成不对却找不到原因
+      // 如实记录这次到底画了几条，供请求自检面板显示
       strokeNote = sp.note;
       if (sp.count) C.drawStrokeOverlay(cx, sp);
     }
@@ -2912,7 +2910,7 @@
     // 这样即使随后换了图，请求体也不会变。
     // 显式把笔迹/开关/颜色传进去：这是「快照」的一部分，
     // 之后用户改引导线或切颜色都不该影响这次已经发出去的请求
-    const built = buildRequestImage(rect, mask, rect, S.guides.slice(), S.cfg.guideStrokeOverlay);
+    const built = buildRequestImage(rect, mask, rect, S.guides.slice());
     const dataUrl = canvasToDataUrl(built.canvas, 'image/jpeg', 0.94);
 
     // 小选区上采样后模型看到的图更大，出图尺寸也要相应提高，
@@ -6011,8 +6009,14 @@
       }
     }
     const wholeHint = !S.rect ? '未框选 → 调整整张图；' : '';
+    // 文生图模型：必须说清「照片和引导线都不会发给模型」。
+    // 以前只写「不支持参考图」，用户看不懂这意味着什么 —— 他会以为
+    // 「只是不能参考，我画的引导线应该还是有用的吧」，于是白白花一次钱。
+    // 事实上这个模式下**整个请求体里没有任何图片**，引导线自然也到不了模型。
+    const t2iWarn = '当前模型是文生图：照片和你画的引导线都不会发给模型，只能按文字重新生成；'
+      + '想按原图改就换一个「可编辑」模型；';
     $('gen-hint').textContent = !S.img ? '先打开一张照片'
-      : (m && m.kind === 't2i' ? wholeHint + '当前模型不支持参考图，将按提示词重新生成' + (S.rect ? '该区域' : '整张图') + '；' + costNote
+      : (m && m.kind === 't2i' ? wholeHint + t2iWarn + costNote
         : wholeHint + sizeNote + costNote + '就绪' + devNote);
 
     // 模型按钮
@@ -6219,7 +6223,6 @@
     $('set-envfit').checked = S.cfg.envFit !== false;
     $('set-autograde').checked = S.cfg.autoGrade !== false;
     $('set-autocheck').checked = S.cfg.autoCheckUpdate !== false;
-    if ($('set-strokeimg')) $('set-strokeimg').checked = S.cfg.guideStrokeOverlay !== false;
     refreshUpdateStateText();
     $('set-maxres').value = String(S.cfg.maxRes);
     $('set-lang').value = S.cfg.lang;
@@ -6503,6 +6506,11 @@
       lines.push('');
       lines.push('提示：当前请求没有带上参考图。');
       lines.push('要改一块区域，请换用图像编辑模型（如 Qwen/Qwen-Image-Edit、FLUX.1-Kontext、gpt-image-1）。');
+      // 用户画了引导线却没带图，是他最容易困惑的情况：
+      // 屏幕上明明有线，模型却完全不知道 —— 因为文生图模式下整张图都不发。
+      if (lastStrokeNote) {
+        lines.push('你画的引导线也没能发出去（引导线是画在参考图上的，没有图就没有线）。');
+      }
     }
     if (r.multipartUsed) {
       lines.push('');
@@ -6880,7 +6888,6 @@
     bindField('set-lang', 'lang');
     bindField('set-seed', 'seed');
     bindField('set-preset', 'exportPreset', null, updatePresetUI);
-    bindField('set-strokeimg', 'guideStrokeOverlay', (el) => el.checked);
     bindField('set-format', 'format');
     bindField('set-quality', 'quality', (el) => Number(el.value));
     bindField('set-mosaic', 'mosaic', (el) => el.checked);
@@ -7692,7 +7699,8 @@
       toast('工具提示已重置，下次进入会再显示一次');
     },
     hintSeen,
-    strokeOverlayEnabled: () => S.cfg.guideStrokeOverlay !== false,
+    // 兼容旧测试/API：该能力现在固定开启，避免旧 localStorage 的 false 让模型看不到线。
+    strokeOverlayEnabled: () => true,
     strokeNote: () => lastStrokeNote,
     // 对比视图（供测试与外部调用）
     compareView: () => cmpView,

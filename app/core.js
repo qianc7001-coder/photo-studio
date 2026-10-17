@@ -5882,13 +5882,30 @@
       if (!/(image|flux|kolors|sd3|stable-diffusion|dall-e|dalle|gpt-image|seedream|seededit|imagen|ideogram|recraft|qwen-image)/.test(s)) return null;
     }
 
-    const isImage = /(image|flux|kolors|stable-diffusion|sd3|sdxl|dall-e|dalle|gpt-image|seedream|seededit|imagen|ideogram|recraft|z-image|janus|emu|hidream|lumina|playground|kandinsky|wanx|qwen-image)/.test(s);
+    const isImage = /(image|flux|kolors|stable-diffusion|sd3|sdxl|dall-e|dalle|gpt-image|seedream|seededit|imagen|ideogram|recraft|z-image|janus|emu|hidream|lumina|playground|kandinsky|wanx|qwen-image|banana)/.test(s);
     if (!isImage) return null;
 
-    // 注意：gpt-image-1 既能文生图也支持传参考图做编辑，按「编辑」处理更贴合本应用用途；
-    // dall-e-3 不支持参考图，保持文生图。
-    const isEdit = /(edit|kontext|inpaint|img2img|image-to-image|refine|upscale|seededit|image-variation|gpt-image)/.test(s)
-      && !/dall-?e/.test(s);
+    // 「是不是编辑模型」= 「能不能吃参考图」。
+    //
+    // 这个判断直接决定**要不要把照片发给模型**，判错的后果极其严重：
+    // 判成 t2i 就完全不发图片（见 prepareJob 的 imageKind 分支），
+    // 于是模型看不到照片、更看不到用户画的引导线，只能凭提示词瞎编 ——
+    // 用户看到的就是「模型看不到我画的线，生成的东西跟我的照片没关系」。
+    //
+    // 踩过的坑：早期只认名字里带 edit / kontext / gpt-image 的模型，
+    // 而现实里一大批**支持参考图**的模型名字里根本没有这些词：
+    //   gemini-2.5-flash-image（Nano Banana）、nano-banana、seedream-4-0……
+    // 它们全被判成 t2i，图片被静默丢掉。
+    //
+    // 所以改成两张名单：**明确不支持参考图的**才当 t2i，其余默认按 edit 处理。
+    // 默认 edit 是安全的：多传一张参考图，最坏是服务端报一句「不支持该参数」，
+    // 用户立刻能看见；而少传图片是**静默**出错，最难排查。
+    //
+    // 明确只能文生图的：dall-e 全系、名字里带 t2i / text-to-image 的、Kolors 文生图。
+    const noRef = /dall-?e|(^|[^a-z])t2i([^a-z]|$)|text-to-image|text2image|kolors/.test(s);
+    // 名字里带 seedream-3 / seedream3 的也确认不支持参考图（4.0 起才支持）
+    const seedream3 = /seedream[-_.]?3/.test(s);
+    const isEdit = !noRef && !seedream3;
     return {
       id,
       kind: isEdit ? 'edit' : 't2i',

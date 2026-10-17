@@ -1624,21 +1624,30 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('HTML 没有颜色选择条（颜色按序号自动分配）', !/id="guide-colors"/.test(html8));
   t('HTML 有自由绘制专用提示', /id="guide-tip-free"/.test(html8));
   t('提示里说明了「会画进图片」', /会画进发给模型的图片/.test(html8));
-  t('设置里有笔迹进图开关', /id="set-strokeimg"/.test(html8));
+  // 开关已彻底移除：旧用户可能在 localStorage 里存了 false，
+  // 那会让「屏幕上看得见线、模型却完全收不到」—— 正是用户反馈的那个致命问题。
+  // 现在引导线一律强制画进请求图，没有任何开关能关掉它。
+  t('设置里没有笔迹进图开关（已彻底移除）', !/id="set-strokeimg"/.test(html8));
   t('设置里没有颜色选择（同上）', !/id="set-strokecolor"/.test(html8));
   t('设置里说明了颜色按顺序自动分配', /第 1 条红、第 2 条青/.test(html8));
-  t('设置里说明了怎么应对「线被画出来」', /关掉上面的开关/.test(html8));
-  t('开关会持久化', /'guideStrokeOverlay', 'barHeight'/.test(appSrc8));
-  t('开关默认开启', /guideStrokeOverlay: true,/.test(appSrc8));
+  t('设置里说明引导线是强制的', /强制画进发给模型的图片/.test(html8));
+  t('不再提示「去关掉开关」（开关已不存在）',
+    !/关掉上面的开关|关掉「引导线画进请求图」/.test(html8));
+  t('开关仍然持久化（读取旧配置时用）', /'guideStrokeOverlay', 'barHeight'/.test(appSrc8));
+  t('旧配置里的 false 会被强制纠正为 true',
+    /c\.guideStrokeOverlay = true;/.test(appSrc8));
   // 颜色不再是配置项：按序号自动分配，用户选不了（选了就会撞色，指代失效）
   t('颜色不再是配置项', !/guideStrokeColor/.test(appSrc8));
   t('颜色选择器已从界面移除', !/id="guide-colors"/.test(html8));
   t('笔迹确实画进请求图', /C\.drawStrokeOverlay\(cx, sp\)/.test(appSrc8));
-  // 引导线/开关/颜色现在由调用方**显式传入**（快照化，见后台生成任务一节）：
-  // 请求在发起那一刻就固化，之后用户改引导线或切颜色都不该影响它。
-  t('只在开关打开时画',
-    /if \(strokeOn && jobGuides\.length\)/.test(appSrc8) &&
-    /const strokeOn = \(strokeOverlay === undefined/.test(appSrc8));
+  // 引导线现在由调用方**显式传入快照**（后台生成任务用）：
+  // 请求在发起那一刻就固化，之后用户改引导线不该影响它。
+  // 但「画不画」只由「有没有引导线」决定，不再读任何开关。
+  t('只要画了引导线就一定画进请求图',
+    /if \(strokeOn\) \{/.test(appSrc8) &&
+    /const strokeOn = jobGuides\.length > 0;/.test(appSrc8) &&
+    !/guideStrokeOverlay !== false/.test(appSrc8) &&
+    !/\/\* 关掉开关/.test(appSrc8));
   t('引导线来自显式传入的快照（不读模块状态）',
     /const jobGuides = \(guides !== undefined && guides !== null\) \? guides : S\.guides;/.test(appSrc8));
   t('换算以选区为基准（调用方显式传入）',

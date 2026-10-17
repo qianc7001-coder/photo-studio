@@ -937,10 +937,20 @@ console.log('\n【新功能】模型自动检测与归类');
   // 关键归类
   const cls = (id) => { const c = C.classifyModel(id); return c ? c.kind : null; };
   t('Qwen-Image-Edit → edit', cls('Qwen/Qwen-Image-Edit') === 'edit');
-  t('Qwen-Image → t2i', cls('Qwen/Qwen-Image') === 't2i');
+  // classifyModel 只是「按名字猜」的兜底；Qwen-Image 靠内置表定为 t2i。
+  // 这里必须断言**应用真正走的 modelParams**，否则兜底改名后这条就失去保护意义。
+  t('Qwen-Image → t2i（走内置表）', C.modelParams('Qwen/Qwen-Image').kind === 't2i');
   t('Kontext → edit', cls('black-forest-labs/FLUX.1-Kontext-pro') === 'edit');
   t('gpt-image-1 → edit（支持参考图）', cls('gpt-image-1') === 'edit');
   t('dall-e-3 → t2i', cls('dall-e-3') === 't2i');
+  // 名字里没有 edit/kontext 但确实吃参考图的模型：判错就会静默丢掉整张图
+  t('gemini-2.5-flash-image → edit（Nano Banana 吃参考图）',
+    C.modelParams('gemini-2.5-flash-image').kind === 'edit');
+  t('nano-banana → edit', C.modelParams('nano-banana').kind === 'edit');
+  t('seedream-4-0 → edit', C.modelParams('seedream-4-0').kind === 'edit');
+  t('seedream-3 仍是 t2i（4.0 才支持参考图）',
+    C.modelParams('doubao-seedream-3-0-t2i-250415').kind === 't2i');
+  t('Kolors 仍是 t2i（纯文生图）', C.modelParams('Kwai-Kolors/Kolors').kind === 't2i');
   t('视频模型不算图像', cls('Wan-AI/Wan2.2-T2V-A14B') === null);
   t('语音模型不算图像', cls('FunAudioLLM/CosyVoice2-0.5B') === null);
   t('VL 模型不算生图', cls('Qwen/Qwen2.5-VL-72B-Instruct') === null);
@@ -2176,12 +2186,20 @@ console.log('\n【引导线】位置必须精确传到模型，且不能把线�
   // 3) 引导线不进图片：请求图必须原样发送，绝不能把线画上去
   //    （和当初「蓝色掩膜被当成画面内容」是同一类坑）
   const imgBuild = appSrc.slice(appSrc.indexOf('function buildRequestImage'), appSrc.indexOf('function canvasToDataUrl'));
-  // 构图线永远不进图；自由笔迹按设置进图（两者用途不同，必须分开）
+  // 直线和自由笔迹**都要**进请求图：模型看不到线就只能靠文字猜位置，落位常偏。
+  // 这是用户反复反馈的核心问题（GPT 模型尤其明显）。
   t('请求图构建里不画构图线', !/drawGuides/.test(imgBuild), imgBuild.length);
-  t('请求图构建里只画笔迹（不画其它引导线）',
-    /planStrokeOverlay\(\{/.test(imgBuild) && /isFreehandGuide/.test(
-      fs3.readFileSync(__dirname + '/../app/core.js', 'utf8')));
-  t('笔迹进图受开关控制', /S\.cfg\.guideStrokeOverlay !== false/.test(imgBuild));
+  t('请求图构建里会画引导线（直线 + 自由手绘两类都要）',
+    /planStrokeOverlay\(\{/.test(imgBuild) && (() => {
+      // 同一个绘制函数必须同时处理两类，不能再按类型分叉
+      const core = fs3.readFileSync(__dirname + '/../app/core.js', 'utf8');
+      const fn = core.slice(core.indexOf('function planStrokeOverlay'), core.indexOf('function drawStrokeOverlay'));
+      return /line/.test(fn) && /freehand/.test(fn) && /isFreehandGuide/.test(fn);
+    })());
+  // 开关已移除：旧配置存了 false 会让「屏幕有线、模型收不到」，所以一律强制画
+  t('画不画只由「有没有引导线」决定（不再读开关）',
+    /const strokeOn = jobGuides\.length > 0;/.test(imgBuild) &&
+    !/guideStrokeOverlay/.test(imgBuild));
   // 没有框选时引导线画在整张图上（见 effectiveRect），所以不能再要求 S.rect
   t('引导线只画在屏幕预览上', /if \(S\.guides\.length\) drawGuides\(/.test(appSrc));
 
@@ -2336,23 +2354,26 @@ console.log('\n【笔迹】手绘走向必须真的送到模型，且不能被�
     guides: [{ kind: 'horizon', x1: 0, y1: .6, x2: 1, y2: .6 }], isZh: true
   })));
 
-  /* 6) 风险控制：必须能一键关掉（早期蓝色掩膜被模型当成画面内容的教训） */
-  t('有开关能关掉笔迹进图', /id="set-strokeimg"/.test(html));
-  t('开关默认开', /guideStrokeOverlay: true,/.test(appSrc));
-  t('关掉后不调用绘制', (() => {
-    // 从「开关从哪来」到「画在哪」整段一起看：strokeOn 在 let strokeNote 之前定义
+  /* 6) 引导线一律进图 —— 开关已移除 */
+  // 早期有个「笔迹进图」开关，默认开。但用户一旦关掉（比如嫌模型把线画进成品），
+  // 设置会永久留在本地；之后屏幕上明明有线、模型却完全收不到 ——
+  // 用户反馈的「模型看不到引导线」就是这么来的。所以开关彻底删掉，一律强制画。
+  t('界面上没有笔迹进图开关了', !/id="set-strokeimg"/.test(html));
+  t('配置里旧值会被强制纠正（残留 false 不会生效）',
+    /c\.guideStrokeOverlay = true;/.test(appSrc));
+  t('画不画与开关无关（只看有没有线）', (() => {
     const seg = appSrc.slice(appSrc.indexOf('const jobGuides ='),
       appSrc.indexOf('lastStrokeNote = strokeNote'));
-    // 开关现在从调用方传入（快照化）：`strokeOn` 就是那次的开关状态
-    return /if \(strokeOn && jobGuides\.length\)/.test(seg) &&
-      /const strokeOn = \(strokeOverlay === undefined/.test(seg);
+    return /if \(strokeOn\) \{/.test(seg) &&
+      /const strokeOn = jobGuides\.length > 0;/.test(seg) &&
+      !/guideStrokeOverlay/.test(seg);
   })());
-  t('关掉后仍作为文字说明（不是彻底失效）', (() => {
+  t('引导线同时作为文字说明（图和词双保险）', (() => {
     const seg = appSrc.slice(appSrc.indexOf('const selGuides ='),
       appSrc.indexOf('const req = C.buildImageRequest'));
     return /describeGuides/.test(seg);
   })());
-  t('界面提示了怎么应对线被画出来', /关掉/.test(html) && /画进/.test(html));
+  t('界面提示了引导线会进图', /画进发给模型的图片/.test(html));
 
   /* 7) 笔迹不吸附（拉直会毁掉手画的弧度） */
   t('笔迹不吸附', (() => {
@@ -2927,9 +2948,11 @@ console.log('\n【后台生成】一张图进 AI 生图后，可以放到后台�
   t('快照里存了选区', /rect,\s*\n\s*mask,\s*\n\s*built,/.test(appSrc));
   t('快照里存了请求体', /req,/.test(appSrc));
   t('快照里存了掩膜', /mask,\s*\n\s*built,/.test(appSrc));
-  // 引导线/开关/颜色也显式传进去（不能读模块状态）
+  // 引导线按快照传进去（不能读模块状态），之后用户改线不影响这次请求。
+  // 不再传开关 —— 画不画只由「有没有线」决定。
   t('引导线按快照传给组图函数',
-    /buildRequestImage\(rect, mask, rect, S\.guides\.slice\(\), S\.cfg\.guideStrokeOverlay\)/.test(appSrc));
+    /buildRequestImage\(rect, mask, rect, S\.guides\.slice\(\)\)/.test(appSrc) &&
+    !/buildRequestImage\(rect, mask, rect, S\.guides\.slice\(\), /.test(appSrc));
 
   // (b) 结果静默丢失 → 落不进当前文档就落进作品库
   t('有「把结果存进作品库」的函数', /function stashJobResult\(/.test(appSrc));

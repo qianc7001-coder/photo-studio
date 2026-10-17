@@ -833,6 +833,59 @@ async function run() {
   }
   t('OpenAI 编辑生成了结果', !!S.pending);
   if (S.pending) { doc.getElementById('cmp-discard').dispatchEvent(new window.Event('click')); await sleep(40); }
+
+  /* ---------- GPT 必须真正「看得见」引导线 ----------
+   * 用户反馈：用 GPT 生图模型（有参考图能力）时，模型看不到他画的引导线。
+   * 引导线能进图的前提有两步，缺一不可：
+   *   1) buildRequestImage 把线画进请求图（开关残留 false 时曾经会跳过 —— 已删掉开关）
+   *   2) multipart 上传的是**同一张**画好线的图（不是原始底图）
+   * 这里直接解析 multipart 里的 image 文件、还原成像素来验证，不靠间接推断。
+   */
+  console.log('\n【16b】GPT（multipart）请求图里必须真的画出引导线');
+  {
+    S.cfg.provider = 'openai';
+    S.cfg.baseUrl = 'https://api.openai.com/v1';
+    S.cfg.model = 'gpt-image-1';
+    S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.upscaleSmall = false;
+    // 故意把旧配置设成 false：老版本会让线消失，新版本必须无视它
+    S.cfg.guideStrokeOverlay = false;
+    S.rect = { x: 30, y: 30, w: 200, h: 200 };
+    window.__PS_API.setGuides([
+      { kind: 'line', x1: 0, y1: .25, x2: 1, y2: .25 },        // 第 1 条：红
+      { kind: 'freehand', points: [{ x: 0, y: .75 }, { x: 1, y: .75 }] },  // 第 2 条：青
+    ]);
+    await sleep(80);
+    const gptBefore = fake.seen.length;
+    doc.getElementById('prompt').value = '把天空换成晚霞';
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 8000);
+    const gptReqs = fake.seen.slice(gptBefore).filter((x) => x.multipart && x.multipart.files.image);
+    t('GPT 请求带上了 image 文件', gptReqs.length > 0, gptReqs.length);
+    if (gptReqs.length) {
+      const rec = gptReqs[0];
+      t('GPT 请求打到 /images/edits', rec.url.includes('/images/edits'), rec.url);
+      t('提示词里带上了引导线说明', /构图引导|手绘走向/.test(rec.multipart.fields.prompt || ''));
+      const im = await napi.loadImage(rec.multipart.files.image.data);
+      const cc = napi.createCanvas(im.width, im.height);
+      const cx = cc.getContext('2d');
+      cx.drawImage(im, 0, 0);
+      const px = cx.getImageData(0, 0, im.width, im.height).data;
+      let red = 0, cyan = 0;
+      for (let i = 0; i < px.length; i += 4) {
+        const r = px[i], g = px[i + 1], b = px[i + 2];
+        if (r > 120 && r - g > 60 && r - b > 60) red++;          // 偏红
+        else if (g > 110 && b > 110 && r < g - 50) cyan++;       // 偏青
+      }
+      // 这是整个修复的最终证据：GPT 收到的图里能看到红色和青色两条线
+      t('★ GPT 收到的图里有第 1 条红线', red > 50, red);
+      t('★ GPT 收到的图里有第 2 条青线', cyan > 50, cyan);
+    }
+    if (S.pending) { doc.getElementById('cmp-discard').dispatchEvent(new window.Event('click')); await sleep(60); }
+    S.cfg.guideStrokeOverlay = true;
+    window.__PS_API.setGuides([]);
+    await sleep(60);
+  }
+
   // 恢复默认
   S.cfg.provider = 'siliconflow';
   S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
@@ -3704,16 +3757,19 @@ async function run() {
       await sleep(120);
     }
 
-    // ---- 开关：关掉后请求图里不能有笔迹，但提示词仍要有说明 ----
+    // ---- 旧配置残留 false：引导线必须照样进图 ----
+    // 这是用户反馈的核心 bug：老版本有个「笔迹进图」开关，一旦存成 false，
+    // 屏幕上看得见线、模型收到的图里却没有，而且完全没有提示。
+    // 现在开关删掉了，这里验证「即使配置里还残留 false，线也必须画进去」。
     S.cfg.guideStrokeOverlay = false;
     const beforeOff = fake.seen.length;
     fake.setColor([120, 180, 120]);
     doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 8000);
     const genOff = fake.seen.slice(beforeOff).filter((x) => x.body && x.body.prompt);
-    t('关掉后仍发起了请求', genOff.length > 0, genOff.length);
+    t('旧配置残留 false 时仍发起了请求', genOff.length > 0, genOff.length);
     if (genOff.length) {
-      t('关掉后提示词里仍有引导线说明（退化成文字）', /手绘走向|构图引导/.test(genOff[0].body.prompt));
+      t('旧配置残留 false 时提示词里仍有引导线说明', /手绘走向|构图引导/.test(genOff[0].body.prompt));
       const mOff = /^data:image\/(jpeg|png);base64,(.*)$/.exec(String(genOff[0].body.image || ''));
       if (mOff) {
         const imO = await napi.loadImage(Buffer.from(mOff[2], 'base64'));
@@ -3725,36 +3781,29 @@ async function run() {
         for (let i = 0; i < pxO.length; i += 4) {
           if (pxO[i] > 110 && pxO[i + 1] < pxO[i] - 50) any++;
         }
-        t('关掉后请求图里没有笔迹', any === 0, any);
+        t('★ 旧配置残留 false，请求图里仍然有引导线', any > 50, any);
       } else {
-        t('关掉后请求图里没有笔迹（跳过）', true);
+        t('★ 旧配置残留 false，请求图里仍然有引导线（跳过）', true);
       }
     }
-    t('关掉后自检标注为「未画进图片」', /关闭/.test(window.__PS_API.strokeNote()), window.__PS_API.strokeNote());
+    t('自检如实报告已把线画进图', /已把/.test(window.__PS_API.strokeNote()), window.__PS_API.strokeNote());
     if (S.pending) {
       doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
       await sleep(120);
     }
     S.cfg.guideStrokeOverlay = true;
 
-    // ---- 设置页开关与颜色 ----
+    // ---- 设置页：开关已彻底移除 ----
     doc.getElementById('btn-settings').dispatchEvent(new window.Event('click'));
     await sleep(80);
-    t('设置里有笔迹进图开关', !!doc.getElementById('set-strokeimg'));
-    t('设置开关反映当前状态', doc.getElementById('set-strokeimg').checked === true);
-    // 颜色选择已从设置里移除：颜色按序号自动分配（选了会撞色，指代失效）
-    t('设置里没有颜色选择', doc.getElementById('set-strokecolor') === null);
-    t('设置里说明了颜色按顺序自动分配',
-      /第 1 条红、第 2 条青/.test(doc.getElementById('set-strokeimg')
-        .closest('.st-card').textContent));
-    doc.getElementById('set-strokeimg').checked = false;
-    doc.getElementById('set-strokeimg').dispatchEvent(new window.Event('change'));
-    await sleep(60);
-    t('从设置关开关生效', S.cfg.guideStrokeOverlay === false);
-    t('关开关后状态可查', window.__PS_API.strokeOverlayEnabled() === false);
-    doc.getElementById('set-strokeimg').checked = true;
-    doc.getElementById('set-strokeimg').dispatchEvent(new window.Event('change'));
-    await sleep(60);
+    t('设置里没有笔迹进图开关了', doc.getElementById('set-strokeimg') === null);
+    t('设置里没有颜色选择（颜色按序号自动分配）', doc.getElementById('set-strokecolor') === null);
+    const guideCard = Array.from(doc.querySelectorAll('#settings .st-card'))
+      .find((el) => /强制画进发给模型的图片/.test(el.textContent));
+    t('设置里说明引导线是强制画进图的', !!guideCard);
+    t('设置里说明颜色按顺序自动分配', /第 1 条红、第 2 条青/.test(
+      Array.from(doc.querySelectorAll('#settings .st-card')).map((e) => e.textContent).join('')));
+    t('自检里的开关状态恒为「已启用」', window.__PS_API.strokeOverlayEnabled() === true);
     doc.querySelector('#settings [data-close]').dispatchEvent(new window.Event('click'));
     await sleep(60);
 
