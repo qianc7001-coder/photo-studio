@@ -79,6 +79,13 @@ public class KeepAliveService extends Service {
             NotificationManager nm =
                     (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
             if (nm == null) return;
+            // 关键：**没有通知权限时 notify() 不抛异常，而是静默丢弃**。
+            // 所以不能靠 catch 发现失败 —— 必须在发之前主动检查，
+            // 否则用户永远只会看到「没有通知」而不知道为什么。
+            if (!canNotify(ctx, nm)) {
+                Log.w(TAG, "通知发不出去：未授权或被系统关闭 —— " + text);
+                return;   // 不 stop，保活状态由调用方决定
+            }
             String body = (text == null || text.isEmpty()) ? "生成完成，点开查看效果" : text;
             Notification n = builder(ctx, CHANNEL_DONE)
                     .setSmallIcon(R.drawable.ic_stat_photostudio)
@@ -92,6 +99,22 @@ public class KeepAliveService extends Service {
             Log.w(TAG, "发送完成通知失败: " + e.getMessage());
         }
         stop(ctx);
+    }
+
+    /** 当前是否真的能发通知（13+ 运行时权限 + 应用级开关） */
+    private static boolean canNotify(Context ctx, NotificationManager nm) {
+        try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                if (ctx.checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                        != android.content.pm.PackageManager.PERMISSION_GRANTED) return false;
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && !nm.areNotificationsEnabled()) {
+                return false;
+            }
+            return true;
+        } catch (Exception e) {
+            return true;   // 判断失败时照常尝试，宁可多发一次也不要漏
+        }
     }
 
     /**

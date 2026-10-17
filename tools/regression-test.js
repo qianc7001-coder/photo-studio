@@ -2200,6 +2200,56 @@ console.log('\n【发布】历史版本必须可下载（README 与归档一致�
 })();
 // ===== 调色滑块与调色后生成结束 =====
 
+
+/* ===== 通知真的发得出去 =====
+ * 用户反馈「无法发通知」。查到两层原因：
+ *   1) 权限申请只挂在「常驻保活」开关上 —— 绝大多数用户从没被问过，
+ *      Android 13+ 没授权时通知被系统**静默丢弃**
+ *   2) 原生的 notifyDone 用 catch 兜住一切，而缺权限时 notify() 根本不抛异常，
+ *      所以静默失败连日志都看不出
+ * 下面把两层都钉住。
+ */
+(function () {
+  console.log('\n【通知可用性】');
+  const fsN = require('fs');
+  const js = fsN.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html = fsN.readFileSync(__dirname + '/../app/index.html', 'utf8');
+  const mainJava = fsN.readFileSync(__dirname + '/../android/src/com/photostudio/app/MainActivity.java', 'utf8');
+  const svcJava = fsN.readFileSync(__dirname + '/../android/src/com/photostudio/app/KeepAliveService.java', 'utf8');
+
+  // --- 1) 权限申请不能再挂在常驻保活上 ---
+  t('启动时就申请通知权限', /syncKeepAlive\(\);\s*\n[\s\S]{0,300}askNotificationPermission\(\);/.test(js));
+  t('★ 不再只在「常驻保活」时才申请',
+    !/if \(S\.keepAliveSupported && S\.cfg\.keepAliveAlways === true\) askNotificationPermission\(\);/.test(js));
+  t('生成开始前再确认一次权限', /function runGenerate\(\) \{[\s\S]{0,300}ensureNotifyReady\(\);/.test(js));
+  t('文生图开始前也确认', /function runT2i\(\) \{[\s\S]{0,160}ensureNotifyReady\(\);/.test(js));
+  t('有 ensureNotifyReady 函数', /function ensureNotifyReady\(/.test(js));
+
+  // --- 2) 原生要能如实报告「能不能发」 ---
+  t('原生暴露 notificationState', /int notificationState\(\)/.test(mainJava));
+  t('状态区分「未授权」和「系统关闭」',
+    /return 1;/.test(mainJava) && /return 2;/.test(mainJava));
+  t('原生能跳到本应用的通知设置页', /boolean openNotificationSettings\(\)/.test(mainJava));
+  t('用了 APP_NOTIFICATION_SETTINGS（直达而不是让用户自己翻）',
+    /ACTION_APP_NOTIFICATION_SETTINGS/.test(mainJava));
+
+  // --- 3) 发送前必须主动检查（notify 不抛异常）---
+  t('★ 发通知前主动检查权限', /canNotify\(ctx, nm\)/.test(svcJava));
+  t('★ 检查了 13+ 运行时权限', /POST_NOTIFICATIONS/.test(svcJava));
+  t('★ 检查了应用级通知开关', /areNotificationsEnabled/.test(svcJava));
+  t('发不出去时留下日志（不再纯静默）',
+    /通知发不出去/.test(svcJava));
+
+  // --- 4) 界面上要能看见状态并能跳过去开 ---
+  t('设置里有通知状态行', /id="notify-state"/.test(html));
+  t('设置里有「去打开」按钮', /id="btn-notify-settings"/.test(html));
+  t('有刷新通知状态的函数', /function updateNotifyUI\(/.test(js));
+  t('未授权时文案说清后果', /收不到提醒/.test(js));
+  t('按钮能跳到系统通知设置', /openNotificationSettings/.test(js));
+  t('设置页刷新时会带上通知状态', /updateNotifyUI\(\);\s*\n  \}/.test(js));
+})();
+// ===== 通知可用性结束 =====
+
 /* ---------- 检查更新 ---------- */
 console.log('\n【更新】应用内检测新版本（不能依赖 /releases/latest）');
 

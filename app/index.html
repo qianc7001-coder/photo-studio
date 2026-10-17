@@ -728,6 +728,12 @@
         <div class="st-row st-row-plain">
           <span class="ka-state ka-muted" id="ka-state">检测中…</span>
         </div>
+        <!-- 通知状态：发不出去时必须说清楚是哪种原因，
+             否则用户只会觉得「这应用坏了」，根本想不到是系统权限 -->
+        <div class="st-row st-row-plain" id="notify-state-row">
+          <span class="ka-state" id="notify-state">检测通知…</span>
+          <button class="chip" id="btn-notify-settings" hidden>去打开</button>
+        </div>
         <div class="st-row st-row-plain" id="ka-battery-row" hidden>
           <button class="st-btn" id="ka-battery" style="width:100%">允许后台运行（系统电池优化）</button>
         </div>

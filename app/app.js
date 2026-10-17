@@ -920,6 +920,55 @@
     try { b.notifyDone(text || '生成完成，点开查看效果'); } catch (e) { /* ignore */ }
   }
 
+  /**
+   * 生成任务开始时确保有通知权限。
+   *
+   * 为什么放在这里：权限被拒绝过一次之后，系统不会再自动弹框；
+   * 用户也未必会主动去设置里开。这里不发弹窗（系统不会二次弹），
+   * 只是让原生侧在「还没授权」时再走一次申请流程，
+   * 并在真发不出通知时把原因记下来供自查面板显示。
+   */
+  function ensureNotifyReady() {
+    const b = bridge();
+    if (!b) return;
+    try { b.requestNotificationPermission(); } catch (e) { /* ignore */ }
+  }
+
+  /**
+   * 把「能不能发通知」如实刷到设置界面。
+   *
+   * 为什么必须有：Android 13+ 没授权时通知会被系统**静默丢弃** ——
+   * 应用看起来一切正常，就是不弹通知。用户会认为是应用坏了。
+   * 这里直接问原生要真实状态，并给出一个能跳过去的按钮。
+   */
+  function updateNotifyUI() {
+    const el = $('notify-state');
+    const btn = $('btn-notify-settings');
+    if (!el) return;
+    const b = bridge();
+    let state = 0;
+    if (b && b.notificationState) {
+      try { state = Number(b.notificationState()); } catch (e) { state = 0; }
+    }
+    if (state === 1) {
+      el.textContent = '通知未授权 —— 生成完成/失败时收不到提醒';
+      el.className = 'ka-state ka-warn';
+      if (btn) btn.hidden = false;
+    } else if (state === 2) {
+      el.textContent = '系统里已关闭本应用的通知 —— 收不到提醒';
+      el.className = 'ka-state ka-warn';
+      if (btn) btn.hidden = false;
+    } else if (!b) {
+      el.textContent = '浏览器里没有系统通知（用 APK 才有）';
+      el.className = 'ka-state ka-muted';
+      if (btn) btn.hidden = true;
+    } else {
+      el.textContent = '通知正常 · 生成完成和失败都会提醒';
+      el.className = 'ka-state ka-ok';
+      if (btn) btn.hidden = true;
+    }
+  }
+
   /** 把保活状态刷到设置界面 */
   function updateKeepAliveUI() {
     const el = $('ka-state');
@@ -949,6 +998,8 @@
       batt.hidden = !optimized;
       if (battRow) battRow.hidden = !optimized;
     }
+    // 顺带刷新通知状态：权限可能刚在系统设置里被改过
+    updateNotifyUI();
   }
 
   /** 引导用户把应用加入电池优化白名单 */
@@ -3428,6 +3479,9 @@
    * 用户回首页 / 换图时任务继续跑，结果落进它自己那件作品的记录里。
    */
   async function runGenerate() {
+    // 开始生成前先确认通知权限：这次跑完要发通知，
+    // 没权限的话用户就等于什么都收不到（表现就是「无法发通知」）。
+    ensureNotifyReady();
     const job = (() => {
       try {
         return prepareJob();
@@ -6455,6 +6509,7 @@
 
   /** 跑一次文生图 */
   async function runT2i() {
+    ensureNotifyReady();
     const prompt = String($('t2i-prompt') ? $('t2i-prompt').value : '').trim();
     const negative = String($('t2i-negative') ? $('t2i-negative').value : '').trim();
     t2i.prompt = prompt;
@@ -7552,6 +7607,18 @@
       syncKeepAlive();
     });
     $('ka-battery').onclick = askIgnoreBattery;
+    // 「去打开通知设置」：直接跳到系统里本应用的通知页。
+    // 不这么做的话，用户得自己翻 设置 → 应用 → 通知，很多人找不到。
+    if ($('btn-notify-settings')) {
+      $('btn-notify-settings').onclick = () => {
+        const b = bridge();
+        if (b && b.openNotificationSettings) {
+          try { b.openNotificationSettings(); } catch (e) { /* ignore */ }
+        } else {
+          toast('请到「系统设置 → 应用 → 枫叶修图 → 通知」里打开', 4200);
+        }
+      };
+    }
     bindField('set-price', 'priceOverride', (el) => el.value.trim());
     bindField('set-usdcny', 'usdCny', (el) => Number(el.value) || 7.1, updatePriceTip);
     $('btn-reset-spend').onclick = () => {
@@ -8214,7 +8281,11 @@
     // 无条件调用 —— 桥可能比 boot 晚就绪，syncKeepAlive 内部会实时探测并自行处理。
     // 常驻保活必须在这里补一次，否则用户上次开了常驻、这次重启就失效了。
     syncKeepAlive();
-    if (S.keepAliveSupported && S.cfg.keepAliveAlways === true) askNotificationPermission();
+    // 通知权限：**启动就申请**，不再挂在「常驻保活」这个开关上。
+    // 以前只有开了常驻保活才申请，结果是绝大多数用户从来没被问过，
+    // 于是「生成完成/失败」的通知被系统静默丢弃 —— 用户看到的就是「无法发通知」。
+    // 这个权限只影响通知显示，拒绝了也能正常修图，所以启动时问一次是安全的。
+    askNotificationPermission();
 
     // 老内核兼容提示：不弹窗打扰，只在控制台留痕 + 升级条里说明
     if (S.compat && S.compat.warn) console.warn('[枫叶修图] ' + S.compat.warn);

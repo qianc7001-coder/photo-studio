@@ -8,6 +8,7 @@ import android.content.ContentValues;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.app.DownloadManager;
+import android.app.NotificationManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -881,6 +882,56 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public boolean keepAliveRunning() {
             return keepAliveRunning;
+        }
+
+        /**
+         * 当前到底能不能发通知。
+         *
+         * 为什么要暴露这个：JS 侧发通知是「尽力而为」，发失败时
+         * 以前只会静默吞掉（见下面 catch），用户完全不知道为什么收不到。
+         * 有了这个查询，设置页就能如实显示「通知被系统关掉了，去打开」，
+         * 而不是让用户对着一个不发通知的应用猜。
+         *
+         * @return 0 = 可以发；1 = Android 13+ 权限未授予；2 = 系统层面被关闭（用户关了应用通知）
+         */
+        @JavascriptInterface
+        public int notificationState() {
+            try {
+                NotificationManager nm =
+                        (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                if (nm == null) return 2;
+                // 13+ 先看运行时权限
+                if (Build.VERSION.SDK_INT >= 33) {
+                    if (checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                            != PackageManager.PERMISSION_GRANTED) return 1;
+                }
+                // 再看应用级通知开关（用户可能在系统设置里整个关掉）
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N
+                        && !nm.areNotificationsEnabled()) return 2;
+                return 0;
+            } catch (Exception e) {
+                return 2;
+            }
+        }
+
+        /** 打开本应用的通知设置页，方便用户手动打开 */
+        @JavascriptInterface
+        public boolean openNotificationSettings() {
+            try {
+                Intent it;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    it = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+                    it.putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName());
+                } else {
+                    it = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                    it.setData(Uri.parse("package:" + getPackageName()));
+                }
+                it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(it);
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
         }
 
         /** 生成完成：发通知告诉用户「好了」，并收掉保活 */

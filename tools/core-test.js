@@ -574,8 +574,13 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
     /function setBusy[\s\S]{0,500}syncKeepAlive\(\)/.test(appSrc2));
   // 启动时必须无条件同步一次：桥可能比 boot 晚就绪，靠启动时的缓存值会永久误判
   t('启动时无条件同步保活状态', /\/\/ 后台保活[\s\S]{0,400}syncKeepAlive\(\);/.test(appSrc2));
-  t('启动时按常驻配置申请通知权限',
-    /syncKeepAlive\(\);[\s\S]{0,200}keepAliveAlways === true\) askNotificationPermission\(\)/.test(appSrc2));
+  // 通知权限改成「启动就申请」——不再挂在常驻保活开关上。
+  // 原来只有开了常驻才申请，绝大多数用户从没被问过，
+  // Android 13+ 没授权就是静默丢弃（用户反馈「无法发通知」的根因）。
+  t('启动时无条件申请通知权限',
+    /syncKeepAlive\(\);[\s\S]{0,400}\n\s*askNotificationPermission\(\);/.test(appSrc2));
+  t('不再只在常驻保活时才申请',
+    !/keepAliveAlways === true\) askNotificationPermission\(\)/.test(appSrc2));
   t('保活支持检测不缓存（实时探测）',
     /S\.keepAliveSupported = keepAliveSupported\(\);/.test(appSrc2));
   t('启动时探测环境能力', /applyCompat\(\)/.test(appSrc2));
