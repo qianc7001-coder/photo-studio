@@ -2905,9 +2905,12 @@ async function run() {
     window.__PS_API.syncToolbar();
     await sleep(60);
     t('没照片时显示首页', window.__PS_API.isHomeVisible() === true);
-    t('没照片时工具栏收起', window.__PS_API.toolbarVisible() === false);
-    t('收起态打了 collapsed 类',
-      doc.getElementById('bottombar').classList.contains('collapsed') === true);
+    t('没照片时工具栏不可见', window.__PS_API.toolbarVisible() === false);
+    // 首页是**整个藏起来**（hidden），不是收起到最矮 ——
+    // 收起态仍会露出 40px 一条，在首页既没用又占地方（用户反馈）
+    t('★ 首页工具栏整个隐藏（不是只收起）',
+      doc.getElementById('bottombar').hidden === true,
+      doc.getElementById('bottombar').hidden);
     t('首页标题是「修改历史」',
       /修改历史/.test(doc.querySelector('#home .home-title').textContent));
     // 有修图记录时必须列出来（这就是「昨天修的今天还能看到」）
@@ -4377,8 +4380,8 @@ async function run() {
     window.__PS_API.renderHome();
     window.__PS_API.syncToolbar();
     await sleep(80);
-    t('回首页工具栏收起', window.__PS_API.toolbarVisible() === false);
-    t('首页收起态有 collapsed 类', bar.classList.contains('collapsed') === true);
+    t('回首页工具栏不可见', window.__PS_API.toolbarVisible() === false);
+    t('回首页工具栏整个隐藏', bar.hidden === true, bar.hidden);
   }
 
 
@@ -6220,6 +6223,195 @@ async function run() {
       recAfter && recAfter.session && recAfter.session.items && recAfter.session.items.length);
 
     // 收尾
+    api.goHome();
+    await sleep(150);
+  }
+
+  /* ---------- 通知：成功/失败都要发，且不只是切走时 ---------- */
+  console.log('\n【54】生成通知：完成和失败都要发系统通知');
+  {
+    const api = window.__PS_API;
+    S.library = [];
+    window.localStorage.removeItem('photoStudio.library.v1');
+    api.saveLibrary();
+    S.jobs = [];
+    api.goHome();
+    await sleep(150);
+
+    // 造一张小图
+    {
+      const c = napi.createCanvas(400, 300);
+      const cx0 = c.getContext('2d');
+      cx0.fillStyle = 'rgb(90, 110, 130)';
+      cx0.fillRect(0, 0, 400, 300);
+      const inp = doc.getElementById('file-input');
+      Object.defineProperty(inp, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'notif.png', { type: 'image/png' })],
+        configurable: true
+      });
+      inp.dispatchEvent(new window.Event('change'));
+      await sleep(400);
+    }
+    t('通知测试的照片已载入', S.imgW === 400, S.imgW);
+    S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.contextPct = 0;
+    S.cfg.upscaleSmall = false; S.cfg.autoGrade = false;
+    window.confirm = () => true;
+
+    // ---- 1) 成功：应用**还在前台**也要发通知（这是新行为）----
+    t('当前在应用内（不是切走状态）', window.document.hidden === false);
+    const beforeOk = kaCalls.filter((c) => c.notify).length;
+    S.rect = { x: 40, y: 40, w: 160, h: 120 };
+    doc.getElementById('prompt').value = '通知成功测试';
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 12000);
+    {
+      const t1 = Date.now();
+      while (!S.pending && S.jobs.some((j) => j.status === 'running') && Date.now() - t1 < 12000) await sleep(100);
+    }
+    const okNotes = kaCalls.filter((c) => c.notify).slice(beforeOk);
+    t('★ 生成成功时发了系统通知（前台也发）', okNotes.length > 0, okNotes);
+    t('成功通知文案说明已完成',
+      okNotes.some((c) => /完成/.test(c.notify)), okNotes.map((c) => c.notify));
+    if (S.pending) { doc.getElementById('cmp-discard').dispatchEvent(new window.Event('click')); await sleep(100); }
+
+    // ---- 2) 失败：必须发通知，且带上原因 ----
+    const realFetch = window.fetch;
+    window.fetch = async (u, o) => {
+      if (String(u).includes('images/')) {
+        return {
+          ok: false, status: 500,
+          json: async () => ({ error: { message: '模型额度超了' } }),
+          text: async () => JSON.stringify({ error: { message: '模型额度超了' } }),
+          blob: async () => new window.Blob([])
+        };
+      }
+      return realFetch(u, o);
+    };
+    const beforeFail = kaCalls.filter((c) => c.notify).length;
+    S.rect = { x: 40, y: 40, w: 120, h: 100 };
+    doc.getElementById('prompt').value = '通知失败测试';
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 15000);
+    {
+      const t2 = Date.now();
+      while (S.jobs.some((j) => j.status === 'running') && Date.now() - t2 < 12000) await sleep(100);
+    }
+    window.fetch = realFetch;
+    const failNotes = kaCalls.filter((c) => c.notify).slice(beforeFail);
+    t('★ 生成失败时也发了系统通知', failNotes.length > 0, failNotes);
+    t('失败通知说明了是失败',
+      failNotes.some((c) => /失败/.test(c.notify)), failNotes.map((c) => c.notify));
+    t('★ 失败通知带上了具体原因（不只一句「失败」）',
+      failNotes.some((c) => /失败[:：].+/.test(c.notify)), failNotes.map((c) => c.notify));
+    const ep = doc.getElementById('gen-error');
+    if (ep && !ep.hidden) {
+      const cb = doc.getElementById('err-close');
+      if (cb) cb.dispatchEvent(new window.Event('click'));
+      await sleep(80);
+    }
+
+    // ---- 3) 文生图也要发 ----
+    const beforeT2i = kaCalls.filter((c) => c.notify).length;
+    api.goHome();
+    await sleep(150);
+    doc.getElementById('btn-home-t2i').dispatchEvent(new window.Event('click'));
+    await sleep(150);
+    doc.getElementById('t2i-prompt').value = '山间晨雾的风景照片';
+    doc.getElementById('t2i-prompt').dispatchEvent(new window.Event('input'));
+    await sleep(60);
+    doc.getElementById('t2i-go').dispatchEvent(new window.Event('click'));
+    for (let i = 0; i < 160 && S.busy; i++) await sleep(50);
+    await sleep(300);
+    const t2iNotes = kaCalls.filter((c) => c.notify).slice(beforeT2i);
+    t('★ 文生图完成也发通知', t2iNotes.length > 0, t2iNotes);
+    t('文生图通知文案说明完成',
+      t2iNotes.some((c) => /文生图/.test(c.notify)), t2iNotes.map((c) => c.notify));
+
+    api.goHome();
+    await sleep(150);
+  }
+
+  /* ---------- 调色滑块：只能拖滑块头、且够得着 ---------- */
+  console.log('\n【55】调色滑块：只能拖动调整，且手指够得着');
+  {
+    const api = window.__PS_API;
+    // 需要一张照片才能进调色
+    {
+      const c = napi.createCanvas(800, 600);
+      const cx0 = c.getContext('2d');
+      cx0.fillStyle = 'rgb(100, 120, 140)';
+      cx0.fillRect(0, 0, 800, 600);
+      const inp = doc.getElementById('file-input');
+      Object.defineProperty(inp, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'slider.png', { type: 'image/png' })],
+        configurable: true
+      });
+      inp.dispatchEvent(new window.Event('change'));
+      await sleep(400);
+    }
+    api.openGradeTool();
+    await sleep(200);
+
+    const row = doc.querySelector('#grade-sliders input[data-grade="exposure"]');
+    t('找到调色滑块', !!row);
+
+    // jsdom 不加载外部样式表（getComputedStyle 全是 auto），
+    // 所以样式类断言直接读 CSS 源文件，比在 DOM 上猜更可靠。
+    const cssSrc = fs.readFileSync(path.join(APP, 'style.css'), 'utf8');
+    const gradeSliderCss = (/\.grade-row input\[type=range\]\s*\{[^}]*\}/.exec(cssSrc) || [''])[0];
+
+    // 1) 滑块必须独占手势（否则竖着拖会被页面滚动抢走 → 感觉拖不动）
+    t('★ 滑块独占手势（touch-action: none）',
+      /touch-action:\s*none/.test(gradeSliderCss), gradeSliderCss.slice(0, 80));
+
+    // 2) 滑块头尺寸够大
+    const thumbPx = parseFloat((/--ps-thumb:\s*([\d.]+)px/.exec(gradeSliderCss) || [])[1]);
+    t('★ 调色滑块头 ≥26px（手指够得着）', thumbPx >= 26, thumbPx);
+    t('滑块头有可见光晕（提示按下这里）',
+      /\.grade-row input\[type=range\]::-webkit-slider-thumb[\s\S]{0,300}box-shadow/.test(cssSrc));
+
+    // 3) 命中判定：点轨道被拦，点滑块头放行
+    //    用 core 的纯函数验证（真实 DOM 坐标在 jsdom 里拿不到有意义的 rect）
+    const core = window.PSCore;
+    const fakeRect = { width: 300, left: 0 };
+    const atThumb = core.planSliderHit({
+      value: 50, min: 0, max: 100,
+      rectLeft: fakeRect.left, rectWidth: fakeRect.width,
+      thumbWidth: thumbPx, pointerX: 150
+    });
+    t('★ 点滑块头正中放行（可以拖）', atThumb.block === false, atThumb);
+    const farAway = core.planSliderHit({
+      value: 50, min: 0, max: 100,
+      rectLeft: fakeRect.left, rectWidth: fakeRect.width,
+      thumbWidth: thumbPx, pointerX: 60
+    });
+    t('★ 点远处轨道被拦（不会跳值）', farAway.block === true, farAway);
+    // 宽容区必须贴着滑块头：滑块头半径 + 一点点余量。
+    // 太宽 → 点轨道也会跳值（用户要避免的误触）；太窄 → 手指够不着。
+    const nearEdge = core.planSliderHit({
+      value: 50, min: 0, max: 100,
+      rectLeft: fakeRect.left, rectWidth: fakeRect.width,
+      thumbWidth: thumbPx, pointerX: 150 + thumbPx / 2 + 4
+    });
+    const justOutside = core.planSliderHit({
+      value: 50, min: 0, max: 100,
+      rectLeft: fakeRect.left, rectWidth: fakeRect.width,
+      thumbWidth: thumbPx, pointerX: 150 + thumbPx / 2 + 10
+    });
+    t('★ 滑块头边缘仍可拖（不会点不中）', nearEdge.block === false, nearEdge);
+    t('★ 离开滑块头就拦下（不误触）', justOutside.block === true, justOutside);
+
+    // 4) 拖动真的能改值（这是「可以调整」的最低要求）
+    const before = row.value;
+    row.value = '35';
+    row.dispatchEvent(new window.Event('input'));
+    await sleep(150);
+    t('拖动后值真的变了', row.value === '35', [before, row.value]);
+    t('拖动有实时预览（viewCanvas 在）', !!S.viewCanvas);
+
+    // 5) 收尾
+    row.dispatchEvent(new window.Event('change'));
+    await sleep(200);
     api.goHome();
     await sleep(150);
   }

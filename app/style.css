@@ -477,17 +477,39 @@ ul.whatsnew li { margin-bottom: 5px; }
   flex: 0 0 52px;
   font-size: 11.5px; color: var(--text-dim);
 }
-/* 调色滑块：单独放大滑块头。
-   全局滑块头是 17px，那个尺寸是给「设置页里偶尔动一次」的场景；
-   调色是高频连续拖动，17px 在手机上几乎点不中（用户明确反馈过）。 */
+/* 调色滑块：加大滑块头 + 光晕，让「可以拖哪里」一眼可见。
+   全局滑块头是 17px，那是给「设置页偶尔动一次」的场景；
+   调色是高频连续拖动，17px 在手机上很难瞄准（用户反馈「根本滑不到」）。
+
+   另外必须让用户看得见可拖范围 —— 只把滑块做大、没有视觉提示，
+   他还是会去点轨道然后发现没反应，体验一样糟糕。 */
 .grade-row input[type=range] {
   min-width: 0;
-  height: 30px;            /* 加大可点区域（轨道本身仍细） */
-  --ps-thumb: 24px;
+  height: 34px;            /* 加大可点区域（轨道本身仍细） */
+  --ps-thumb: 28px;
+  /* 关键：滑块独占手势。
+     默认 touch-action 允许浏览器把「按住滑块往上滑」解释成滚动页面 ——
+     滚动一旦接管，pointercancel 就会打断拖动，用户感觉就是「拖不动」。
+     用户明确要求「只有拖动滑块的时候才能调整」，那就让滑块彻底接管。 */
+  touch-action: none;
 }
 .grade-row input[type=range]::-webkit-slider-thumb {
-  margin-top: -10px;       /* (轨道 4px - 头 24px) / 2 = -10 */
+  margin-top: -12px;       /* (轨道 4px - 头 28px) / 2 = -12 */
   border-width: 2px;
+  /* 外发光圈：明确告诉手指「按这里」。纯视觉，不影响命中判定
+     （命中仍按滑块头中心算，见 planSliderHit）。 */
+  box-shadow:
+    0 0 0 6px rgba(77, 163, 255, .16),
+    0 1px 6px rgba(0, 0, 0, .55);
+}
+.grade-row input[type=range]:active::-webkit-slider-thumb {
+  /* 按住时收紧光晕，给出「已抓住」的反馈 */
+  box-shadow:
+    0 0 0 3px rgba(77, 163, 255, .30),
+    0 1px 6px rgba(0, 0, 0, .55);
+}
+.grade-row input[type=range]::-moz-range-thumb {
+  box-shadow: 0 0 0 6px rgba(77, 163, 255, .16);
 }
 .grade-row .gv {
   flex: 0 0 42px; text-align: right;

@@ -146,9 +146,11 @@ async function boot(seedCfg) {
   t('设置里已无分块滑块', d.doc.getElementById('set-tile') === null);
   t('设置里已无分块标签', d.doc.getElementById('v-tile') === null);
   t('工具栏有拖动手柄', d.doc.getElementById('bar-handle') !== null);
-  // 全新安装没有照片 → 停在首页，工具栏应是收起状态（首页不需要工具栏）
-  t('全新安装停在首页且工具栏收起',
-    d.doc.getElementById('bottombar').classList.contains('collapsed') === true);
+  // 全新安装没有照片 → 停在首页，工具栏应该**整个隐藏**
+  // （不是收起到最矮：那样仍会露出 40px 一条，在首页既没用又占地方）
+  t('全新安装停在首页且工具栏隐藏',
+    d.doc.getElementById('bottombar').hidden === true,
+    d.doc.getElementById('bottombar').hidden);
 
   console.log(`\n  通过 ${pass} / ${pass + fail}`);
   if (fail) process.exit(1);

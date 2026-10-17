@@ -3233,8 +3233,23 @@ console.log('\n【后台生成】一张图进 AI 生图后，可以放到后台�
   t('只有还在看这张时才弹错误面板',
     /const stillHere = job\.docVersion === S\.docVersion && !!S\.img;/.test(appSrc));
   t('不在看这张时改成 toast', /else toast\('后台生成失败：'/.test(appSrc));
-  t('切走后失败也发通知',
-    /document\.hidden[\s\S]{0,120}notifyGenDone\('生成失败/.test(appSrc));
+  // 生成失败必须**无条件**发系统通知，且带上原因 ——
+  // 只写「生成失败」等于让用户回应用再猜一遍为什么。
+  t('失败一定发通知（不再只在切走时发）',
+    /notifyGenDone\('生成失败：'\s*\+/.test(appSrc));
+  t('失败通知里带上了原因', (() => {
+    const i = appSrc.indexOf("notifyGenDone('生成失败：'");
+    if (i < 0) return false;
+    // 往前找到 why 的定义，确认它取自错误对象
+    const before = appSrc.slice(Math.max(0, i - 800), i);
+    return /const why = .*err/.test(before);
+  })());
+  t('失败通知原因做了截断（通知栏只有一行）',
+    /slice\(0, 60\)/.test(appSrc.slice(appSrc.indexOf("notifyGenDone('生成失败：'"), appSrc.indexOf("notifyGenDone('生成失败：'") + 200)));
+  // 成功也一样：不再依赖 document.hidden
+  t('成功也一定发通知', /notifyGenDone\('生成完成，点开对比效果'\);/.test(appSrc));
+  t('成功通知不再被 document.hidden 卡着',
+    !/document\.hidden\) notifyGenDone\('生成完成/.test(appSrc));
 
   /* ---------- 7) 「准备」与「执行」分离（各自好测好读） ---------- */
   t('有 prepareJob（同步，会抛本地自检错）', /function prepareJob\(\)/.test(appSrc));

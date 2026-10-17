@@ -12,6 +12,30 @@ PLATFORM="$SDK/pf/android-34/android.jar"
 AND="$ROOT/android"
 OUT="$ROOT/dist/android-build"
 
+# ---- JDK 版本必须 <= 17 ----
+#
+# 踩过的坑：本机默认 JDK 升到 21 之后，构建会在 d8 阶段崩掉：
+#   Error in .../MainActivity$1.class
+#   java.lang.NullPointerException: Cannot invoke "String.length()" because "<parameter1>" is null
+#   Compilation failed with an internal error.
+# 这个 d8（android-14 自带的 r8）不认 JDK 21 生成的部分 class 结构，
+# 报错完全指不到原因，而且**清空构建目录也没用**（不是残留问题）。
+# 换回 JDK 17 立刻恢复正常。所以这里主动把 JAVA_HOME 钉到 17，
+# 不去赌用户环境里的默认版本。
+if [ -d /usr/lib/jvm/java-17-openjdk-arm64 ]; then
+  export JAVA_HOME="/usr/lib/jvm/java-17-openjdk-arm64"
+elif [ -d /usr/lib/jvm/java-17-openjdk-amd64 ]; then
+  export JAVA_HOME="/usr/lib/jvm/java-17-openjdk-amd64"
+fi
+if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+  export PATH="$JAVA_HOME/bin:$PATH"
+fi
+_JV="$(java -version 2>&1 | head -1 | grep -oE '"[0-9]+' | tr -d '"')"
+if [ -n "$_JV" ] && [ "$_JV" -gt 17 ] 2>/dev/null; then
+  echo "⚠ 当前 JDK 是 $_JV，d8 在 17 以上会崩（NullPointerException），建议装 JDK 17"
+  echo "  已尝试自动切换；若失败请手动：export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64"
+fi
+
 command -v aapt     >/dev/null || { echo "缺少 aapt（apt install aapt）"; exit 1; }
 command -v zipalign >/dev/null || { echo "缺少 zipalign（apt install zipalign）"; exit 1; }
 command -v javac    >/dev/null || { echo "缺少 javac"; exit 1; }

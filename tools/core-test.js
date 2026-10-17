@@ -581,8 +581,16 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('启动时探测环境能力', /applyCompat\(\)/.test(appSrc2));
   t('切回前台会重新同步保活', /visibilitychange[\s\S]{0,200}syncKeepAlive\(\)/.test(appSrc2));
   t('浏览器里没有桥时不报错（bridge 判空）', /function bridge\(\)[\s\S]{0,200}PSBridge[\s\S]{0,200}null/.test(appSrc2));
-  t('生成完成且用户切走时发通知', /document\.hidden[\s\S]{0,120}notifyGenDone/.test(appSrc2));
-  t('生成失败且用户切走时也发通知', /生成失败，点开查看原因/.test(appSrc2));
+  // 通知改成了「无条件发送」：不再只在切走时发。
+  // 用户在应用里做别的事（看历史、改设置）时，系统通知同样有用。
+  t('生成完成就发通知（不依赖是否切走）',
+    /notifyGenDone\('生成完成，点开对比效果'\);/.test(appSrc2));
+  t('生成失败也发通知（不依赖是否切走）',
+    /notifyGenDone\('生成失败：'\s*\+/.test(appSrc2));
+  t('失败通知带上具体原因（不是笼统一句）',
+    /const why = .*err/.test(appSrc2));
+  t('文生图成功也发通知', /notifyGenDone\('文生图完成/.test(appSrc2));
+  t('文生图失败也发通知', /notifyGenDone\('文生图失败：'/.test(appSrc2));
   t('生成中提醒「别划掉」', /planGenForegroundNotice\(/.test(appSrc2));
   t('生成中提醒只弹一次', /seen: hintSeen\('gen-keepalive'\)/.test(appSrc2));
   t('设置里有保活总开关', /id="set-keepalive"/.test(html2));

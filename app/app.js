@@ -3500,8 +3500,11 @@
         const stillHere = job.docVersion === S.docVersion && !!S.img;
         if (stillHere) showGenError(err, { kind: job.kind, model: S.cfg.model, baseUrl: S.cfg.baseUrl });
         else toast('后台生成失败：' + ((err && err.message) || '未知错误'), 4200);
-        // 切走后失败更要通知：否则用户回来只看到界面恢复原样，不知道发生了什么
-        if (document.hidden) notifyGenDone('生成失败，点开查看原因');
+        // 失败也必须发通知，且把原因带上 ——
+        // 只写「生成失败」等于让用户回到应用再猜一遍为什么。
+        // 原因做截断（通知栏只有一行可见），完整信息仍在错误面板里。
+        const why = (err && (err.message || (err.json && err.json.error && err.json.error.message))) || '未知错误';
+        notifyGenDone('生成失败：' + String(why).replace(/\s+/g, ' ').slice(0, 60));
         console.error('[枫叶修图] 生成失败', err);
       }
       pruneJobs();
@@ -3541,8 +3544,9 @@
       job.seen = true;
       showCompare();
       refreshJobsUI();
-      // 用户可能已经切走了（去看别的应用/锁屏），发条通知告诉他「好了」
-      if (document.hidden) notifyGenDone('生成完成，点开对比效果');
+      // 生成完就发通知 —— 不再只在「切走了」时才发。
+      // 用户可能在应用里做别的事（看历史、改设置），系统通知能让他不盯屏幕也知道好了。
+      notifyGenDone('生成完成，点开对比效果');
       if (job.upscale && job.upscale.scale > 1.05) {
         toast('生成完成（选区较小，已放大 ' + job.upscale.scale.toFixed(1) +
           ' 倍发送，贴回时按原分辨率还原）', 3600);
@@ -4855,6 +4859,9 @@
   function applyBarHeight(h, opt) {
     const bar = $('bottombar');
     if (!bar) return;
+    // 首页不该有工具栏。任何路径（拖动/展开/换图后重算）都不该在没照片时
+    // 把它重新显示出来 —— 否则用户会看到底部莫名多出一条。
+    if (!S.img) { bar.hidden = true; return; }
     const o = (typeof opt === 'object' && opt) ? opt : { animate: opt };
     const full = barFullHeight();
     const plan = C.planToolbar({ height: h, full, viewH: window.innerHeight });
@@ -5096,7 +5103,17 @@
    */
   function syncToolbar() {
     const editing = !!S.img;
-    if (!editing) { collapseToolbar(); return; }
+    const bar = $('bottombar');
+    if (!editing) {
+      // 首页把工具栏**整个藏起来**，不是「收起到最矮」。
+      // 收起态仍会露出 BAR_MIN(40px) 一条，在首页既没用又占地方
+      // （用户反馈「首页不需要把工具栏放在底下」）。
+      // 用 hidden 而不是 maxHeight:0：后者仍会占位、也仍可被点到。
+      if (bar) bar.hidden = true;
+      S.toolbarVisible = false;
+      return;
+    }
+    if (bar) bar.hidden = false;
     const saved = Number(S.cfg.barHeight);
     if (Number.isFinite(saved) && saved > 0) {
       applyBarHeight(saved, { collapsed: C.isBarCollapsed(saved, barFullHeight()) });
@@ -6504,6 +6521,9 @@
       // 之后再动输入框容易碰上「文档已换、控件已刷新」的边界情况。
       clearT2iIfUnchanged(prompt);
       await openAsNewPhoto(gen, '文生图-' + Date.now().toString(36) + '.jpg');
+      // 文生图同样要发通知：它比修图更慢（十几秒起步），
+      // 用户很可能趁这段时间切出去看别的。
+      notifyGenDone('文生图完成，共生成 1 张');
       toast('已生成新照片，可以继续框选精修', 3000);
     } catch (err) {
       if (err && err.name === 'AbortError') return;
@@ -6513,6 +6533,8 @@
         model: S.cfg.model, kind: 't2i',
         error: describeCallError(err), workId: ''
       });
+      const why = (err && err.message) || '未知错误';
+      notifyGenDone('文生图失败：' + String(why).replace(/\s+/g, ' ').slice(0, 60));
       showGenError(err, { kind: 't2i', model: S.cfg.model, baseUrl: S.cfg.baseUrl });
     } finally {
       S.t2iAborter = null;
