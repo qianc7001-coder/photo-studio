@@ -5998,6 +5998,86 @@ async function run() {
     await sleep(120);
   }
 
+  /* ---------- 调色：新参数 + 拖动性能 ---------- */
+  console.log('\n【52】调色：参数分组、拖动不卡（低端机友好）');
+  {
+    const api = window.__PS_API;
+    // 造一张大一点的图，让「降采样」这件事真的有意义
+    {
+      const c = napi.createCanvas(1600, 1200);
+      const cx0 = c.getContext('2d');
+      const grd = cx0.createLinearGradient(0, 0, 1600, 1200);
+      grd.addColorStop(0, 'rgb(20,30,60)');
+      grd.addColorStop(1, 'rgb(240,230,210)');
+      cx0.fillStyle = grd;
+      cx0.fillRect(0, 0, 1600, 1200);
+      const inp = doc.getElementById('file-input');
+      Object.defineProperty(inp, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'grade.png', { type: 'image/png' })],
+        configurable: true
+      });
+      inp.dispatchEvent(new window.Event('change'));
+      await sleep(500);
+    }
+    t('大图已载入', S.docW > 1000, [S.docW, S.docH]);
+
+    api.openGradeTool();
+    await sleep(150);
+    const sliders = doc.querySelectorAll('#grade-sliders input[type=range]');
+    t('滑块数量是 12 个', sliders.length === 12, sliders.length);
+    t('有分组小标题', doc.querySelectorAll('#grade-sliders .grade-group').length === 3,
+      doc.querySelectorAll('#grade-sliders .grade-group').length);
+    t('分组标题分别是明暗/颜色/质感', (() => {
+      const names = Array.from(doc.querySelectorAll('#grade-sliders .grade-group'))
+        .map((e) => e.textContent);
+      return names.join(',') === '明暗,颜色,质感';
+    })(), Array.from(doc.querySelectorAll('#grade-sliders .grade-group')).map((e) => e.textContent));
+    // 新参数的滑块存在
+    for (const k of ['highlights', 'shadows', 'whites', 'blacks', 'clarity', 'dehaze', 'vignette']) {
+      t('有 ' + k + ' 滑块', !!doc.querySelector('#grade-sliders input[data-grade="' + k + '"]'));
+    }
+
+    // ---- 核心：拖动时必须是「快」路径 ----
+    // 拿一个新参数滑块，模拟连续拖动（模拟 20 次 input）
+    const hi = doc.querySelector('#grade-sliders input[data-grade="highlights"]');
+    S._dbg = S._dbg || {};
+    const t0 = Date.now();
+    for (let k = 0; k < 20; k++) {
+      hi.value = String(-10 * (k % 8));
+      hi.dispatchEvent(new window.Event('input'));
+    }
+    const dragMs = Date.now() - t0;
+    // 拖动中只做「登记 + 请求一帧」，不应该同步跑像素计算。
+    // 20 次 input 必须非常快（几十毫秒级），否则说明又变回同步全质量渲染了。
+    t('★ 连续 20 次拖动非常快（不阻塞界面）', dragMs < 400, dragMs + 'ms');
+    // 等 rAF / 兜底定时把预览画出来
+    await sleep(300);
+    t('拖动后预览有结果', !!S.viewCanvas);
+
+    // 松手补全质量
+    hi.dispatchEvent(new window.Event('change'));
+    await sleep(400);
+    t('松手后仍正常', !!S.viewCanvas);
+
+    // ---- 应用后确实生效，且可撤销 ----
+    const beforeEdits = S.edits.length;
+    doc.getElementById('grade-apply').dispatchEvent(new window.Event('click'));
+    await sleep(400);
+    t('应用调色后多了一个图层', S.edits.length === beforeEdits + 1, S.edits.length);
+    const last = S.edits[S.edits.length - 1];
+    t('图层是调色类型', !!(last && last.grade && !last.patch));
+    t('图层记录了高光参数', !!(last && last.grade && last.grade.highlights !== 0), last && last.grade);
+    t('图层标签写明了做了什么', /高光/.test((last && last.label) || ''), last && last.label);
+
+    // 撤销能回去
+    api.undo();
+    await sleep(300);
+    t('撤销后图层被移除', S.edits.length === beforeEdits, S.edits.length);
+
+    api.goHome();
+    await sleep(150);
+  }
+
   /* ---------- 无 JS 错误 ---------- */
   console.log('\n【15】运行健康度');
   const errs = logs.filter((l) => /JSDOM_ERROR|Uncaught/.test(l));

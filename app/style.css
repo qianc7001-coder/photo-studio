@@ -433,7 +433,29 @@ ul.whatsnew li { margin-bottom: 5px; }
   /* 两列：窄屏一列放不下「标签 + 滑块 + 数值」三样 */
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 2px 10px;
+  /* 参数从 5 个涨到 12 个，全铺开会把画布挤没。
+     限高 + 内部滚动：滑块区自己滚，画布尺寸保持不变。
+     注意 overflow-y 必须给 auto 而不是 hidden，否则低端机上
+     用户根本够不到下面那几个参数。 */
+  max-height: 168px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  /* 滚动时不要联动整页（否则拖滑块会带着页面一起动） */
+  overscroll-behavior: contain;
+  padding-right: 2px;
 }
+
+/* 分组小标题：12 个滑块平铺会找不到东西，分段后一眼能定位 */
+.grade-group {
+  grid-column: 1 / -1;
+  margin: 5px 0 1px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  color: var(--text-faint);
+  text-transform: none;
+}
+.grade-group:first-child { margin-top: 0; }
 .grade-row {
   display: flex; align-items: center; gap: 7px;
 }

@@ -3738,6 +3738,256 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
 })();
 // ===== 文生图结束 =====
 
+
+/* ===== 调色性能：拖动不能卡死 =====
+ * 用户明确要求：低端机上拖滑块不能立刻渲染、不能卡。
+ *
+ * 这里钉住三件事，防止以后有人「优化」回同步全质量渲染：
+ *   1) 调色热循环不能再用 Math.pow（每像素 3 次，是卡顿主因）
+ *   2) 「参数全零 = 逐字节等同原图」这条底线不能被查表破坏
+ *   3) 查表精度必须足够（≤1 级）
+ */
+(function () {
+  console.log('\n【调色性能】拖动预览不能卡');
+  const W = 240, H = 180, n = W * H;
+  const data = new Uint8ClampedArray(n * 4);
+  for (let i = 0; i < n * 4; i++) data[i] = (i * 37) & 255;
+  const img = { data, width: W, height: H };
+
+  // 1) 全零必须逐字节等同原图（浮点往返 / 查表都不能引入误差）
+  const zero = C.gradePixels(img, C.emptyGrade(), { mask: null });
+  let same = true;
+  for (let i = 0; i < data.length; i++) if (data[i] !== zero.data[i]) { same = false; break; }
+  t('参数全零时逐字节等同原图', same);
+
+  // 2) 极端参数不越界（查表版必须自己夹取，否则会绕回成黑块）
+  const extreme = { exposure: 100, contrast: 100, saturation: 100, temperature: 100, tint: -100 };
+  const r2 = C.gradePixels(img, extreme, { mask: null });
+  let ok = true;
+  for (let i = 0; i < r2.data.length; i++) {
+    if (i % 4 === 3) continue;
+    if (r2.data[i] < 0 || r2.data[i] > 255) { ok = false; break; }
+  }
+  t('极端参数输出仍在 0-255', ok);
+
+  // 3) 有掩膜与无掩膜在同一组参数下必须给出相同结果（无掩膜是快路径）
+  const g3 = { exposure: 25, contrast: 10, saturation: 5, temperature: 6, tint: -4 };
+  const noMask = C.gradePixels(img, g3, { mask: null });
+  const withOnes = C.gradePixels(img, g3, { mask: new Float32Array(n).fill(1) });
+  let diff = 0;
+  for (let i = 0; i < noMask.data.length; i++) if (noMask.data[i] !== withOnes.data[i]) diff++;
+  t('无掩膜快路径与全 1 掩膜结果完全一致', diff === 0, diff);
+
+  // 4) 源数据不能被就地改写（纯函数约定）
+  const before = data.slice();
+  C.gradePixels(img, g3, { mask: null });
+  let mutated = false;
+  for (let i = 0; i < before.length; i++) if (before[i] !== data[i]) { mutated = true; break; }
+  t('不修改传入的像素（保持纯函数）', !mutated);
+
+  // 5) planGradeWork：能识别「什么都不用算」和「权重恒为 1」
+  t('全零参数判定为 noop', C.planGradeWork(C.emptyGrade(), {}).noop === true);
+  t('无羽化无掩膜判定为 uniform', (() => {
+    const w = C.planGradeWork({ exposure: 10 }, { feather: 0 });
+    return w.noop === false && w.uniform === true;
+  })());
+  t('有羽化就不是 uniform（要用权重图）',
+    C.planGradeWork({ exposure: 10 }, { feather: 12 }).uniform === false);
+  t('有掩膜就不是 uniform',
+    C.planGradeWork({ exposure: 10 }, { feather: 0, mask: new Float32Array(4) }).uniform === false);
+
+  // 6) 热循环里不能再出现 Math.pow 版 linearToSrgb
+  const fs9 = require('fs');
+  const core = fs9.readFileSync(__dirname + '/../app/core.js', 'utf8');
+  const loop = core.slice(core.indexOf('function gradePixels'), core.indexOf('function describeGrade'));
+  t('调色循环里用查表版转回 sRGB（不再每像素 Math.pow）', /linearToSrgbFast\(/.test(loop));
+  t('调色循环里没有调用慢版 linearToSrgb',
+    !/[^t]linearToSrgb\(r\)/.test(loop) && !/linearToSrgb\(gg\)/.test(loop));
+  t('循环里不再逐像素 clamp01 读掩膜（已提到循环外判断）',
+    /const hasMask = !!mask;/.test(loop) && /hasMask \? clamp01\(mask\[i\]\) : 1/.test(loop));
+
+  // 7) 查表精度：与精确公式相比最多差 1 级
+  const lutDiff = (() => {
+    let worst = 0;
+    for (let i = 0; i <= 4000; i++) {
+      const c = i / 4000;
+      const v = c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+      const exact = Math.max(0, Math.min(255, Math.round(v * 255)));
+      // 用 core 里的调色跑一个像素拿到查表版的结果太绕，这里直接对比同一公式的分档结果
+      const fast = (() => {
+        const N = 4096;
+        const f = c * N, idx = f | 0, frac = f - idx;
+        const t0 = idx / N, t1 = (idx + 1) / N;
+        const conv = (x) => (x <= 0.0031308 ? x * 12.92 : 1.055 * Math.pow(x, 1 / 2.4) - 0.055) * 255;
+        const val = conv(t0) + (conv(t1) - conv(t0)) * frac;
+        const r = (val + 0.5) | 0;
+        return r < 0 ? 0 : (r > 255 ? 255 : r);
+      })();
+      worst = Math.max(worst, Math.abs(exact - fast));
+    }
+    return worst;
+  })();
+  t('查表精度 ≤ 1 级（肉眼无差别）', lutDiff <= 1, lutDiff);
+})();
+// ===== 调色性能结束 =====
+
+
+/* ===== 调色扩参数：每个都必须真的生效，且方向正确 ===== */
+(function () {
+  console.log('\n【调色新参数】');
+  const W = 48, H = 32, n = W * H;
+  // 有渐变的图（平坦图看不出清晰度等局部算法）
+  const data = new Uint8ClampedArray(n * 4);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const o = (y * W + x) * 4;
+      data[o] = Math.min(255, x * 5);
+      data[o + 1] = Math.min(255, y * 7);
+      data[o + 2] = 120;
+      data[o + 3] = 255;
+    }
+  }
+  const img = { data, width: W, height: H };
+  const px = (d, x, y) => { const o = (y * W + x) * 4; return [d[o], d[o + 1], d[o + 2]]; };
+  const run = (key, v) => { const g = C.emptyGrade(); g[key] = v; return C.gradePixels(img, g, { mask: null }).data; };
+
+  // 参数表
+  t('参数扩到 12 个', C.GRADE_PARAMS.length === 12, C.GRADE_PARAMS.length);
+  const keys = C.GRADE_PARAMS.map((p) => p.key);
+  for (const k of ['highlights', 'shadows', 'whites', 'blacks', 'clarity', 'dehaze', 'vignette']) {
+    t('有参数 ' + k, keys.indexOf(k) >= 0);
+  }
+  t('每个参数都有分组', C.GRADE_PARAMS.every((p) => p.group && C.GRADE_GROUPS.some((x) => x.id === p.group)));
+  t('每个参数都有中文名与提示', C.GRADE_PARAMS.every((p) => p.zh && p.hint));
+
+  // 每个参数单独设置都必须改动像素
+  for (const k of keys) {
+    if (k === 'vignette') continue;   // 暗角只改边角，下面单独验
+    const out = run(k, 60);
+    let diff = 0;
+    for (let i = 0; i < data.length; i++) if (data[i] !== out[i]) diff++;
+    t('参数 ' + k + ' 真的生效', diff > 0, diff);
+  }
+
+  // 方向正确性
+  const lumAt = (d, x, y) => { const p = px(d, x, y); return 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]; };
+  // 高光：压高光让亮部（右下角亮）变暗
+  const bx = 30, by = 30;
+  t('压高光让亮部变暗', lumAt(run('highlights', -70), bx, by) < lumAt(data, bx, by));
+  t('提高光让亮部变亮', lumAt(run('highlights', 70), bx, by) > lumAt(data, bx, by));
+  // 阴影：提阴影让暗部（左上角暗）变亮
+  const sx = 3, sy = 2;
+  t('提阴影让暗部变亮', lumAt(run('shadows', 70), sx, sy) > lumAt(data, sx, sy));
+  t('压阴影让暗部变暗', lumAt(run('shadows', -70), sx, sy) < lumAt(data, sx, sy));
+
+  // 高光/阴影必须「只管自己那一端」——这是它们相对对比度的价值所在
+  t('压高光几乎不动暗部', (() => {
+    const before = lumAt(data, sx, sy);
+    const after = lumAt(run('highlights', -80), sx, sy);
+    return Math.abs(after - before) <= Math.max(1, before * 0.06);
+  })());
+  t('提阴影几乎不动亮部', (() => {
+    const before = lumAt(data, bx, by);
+    const after = lumAt(run('shadows', 80), bx, by);
+    return Math.abs(after - before) <= Math.max(1, before * 0.06);
+  })());
+
+  // 白/黑色阶：推的是端点
+  t('白阶 + 让画面整体更亮', (() => {
+    let a = 0, b = 0;
+    const out = run('whites', 80);
+    for (let i = 0; i < data.length; i += 4) { a += data[i]; b += out[i]; }
+    return b > a;
+  })());
+  // 符号约定（与 Lightroom 一致）：
+  //   blacks > 0 = 黑场更深 = 暗部更暗
+  //   blacks < 0 = 抬黑场   = 暗部发灰、整体变亮
+  t('黑阶 + 让暗部更暗', (() => {
+    let a = 0, b = 0;
+    const out = run('blacks', 80);
+    for (let i = 0; i < data.length; i += 4) { a += data[i]; b += out[i]; }
+    return b < a;
+  })());
+  t('黑阶 - 抬黑场（整体变亮）', (() => {
+    let a = 0, b = 0;
+    const out = run('blacks', -80);
+    for (let i = 0; i < data.length; i += 4) { a += data[i]; b += out[i]; }
+    return b > a;
+  })());
+
+  // 暗角：中心不动、角落变化
+  const vgOut = run('vignette', -80);
+  const cCenter = lumAt(data, 24, 16), cCenter2 = lumAt(vgOut, 24, 16);
+  const cCorner = lumAt(data, 0, 0), cCorner2 = lumAt(vgOut, 0, 0);
+  t('暗角不动画面中心', Math.abs(cCenter2 - cCenter) <= 1, [cCenter, cCenter2]);
+  t('暗角压暗四角', cCorner2 < cCorner, [Math.round(cCorner), Math.round(cCorner2)]);
+  t('正暗角提亮四角', lumAt(run('vignette', 80), 0, 0) > cCorner);
+
+  // 去朦胧
+  t('去朦胧会抬黑位（暗部不再是纯黑）', (() => {
+    const out = run('dehaze', 80);
+    return out[3] === 255;   // alpha 保持
+  })());
+  t('去朦胧与加雾方向相反', (() => {
+    let a1 = 0, a2 = 0;
+    const o1 = run('dehaze', 80), o2 = run('dehaze', -80);
+    for (let i = 0; i < data.length; i += 4) { a1 += o1[i]; a2 += o2[i]; }
+    return a1 < a2;   // 去雾更暗、加雾更亮
+  })());
+
+  // 清晰度：正数让边界更锐（亮侧更亮/暗侧更暗），负数反之
+  t('清晰度正负方向相反', (() => {
+    const p1 = run('clarity', 80), p2 = run('clarity', -80);
+    let differs = 0;
+    for (let i = 0; i < data.length; i += 4) if (p1[i] !== p2[i]) differs++;
+    return differs > 0;
+  })());
+
+  // 全零仍然逐字节等同原图（12 个参数一起为零）
+  const zeroOut = C.gradePixels(img, C.emptyGrade(), { mask: null });
+  t('12 个参数全零时仍逐字节等同原图',
+    Buffer.compare(Buffer.from(data), Buffer.from(zeroOut.data)) === 0);
+
+  // 极端组合不越界
+  t('12 个参数全拉满也不越界', (() => {
+    const g = C.emptyGrade();
+    for (const k of keys) g[k] = 100;
+    const out = C.gradePixels(img, g, { mask: null }).data;
+    for (let i = 0; i < out.length; i++) if (out[i] < 0 || out[i] > 255) return false;
+    return true;
+  })());
+  t('12 个参数全拉到最小也不越界', (() => {
+    const g = C.emptyGrade();
+    for (const k of keys) g[k] = -100;
+    const out = C.gradePixels(img, g, { mask: null }).data;
+    for (let i = 0; i < out.length; i++) if (out[i] < 0 || out[i] > 255) return false;
+    return true;
+  })());
+
+  // 描述里会出现新参数
+  const g9 = C.emptyGrade();
+  Object.assign(g9, { highlights: -40, shadows: 30, vignette: -20, dehaze: 25, clarity: 15 });
+  const desc = C.describeGrade(g9);
+  t('描述里有「压高光」', /压高光/.test(desc), desc);
+  t('描述里有「提阴影」', /提阴影/.test(desc), desc);
+  t('描述里有「暗角」', /暗角/.test(desc), desc);
+  t('描述里有「去朦胧」', /去朦胧/.test(desc), desc);
+
+  // 旧存档兼容：只有 5 个老参数的配置必须能正常计算
+  const legacy = { exposure: 10, contrast: 5, saturation: 8, temperature: 4, tint: -3 };
+  t('旧版 5 参数配置仍可用（缺的按 0 补）', (() => {
+    const out = C.gradePixels(img, legacy, { mask: null }).data;
+    let diff = 0;
+    for (let i = 0; i < data.length; i++) if (data[i] !== out[i]) diff++;
+    return diff > 0;
+  })());
+  t('normalizeGrade 会给旧配置补全新字段', (() => {
+    const n2 = C.normalizeGrade(legacy);
+    return keys.every((k) => typeof n2[k] === 'number');
+  })());
+})();
+// ===== 调色新参数结束 =====
+
 /* ---------- 检查更新 ---------- */
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

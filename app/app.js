@@ -1681,7 +1681,19 @@
     if (!box) return;
     const g = currentGradeDraft();
     box.innerHTML = '';
+    let lastGroup = '';
     for (const p of C.GRADE_PARAMS) {
+      // 分组小标题：12 个滑块平铺会让人找不到东西，按「明暗 / 颜色 / 质感」分段
+      if (p.group && p.group !== lastGroup) {
+        lastGroup = p.group;
+        const grp = C.GRADE_GROUPS.find((x) => x.id === p.group);
+        if (grp) {
+          const gh = document.createElement('div');
+          gh.className = 'grade-group';
+          gh.textContent = grp.zh;
+          box.appendChild(gh);
+        }
+      }
       const row = document.createElement('div');
       row.className = 'grade-row' + (g[p.key] ? ' on' : '');
       row.dataset.key = p.key;
@@ -1708,9 +1720,13 @@
         currentGradeDraft()[p.key] = nv;
         v.textContent = fmtGradeVal(nv);
         row.classList.toggle('on', nv !== 0);
-        // 实时预览：只重绘 viewCanvas，不记历史（松手/点应用时才记）
-        previewGrade();
+        // 拖动中：跑「低分辨率 + 节流」的预览。
+        // 全质量预览一张 3072×2048 要一秒多，每动一格滑块跑一次会让低端机
+        // 直接卡死（手指在动、画面不动）。见 previewGradeFast 的说明。
+        previewGradeFast();
       };
+      // 松手/离开：补一张全质量预览，让用户看到最终效果
+      input.onchange = () => { previewGradeSoon(); };
 
       row.appendChild(l); row.appendChild(input); row.appendChild(v);
       box.appendChild(row);
@@ -1755,6 +1771,145 @@
     const draftEdit = makeGradeEdit(rect, g);
     compositeEditInto(S.viewCtx, draftEdit);
     draw();
+  }
+
+  /* ============================================================================
+   * 拖动中的调色预览：降采样 + 节流
+   *
+   * 为什么非这样不可：
+   *   全质量预览一张 3072×2048 要做
+   *     权重图 ~105ms + 逐像素调色 ~1430ms + 重建全部图层
+   *   一次接近 1.5 秒，而且是**同步**的 —— 手指在拖、画面完全不动，
+   *   低端机上表现就是「滑块卡死」。拖十次就是十几秒白等。
+   *
+   * 做法：
+   *   1) 拖动中把画布缩到长边 <= PREVIEW_MAX 再算（默认 720）。
+   *      要处理的像素从 630 万降到 ~35 万，快近 20 倍；
+   *      缩略图上根本看不出和全质量的区别，但手感完全不同。
+   *   2) 用 requestAnimationFrame 合并同一帧内的多次 input，
+   *      拖得再快也只算一次/帧，不会排队堆积。
+   *   3) 松手后（onchange）再补一张全质量预览 —— 最终看到的仍是准确效果。
+   *
+   * 刻意**不改像素数学**：只是把同样的 gradePixels 跑在更小的图上，
+   * 再放大绘制。调色结果在小图上视觉一致，而「应用」时走的仍是全分辨率、
+   * 全质量的老路径，所以成片质量一分不差。
+   * ========================================================================== */
+
+  /** 拖动中预览的长边上限（px）。够看清颜色变化，又不至于卡。 */
+  const PREVIEW_MAX = 720;
+
+  let previewRaf = 0;
+  let previewSmall = null;      // 复用的缩略底图（避免每帧重建）
+  let previewSmallKey = '';
+  let previewSmallCtx = null;
+
+  /** 拖动中调用：同一帧内只跑一次 */
+  function previewGradeFast() {
+    if (previewRaf) return;
+    // requestAnimationFrame 在后台标签页/某些 WebView 里可能不触发，
+    // 用一个短定时兜底，保证「至少会更新一次」，不会让画面彻底冻住。
+    let fired = false;
+    const run = () => {
+      if (fired) return;
+      fired = true;
+      previewRaf = 0;
+      renderGradePreview(true);
+    };
+    previewRaf = requestAnimationFrame(run);
+    setTimeout(() => { if (!fired) run(); }, 100);
+  }
+
+  /** 松手后调用：补一张全质量预览（也走 rAF，避免同步卡一下） */
+  function previewGradeSoon() {
+    if (previewRaf) cancelAnimationFrame(previewRaf);
+    previewRaf = requestAnimationFrame(() => {
+      previewRaf = 0;
+      renderGradePreview(false);
+    });
+  }
+
+  /**
+   * 真正画预览。
+   * @param {boolean} fast true = 拖动中，用缩略图；false = 松手后，全质量
+   */
+  function renderGradePreview(fast) {
+    if (!S.docCanvas) return;
+    const rect = effectiveRect();
+    if (!rect) return;
+    const g = currentGradeDraft();
+
+    // 参数全零：直接画干净底子，连缩略图都不用建
+    if (C.isGradeEmpty(g)) {
+      rebuildViewCanvas();
+      draw();
+      return;
+    }
+
+    // 只有「整张图调色 + 参数全零以外的简单情况」才走缩略图。
+    // 有画笔掩膜时缩略图和掩膜坐标对不上，宁可慢一点也要走全质量，
+    // 否则预览会显示成「调色跑到了别的地方」——那是比卡更糟的错误。
+    const hasMask = S.strokes.length > 0;
+    if (!fast || hasMask) {
+      previewGrade();           // 原来的全质量路径
+      return;
+    }
+
+    // ---- 缩略图路径 ----
+    const scale = Math.min(1, PREVIEW_MAX / Math.max(S.docW, S.docH));
+    if (scale >= 1) { previewGrade(); return; }   // 图本来就小，没必要缩
+
+    const sw = Math.max(1, Math.round(S.docW * scale));
+    const sh = Math.max(1, Math.round(S.docH * scale));
+
+    // 底图缓存：文档没变就复用（拖滑块时文档是不变的，能省一次缩放）
+    const key = S.docW + 'x' + S.docH + ':' + sw + 'x' + sh + ':' + S.docRev;
+    if (!previewSmall || previewSmallKey !== key) {
+      if (!previewSmall) {
+        previewSmall = makeCanvas(sw, sh);
+        previewSmallCtx = previewSmall.getContext('2d', { willReadFrequently: true });
+      } else if (previewSmall.width !== sw || previewSmall.height !== sh) {
+        previewSmall.width = sw; previewSmall.height = sh;
+        previewSmallCtx = previewSmall.getContext('2d', { willReadFrequently: true });
+      }
+      previewSmallCtx.imageSmoothingEnabled = true;
+      previewSmallCtx.imageSmoothingQuality = 'medium';   // 拖动中不必用 high
+      previewSmallCtx.clearRect(0, 0, sw, sh);
+      previewSmallCtx.drawImage(S.viewCanvas, 0, 0, S.docW, S.docH, 0, 0, sw, sh);
+      previewSmallKey = key;
+    }
+
+    // 在缩略图上按同样参数调色（整图范围 → 无羽化、无掩膜）
+    const id = previewSmallCtx.getImageData(0, 0, sw, sh);
+    const graded = C.gradePixels(id, g, { mask: null });
+    previewSmallCtx.putImageData(new ImageData(graded.data, sw, sh), 0, 0);
+
+    // 画到屏幕：直接用缩略图替代 viewCanvas 的绘制，不回写 viewCanvas。
+    // 这一点很重要 —— viewCanvas 是「已应用编辑」的权威状态，
+    // 拖动过程中往里面塞半成品，松手后不重建就会留下脏数据。
+    drawGradeThumb(previewSmallCanvasToScreen(previewSmall));
+  }
+
+  /** 缩略图就是这张 canvas 本身；单独包一层是为了以后想换实现 */
+  function previewSmallCanvasToScreen(c) { return c; }
+
+  /**
+   * 把缩略图按当前缩放画到屏幕。
+   * 除了「用哪张图」，其余绘制逻辑（背景/选区/引导线）必须和 draw() 一致，
+   * 否则拖动时选区框会闪。
+   */
+  function drawGradeThumb(thumb) {
+    if (!ctx || !thumb) return;
+    const v = viewSize();
+    ctx.clearRect(0, 0, v.w, v.h);
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(0, 0, v.w, v.h);
+    const r = C.imageRectToScreen({ x: 0, y: 0, w: S.docW, h: S.docH }, S.view);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(thumb, r.x, r.y, r.w, r.h);
+    if (S.mode === 'brush' && S.rect && S.strokes.length) drawMaskOverlay();
+    if (S.guides.length) drawGuides(S.mode !== 'guide');
+    if (S.rect) drawSelection();
   }
 
   /**
@@ -8047,6 +8202,8 @@
     closeHistory,
     buildTimeline: currentTimeline,
     historySize: () => (undoStack ? undoStack.size() : { past: 0, future: 0 }),
+    undo, redo,
+    previewGradeFast, previewGradeSoon, renderGradePreview,
     undoStack: () => undoStack,
     // 作品库（跨天修图记录，供测试与外部调用）
     loadLibrary,

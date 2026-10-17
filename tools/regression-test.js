@@ -2053,6 +2053,80 @@ console.log('\n【发布】历史版本必须可下载（README 与归档一致�
 })();
 // ===== 生成后清空提示词结束 =====
 
+
+/* ===== 调色拖动：必须走降采样 + 节流，不能同步全质量渲染 =====
+ * 用户明确要求：考虑低端机，拖滑块时不要立刻渲染，否则超级卡。
+ *
+ * 实测数据（3072×2048 工作分辨率）：
+ *   改之前：一次全质量预览 ~1.5 秒（同步），拖到底约 18 秒白等
+ *   改之后：拖动中缩略预览 ~20ms 且按帧节流，松手补一张全质量
+ * 这些数字靠测试守不住，但「代码结构」能守住。
+ */
+(function () {
+  console.log('\n【调色拖动性能】');
+  const fs5 = require('fs');
+  const src = fs5.readFileSync(__dirname + '/../app/app.js', 'utf8');
+
+  t('有拖动专用预览函数', /function previewGradeFast\(/.test(src));
+  t('有松手后的补帧函数', /function previewGradeSoon\(/.test(src));
+  t('拖动预览用 requestAnimationFrame 节流', (() => {
+    const fn = src.slice(src.indexOf('function previewGradeFast'),
+      src.indexOf('function previewGradeSoon'));
+    return /requestAnimationFrame\(/.test(fn);
+  })());
+  t('同一帧内重复调用只跑一次', (() => {
+    const fn = src.slice(src.indexOf('function previewGradeFast'),
+      src.indexOf('function previewGradeSoon'));
+    return /if \(previewRaf\) return;/.test(fn);
+  })());
+  t('rAF 不触发时有定时兜底（否则画面彻底冻住）', (() => {
+    const fn = src.slice(src.indexOf('function previewGradeFast'),
+      src.indexOf('function previewGradeSoon'));
+    return /setTimeout\(/.test(fn);
+  })());
+
+  t('滑块 oninput 不再直接调全质量预览', (() => {
+    const seg = src.slice(src.indexOf("input.oninput = () => {"),
+      src.indexOf('input.oninput = () => {') + 700);
+    return /previewGradeFast\(\)/.test(seg) && !/^\s*previewGrade\(\);/m.test(seg);
+  })());
+
+  t('松手（change）会补一张全质量预览', /input.onchange = \(\) => \{ previewGradeSoon\(\); \};/.test(src));
+
+  t('拖动预览有降采样上限常量', /const PREVIEW_MAX = \d+;/.test(src));
+  t('预览上限足够小（≤900，否则低端机还是卡）', (() => {
+    const m = /const PREVIEW_MAX = (\d+);/.exec(src);
+    return m && Number(m[1]) <= 900;
+  })());
+  t('降采样图有缓存复用（不是每帧重建）', /previewSmallKey !== key/.test(src));
+  t('有掩膜时不走缩略图（坐标对不上会显示错位）', (() => {
+    const fn = src.slice(src.indexOf('function renderGradePreview'),
+      src.indexOf('function previewSmallCanvasToScreen'));
+    return /if \(!fast \|\| hasMask\) /.test(fn) || /!fast \|\| hasMask/.test(fn);
+  })());
+
+  // 关键：拖动过程中不能污染 viewCanvas（那是「已应用编辑」的权威状态）
+  t('缩略预览不回写 viewCanvas', (() => {
+    const fn = src.slice(src.indexOf('function renderGradePreview'),
+      src.indexOf('function drawGradeThumb'));
+    return !/S\.viewCanvas\s*=/.test(fn) && !/S\.viewCtx\s*=/.test(fn);
+  })());
+
+  t('缩略绘制复用了同一套选区/引导线绘制（不会闪）', (() => {
+    const fn = src.slice(src.indexOf('function drawGradeThumb'),
+      src.indexOf('function drawGradeThumb') + 900);
+    return /drawSelection\(\)/.test(fn) && /drawGuides\(/.test(fn);
+  })());
+
+  // 「应用」必须仍走全分辨率、全质量
+  t('应用调色仍走全质量路径（不降采样）', (() => {
+    const fn = src.slice(src.indexOf('function applyGrade()'),
+      src.indexOf('function applyGrade()') + 1200);
+    return /previewGradeFast/.test(fn) === false;
+  })());
+})();
+// ===== 调色拖动性能结束 =====
+
 /* ---------- 检查更新 ---------- */
 console.log('\n【更新】应用内检测新版本（不能依赖 /releases/latest）');
 
