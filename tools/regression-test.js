@@ -2127,6 +2127,79 @@ console.log('\n【发布】历史版本必须可下载（README 与归档一致�
 })();
 // ===== 调色拖动性能结束 =====
 
+
+/* ===== 调色滑块可点性 + 「先调色后生成」不能崩 =====
+ * 用户反馈两个真问题：
+ *   1) 调色滑块太小，根本滑不到
+ *   2) （另一个是历史记录，见 e2e 【53】）
+ *
+ * 第 2 个问题的根因很隐蔽：buildRequestImage 里遍历 S.edits 时
+ * 无条件 drawImage(e.patch)，而**调色图层的 patch 是 null** ——
+ * 于是「只要先调过色，之后就再也生成不了」，报错还是
+ * "Value is not one of these types"，完全指不到原因。
+ */
+(function () {
+  console.log('\n【调色滑块与调色后生成】');
+  const fs6 = require('fs');
+  const css2 = fs6.readFileSync(__dirname + '/../app/style.css', 'utf8');
+  const src2 = fs6.readFileSync(__dirname + '/../app/app.js', 'utf8');
+
+  // --- 1) 滑块尺寸够手指点 ---
+  const gBlock = (/\.grade-row input\[type=range\]\s*\{[^}]*\}/.exec(css2) || [''])[0];
+  const gThumb = parseFloat((/--ps-thumb:\s*([\d.]+)px/.exec(gBlock) || [])[1]);
+  t('调色滑块头 ≥22px（手机能点中）', gThumb >= 22, gThumb);
+  t('调色滑块可点高度 ≥28px', (() => {
+    const h = parseFloat((/height:\s*(\d+)px/.exec(gBlock) || [])[1]);
+    return h >= 28;
+  })(), /height:\s*(\d+)px/.exec(gBlock) && /height:\s*(\d+)px/.exec(gBlock)[1]);
+
+  // --- 2) 布局必须通栏（两列会把滑块挤到 60px，够不到）---
+  t('调色滑块是单列通栏', /#grade-sliders\s*\{[\s\S]{0,400}grid-template-columns:\s*1fr/.test(css2));
+  t('不再用 auto-fit 多列（会被挤窄）', (() => {
+    // 先把 CSS 注释整段删掉再看声明 —— 注释里正在解释「为什么去掉 auto-fit」，
+    // 按行过滤挡不住多行注释的中间行。
+    const block = (/#grade-sliders\s*\{[\s\S]*?\n\}/.exec(css2) || [''])[0];
+    const props = block.replace(/\/\*[\s\S]*?\*\//g, '');
+    return !/auto-fit/.test(props) && /grid-template-columns:\s*1fr/.test(props);
+  })());
+  t('滑块区限高且可滚动（12 个参数不挤画布）',
+    /#grade-sliders\s*\{[\s\S]{0,600}max-height:[\s\S]{0,200}overflow-y:\s*auto/.test(css2));
+  t('max-height 有像素兜底（老内核不认 min()）',
+    /max-height:\s*\d+px;\s*\n\s*max-height:\s*min\(/.test(css2));
+
+  // --- 3) 分组小标题存在 ---
+  t('滑块按组显示小标题', /grade-group/.test(css2) && /GRADE_GROUPS/.test(src2));
+
+  // --- 4) 关键：遍历编辑时必须区分「有 patch」和「只有调色」---
+  const reqFn = src2.slice(src2.indexOf('function buildRequestImage'),
+    src2.indexOf('function canvasToDataUrl'));
+  t('★ 组图时先判断有没有 patch 再 drawImage',
+    /if \(e\.patch\)\s*\{/.test(reqFn) && /drawImage\(e\.patch/.test(reqFn));
+  t('★ 调色图层走重算而不是贴图', /else if \(e\.grade\)\s*\{/.test(reqFn));
+  t('★ 调色图层不再无条件 drawImage（防崩）', (() => {
+    // 找出所有 drawImage(e.patch 的位置，确认都在 if (e.patch) 分支内
+    const idx = reqFn.indexOf('drawImage(e.patch');
+    if (idx < 0) return false;
+    const before = reqFn.slice(0, idx);
+    const lastIf = before.lastIndexOf('if (e.patch)');
+    const lastElse = before.lastIndexOf('else if (e.grade)');
+    return lastIf >= 0 && lastIf > lastElse;
+  })());
+  t('★ 调色图层在请求图里按参数重算（上下文一致）', /C\.gradePixels\(sub/.test(reqFn));
+  t('★ 请求图里会跳过被关闭的图层', /C\.normalizeLayer\(e\)/.test(reqFn) && /if \(!L\.enabled\) continue;/.test(reqFn));
+
+  // --- 5) 所有遍历 edits 并 drawImage 的地方都要防 null ---
+  t('rebuildViewCanvas 不会对调色层 drawImage', (() => {
+    const fn = src2.slice(src2.indexOf('function rebuildViewCanvas'),
+      src2.indexOf('function fitToScreen'));
+    // 它通过 compositeEditInto 处理，那条路径里已经分流过
+    return /compositeEditInto\(S\.viewCtx, e\)/.test(fn);
+  })());
+  t('compositeEditInto 对调色层单独分流',
+    /if \(edit\.grade && !edit\.patch\)/.test(src2));
+})();
+// ===== 调色滑块与调色后生成结束 =====
+
 /* ---------- 检查更新 ---------- */
 console.log('\n【更新】应用内检测新版本（不能依赖 /releases/latest）');
 
@@ -3902,9 +3975,19 @@ console.log('\n【滑块】点轨道不能跳值，拖动滑块头必须照常�
   t('firefox 滑块头也用该属性', /::-moz-range-thumb\s*\{[^}]*var\(--ps-thumb\)/.test(css));
   t('JS 从 CSS 读宽度', /getPropertyValue\('--ps-thumb'\)/.test(appSrc));
   t('读不到时回落到 core 常量', /return C\.SLIDER_THUMB_PX/.test(appSrc));
-  // CSS 里的默认值必须等于 core 常量，否则两条兜底路径会给出不同判定
-  const cssPx = parseFloat((/--ps-thumb:\s*([\d.]+)px/.exec(css) || [])[1]);
-  t('CSS 默认宽度等于 core 常量', cssPx === C2.SLIDER_THUMB_PX, [cssPx, C2.SLIDER_THUMB_PX]);
+  // CSS 里的**全局默认值**必须等于 core 常量，否则两条兜底路径会给出不同判定。
+  // 注意：调色滑块单独把 --ps-thumb 放大到了 24px（用户反馈 17px 在手机上点不中），
+  // 所以这里必须取 `input[type=range]` 那条全局声明，不能用「文件里第一个」——
+  // 否则抓到调色那条，断言会误报，而真正的全局默认值反而没被守住。
+  // 必须锚定「行首」的 input[type=range]，否则会匹配到 .grade-row input[type=range]
+  const globalRangeBlock = (/(?:^|\n)input\[type=range\]\s*\{[\s\S]*?\n\}/.exec(css) || [''])[0];
+  const cssPx = parseFloat((/--ps-thumb:\s*([\d.]+)px/.exec(globalRangeBlock) || [])[1]);
+  t('CSS 全局默认宽度等于 core 常量', cssPx === C2.SLIDER_THUMB_PX, [cssPx, C2.SLIDER_THUMB_PX]);
+  // 调色滑块要更大（高频连续拖动，17px 够不着）
+  const gradeThumb = (/\.grade-row input\[type=range\][\s\S]{0,200}?--ps-thumb:\s*([\d.]+)px/.exec(css) || [])[1];
+  t('调色滑块比全局更大（够手指点）',
+    parseFloat(gradeThumb) > C2.SLIDER_THUMB_PX, [gradeThumb, C2.SLIDER_THUMB_PX]);
+  t('调色滑块头至少 22px', parseFloat(gradeThumb) >= 22, gradeThumb);
 
   // 8) 老内核（没有 PointerEvent）要有降级路径，否则那批设备又变回会跳值
   t('老内核有降级监听', /typeof window\.PointerEvent === 'undefined'/.test(fnBody));

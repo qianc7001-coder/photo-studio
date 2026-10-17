@@ -2671,11 +2671,40 @@
     const cx = c.getContext('2d', { willReadFrequently: true });
     cx.drawImage(S.docCanvas, ctxRect.x, ctxRect.y, ctxRect.w, ctxRect.h, 0, 0, ctxRect.w, ctxRect.h);
 
-    // 已应用的编辑也要带上（保证上下文一致）
+    // 已应用的编辑也要带上（保证上下文一致）。
+    //
+    // 这里必须区分两类图层，否则会直接崩：
+    //   - 生成图层：有 patch，贴上去即可
+    //   - 调色图层：**没有 patch**（只有一组参数），drawImage(null) 会抛
+    //     "Value is not one of these types" —— 用户表现为「只要先调过色，
+    //     就再也生成不了」，而且报错信息完全看不出原因。
+    // 调色图层要按参数重新算一遍，而不是贴图。
     for (const e of S.edits) {
+      const L = C.normalizeLayer(e);
+      if (!L.enabled) continue;
       const ix = e.rect.x - ctxRect.x, iy = e.rect.y - ctxRect.y;
       if (ix + e.rect.w < 0 || iy + e.rect.h < 0 || ix > ctxRect.w || iy > ctxRect.h) continue;
-      cx.drawImage(e.patch, ix, iy, e.rect.w, e.rect.h);
+      if (e.patch) {
+        cx.drawImage(e.patch, ix, iy, e.rect.w, e.rect.h);
+      } else if (e.grade) {
+        // 调色图层：在请求图上按同样的参数重算一遍，
+        // 让模型看到的上下文和用户在屏幕上看到的一致。
+        // 先取子图，算完再贴回去（坐标要夹到请求图范围内）。
+        const sx = Math.max(0, ix), sy = Math.max(0, iy);
+        const ex = Math.min(ctxRect.w, ix + e.rect.w), ey = Math.min(ctxRect.h, iy + e.rect.h);
+        const w2 = ex - sx, h2 = ey - sy;
+        if (w2 > 0 && h2 > 0) {
+          const sub = cx.getImageData(sx, sy, w2, h2);
+          // 权重按图层羽化/不透明度算；请求图是整块发送，
+          // 这里不需要画笔掩膜（掩膜只管「改哪里」，不影响上下文颜色）
+          const alpha = C.layerAlphaMap(
+            { rect: { x: 0, y: 0, w: w2, h: h2 }, feather: e.feather, opacity: L.opacity, enabled: true },
+            w2, h2
+          );
+          const graded = C.gradePixels(sub, e.grade, { mask: alpha });
+          cx.putImageData(new ImageData(graded.data, w2, h2), sx, sy);
+        }
+      }
     }
 
     const off = { x: rect.x - ctxRect.x, y: rect.y - ctxRect.y };
@@ -3085,7 +3114,8 @@
     }
     // 成本确认：大额时先问一下
     const est = currentEstimate();
-    if (!confirmCostIfNeeded(est)) return;
+    if (S._dbg) S._dbg.gen = { est: est && { usd: est.totalUsd, known: est.known } };
+    if (!confirmCostIfNeeded(est)) { if (S._dbg) S._dbg.gen.blocked = 'cost'; return; }
 
     return runGenerate();
   }

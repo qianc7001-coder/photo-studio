@@ -2167,9 +2167,19 @@ async function run() {
       doc.getElementById('prompt').value = '第 ' + (n + 1) + ' 张';
       doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
       await waitGen(S, 20000);
+      // waitGen 只看 busy 标志，偶尔会在「作业刚结束但结果还没落地」时返回。
+      // 这里再等到真的产生对比图（或明确没有结果），否则 apply 会点空、
+      // 这一张就没编辑 → 库里少一条，断言随机失败（曾经出现过一次）。
+      {
+        const tw = Date.now();
+        while (!S.pending && S.jobs.some((j) => j.status === 'running') &&
+               Date.now() - tw < 20000) await sleep(100);
+      }
       if (S.pending) {
         doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
-        await sleep(150);
+        // 贴回是异步的（要解码 patch），等图层真的加上
+        const ta = Date.now();
+        while (S.edits.length === 0 && Date.now() - ta < 5000) await sleep(80);
       }
       window.__PS_API.touchWork();          // 真实使用里是 1.6s 防抖
       const lib = window.__PS_API.library();
@@ -6074,6 +6084,142 @@ async function run() {
     await sleep(300);
     t('撤销后图层被移除', S.edits.length === beforeEdits, S.edits.length);
 
+    api.goHome();
+    await sleep(150);
+  }
+
+  /* ---------- 历史记录：从首页进旧照片必须还原编辑（不能变回原图） ---------- */
+  console.log('\n【53】历史记录：从首页回到编辑过的照片，修改必须还在');
+  {
+    const api = window.__PS_API;
+    // 干净状态：清作品库 + 清掉前面段落遗留的后台作业
+    // （不清的话 waitGen 会因为这些老作业提前返回，生成本段根本没跑）
+    S.library = [];
+    window.localStorage.removeItem('photoStudio.library.v1');
+    api.saveLibrary();
+    S.jobs = [];
+    api.goHome();
+    await sleep(150);
+
+    // 造一张纯色照片，做一次「调色」+ 一次「生成贴回」
+    {
+      const c = napi.createCanvas(400, 300);
+      const cx0 = c.getContext('2d');
+      cx0.fillStyle = 'rgb(60, 60, 60)';
+      cx0.fillRect(0, 0, 400, 300);
+      const inp = doc.getElementById('file-input');
+      Object.defineProperty(inp, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'hist.png', { type: 'image/png' })],
+        configurable: true
+      });
+      inp.dispatchEvent(new window.Event('change'));
+      await sleep(400);
+    }
+    t('照片已载入', S.imgW === 400, S.imgW);
+    S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.contextPct = 0;
+    S.cfg.upscaleSmall = false; S.cfg.autoGrade = false;
+
+    // 1) 一次调色（调得很明显，好验证）
+    S.rect = { x: 40, y: 40, w: 200, h: 150 };
+    api.openGradeTool();
+    await sleep(150);
+    const gEl = doc.querySelector('#grade-sliders input[data-grade="exposure"]');
+    gEl.value = '60';
+    gEl.dispatchEvent(new window.Event('input'));
+    await sleep(150);
+    doc.getElementById('grade-apply').dispatchEvent(new window.Event('click'));
+    await sleep(400);
+    t('调色已应用', S.edits.length === 1, S.edits.length);
+    t('调色图层是 grade 类型', !!(S.edits[0] && S.edits[0].grade));
+    // 作品库保存是 1.6 秒防抖，必须等过去才断言（真机用户也是这个节奏）
+    await sleep(2000);
+    // 调色面板是个模式，不切回框选的话生成按钮不可用
+    doc.querySelector('.tool[data-mode="select"]').dispatchEvent(new window.Event('click'));
+    await sleep(120);
+    // jsdom 的 window.confirm 默认返回 false，会把「大额花费确认」当成用户取消
+    window.confirm = () => true;
+
+    // 2) 一次生成贴回（产生 patch 图层）
+    fake.setColor([230, 30, 30]);
+    S.rect = { x: 60, y: 60, w: 120, h: 100 };
+    doc.getElementById('prompt').value = '历史记录测试';
+    // 清掉前面段落遗留的错误面板，否则会把旧错误误当成这次的
+    var _ep = doc.getElementById('gen-error'); if (_ep) _ep.hidden = true;
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 12000);
+    if (S.pending) {
+      doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
+      await sleep(400);
+    }
+    t('生成结果已贴回（共 2 个图层）', S.edits.length === 2, S.edits.length);
+
+    const workId = api.workId();
+    t('有当前作品 id', !!workId, workId);
+    // 等作品库保存（防抖 1600ms）
+    await sleep(2200);
+    const recBefore = api.library().find((w) => w.id === workId);
+    t('作品库里有这条记录', !!recBefore, api.library().map((w) => w.name));
+    t('记录里存了会话数据（能继续编辑）', !!(recBefore && recBefore.session),
+      recBefore && Object.keys(recBefore.session || {}));
+    t('会话里记了 2 个图层',
+      !!(recBefore && recBefore.session && recBefore.session.items &&
+        recBefore.session.items.length === 2),
+      recBefore && recBefore.session && recBefore.session.items && recBefore.session.items.length);
+
+    // 记下当前画面（用于恢复后对比）
+    const pxBefore = (() => {
+      const d = S.viewCtx.getImageData(150, 100, 1, 1).data;
+      return [d[0], d[1], d[2]];
+    })();
+
+    // 3) 回首页 → 点这条记录 → 必须还原
+    api.goHome();
+    await sleep(200);
+    t('回首页后照片已卸载', S.img === null);
+    const homeItems = doc.querySelectorAll('#home-list .home-item');
+    t('首页列出了这条记录', homeItems.length === 1, homeItems.length);
+    t('记录标了「可继续编辑」',
+      /可继续编辑/.test(homeItems[0] ? homeItems[0].textContent : ''),
+      homeItems[0] && homeItems[0].textContent);
+
+    homeItems[0].dispatchEvent(new window.Event('click'));
+    // 恢复是异步解码，等它完成
+    for (let i = 0; i < 80 && !S.img; i++) await sleep(60);
+    await sleep(400);
+
+    t('★ 从首页进入后照片被打开（不是空的）', !!S.img && !!S.docCanvas);
+    t('★ 编辑记录被还原（不是原图）', S.edits.length === 2, S.edits.length);
+    t('还原了调色图层', S.edits.some((e) => !!e.grade), S.edits.map((e) => !!e.grade));
+    t('还原了生成贴回图层', S.edits.some((e) => !!e.patch), S.edits.map((e) => !!e.patch));
+    const pxAfter = (() => {
+      const d = S.viewCtx.getImageData(150, 100, 1, 1).data;
+      return [d[0], d[1], d[2]];
+    })();
+    t('★ 画面像素和离开前一致（真的还原了，不是原图）',
+      Math.abs(pxAfter[0] - pxBefore[0]) <= 3 &&
+      Math.abs(pxAfter[1] - pxBefore[1]) <= 3 &&
+      Math.abs(pxAfter[2] - pxBefore[2]) <= 3,
+      { before: pxBefore, after: pxAfter });
+    t('继续编辑后仍归属同一条记录', api.workId() === workId, [api.workId(), workId]);
+
+    // 4) 还原后再编辑一次，记录应更新而不是新建
+    S.rect = { x: 20, y: 20, w: 80, h: 60 };
+    api.openGradeTool();
+    await sleep(120);
+    const sEl = doc.querySelector('#grade-sliders input[data-grade="saturation"]');
+    sEl.value = '-50';
+    sEl.dispatchEvent(new window.Event('input'));
+    await sleep(120);
+    doc.getElementById('grade-apply').dispatchEvent(new window.Event('click'));
+    await sleep(2200);
+    t('还原后继续编辑，图层变成 3 个', S.edits.length === 3, S.edits.length);
+    t('记录数没有增加（还是同一条）', api.library().length === 1, api.library().length);
+    const recAfter = api.library().find((w) => w.id === workId);
+    t('记录里的图层数也更新了',
+      !!(recAfter && recAfter.session && recAfter.session.items.length === 3),
+      recAfter && recAfter.session && recAfter.session.items && recAfter.session.items.length);
+
+    // 收尾
     api.goHome();
     await sleep(150);
   }

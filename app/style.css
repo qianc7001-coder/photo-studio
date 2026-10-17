@@ -430,16 +430,26 @@ ul.whatsnew li { margin-bottom: 5px; }
 }
 #grade-sliders {
   display: grid;
-  /* 两列：窄屏一列放不下「标签 + 滑块 + 数值」三样 */
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 2px 10px;
-  /* 参数从 5 个涨到 12 个，全铺开会把画布挤没。
-     限高 + 内部滚动：滑块区自己滚，画布尺寸保持不变。
-     注意 overflow-y 必须给 auto 而不是 hidden，否则低端机上
-     用户根本够不到下面那几个参数。 */
-  max-height: 168px;
+  /* 单列通栏。
+     原来用 repeat(auto-fit, minmax(150px,1fr))：360px 屏上会排成两列，
+     每列只剩 150px，扣掉 46px 标签和 38px 数值，滑块实际只有 60 多像素 ——
+     手指根本够不到（用户反馈「滑动条太小了，根本滑不到」）。
+     改成一行一个、占满整个宽度后，滑块可用长度翻了近一倍。 */
+  grid-template-columns: 1fr;
+  gap: 1px 0;
+  /* 12 个参数全铺开会把画布挤没 → 限高 + 内部滚动。
+     overflow-y 必须是 auto 而不是 hidden，否则小屏上用户
+     够不到靠后的参数（暗角）。
+
+     用两行 max-height：老 WebView 不认 min() 时会忽略那条声明，
+     只靠它的话 max-height 变成 none → 全部铺开、画布被挤没。
+     先写死像素兜底，再用 min() 覆盖，横屏/大屏能多显示几行。 */
+  max-height: 240px;
+  max-height: min(34vh, 260px);
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
+  /* 让每一行不被压扁 */
+  grid-auto-rows: min-content;
   /* 滚动时不要联动整页（否则拖滑块会带着页面一起动） */
   overscroll-behavior: contain;
   padding-right: 2px;
@@ -457,16 +467,31 @@ ul.whatsnew li { margin-bottom: 5px; }
 }
 .grade-group:first-child { margin-top: 0; }
 .grade-row {
-  display: flex; align-items: center; gap: 7px;
+  display: flex; align-items: center; gap: 9px;
+  /* 每行至少 34px 高：手指点按目标最小尺寸的通用建议是 44px，
+     但调色有十几行、太高会让画布被挤没，34px + 更粗的滑块头是折中。
+     真机实测够用：滑块头 24px，两侧还各留 5px 余量。 */
+  min-height: 34px;
 }
 .grade-row .gl {
-  flex: 0 0 46px;
-  font-size: 11px; color: var(--text-dim);
+  flex: 0 0 52px;
+  font-size: 11.5px; color: var(--text-dim);
 }
-.grade-row input[type=range] { min-width: 0; }
+/* 调色滑块：单独放大滑块头。
+   全局滑块头是 17px，那个尺寸是给「设置页里偶尔动一次」的场景；
+   调色是高频连续拖动，17px 在手机上几乎点不中（用户明确反馈过）。 */
+.grade-row input[type=range] {
+  min-width: 0;
+  height: 30px;            /* 加大可点区域（轨道本身仍细） */
+  --ps-thumb: 24px;
+}
+.grade-row input[type=range]::-webkit-slider-thumb {
+  margin-top: -10px;       /* (轨道 4px - 头 24px) / 2 = -10 */
+  border-width: 2px;
+}
 .grade-row .gv {
-  flex: 0 0 38px; text-align: right;
-  font-size: 11px; color: var(--text-faint);
+  flex: 0 0 42px; text-align: right;
+  font-size: 11.5px; color: var(--text-faint);
   font-variant-numeric: tabular-nums;
 }
 /* 有改动的那一行高亮，一眼看出自己动了哪几个参数 */
