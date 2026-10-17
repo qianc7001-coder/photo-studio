@@ -760,6 +760,70 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 }
 
 /* ======================= 历史时间线 ======================= */
+/* =============================================================================
+ * 文生图面板
+ *
+ * 复用设置页的 st-* 样式，只补三样这里独有的：
+ * 多行输入框、底部操作栏、看起来像链接的小按钮。
+ * ========================================================================== */
+#t2i .sheet-body { max-width: 600px; }
+
+#t2i .st-textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 96px;
+  max-height: 40vh;
+  /* 手机上输入框聚焦时字号 <16px 会被 Safari/部分 WebView 自动放大整页，
+     这里固定 16px 避开那个行为，同时也更好读 */
+  font-size: 16px;
+  line-height: 1.5;
+  padding: 10px 11px;
+  border-radius: 9px;
+  border: 1px solid var(--line-soft);
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: inherit;
+  -webkit-appearance: none;
+}
+#t2i .st-textarea::placeholder { color: var(--text-faint); }
+
+.t2i-foot {
+  display: flex; gap: 10px;
+  padding: 12px 18px calc(12px + var(--sab));
+  border-top: 1px solid var(--line-soft);
+  background: var(--panel);
+}
+.t2i-foot .primary { flex: 1 1 auto; }
+.t2i-foot .ghost { flex: 0 0 auto; }
+
+/* 「试试风景 / 人像」这类：看起来像链接，但不带下划线（文字小，下划线太吵） */
+.linkbtn {
+  background: none;
+  border: 0;
+  padding: 0 2px;
+  color: var(--accent);
+  font: inherit;
+  font-size: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+.linkbtn:active { opacity: .6; }
+
+/* 首页右上角：文生图 + 修新照片 并排 */
+.home-acts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.home-new.ghost {
+  background: var(--panel-2);
+  color: var(--text-dim);
+  border: 1px solid var(--line-soft);
+  box-shadow: none;
+}
+.home-new.ghost:active { background: #2b323f; color: var(--text); }
+
 #history .sheet-body { max-width: 600px; }
 
 .hist-foot {

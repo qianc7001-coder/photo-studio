@@ -5800,6 +5800,94 @@ async function run() {
       [S.jobs.length, S.edits.length]);
   }
 
+  /* ---------- 文生图 ---------- */
+  console.log('\n【50】文生图：不靠照片，纯文字出一张新图');
+  {
+    const api = window.__PS_API;
+    // 回到首页（文生图入口在首页）
+    api.goHome();
+    await sleep(150);
+    t('首页有文生图入口', !!doc.getElementById('btn-home-t2i'));
+    t('空状态里也有文生图入口', !!doc.getElementById('btn-empty-t2i'));
+
+    doc.getElementById('btn-home-t2i').dispatchEvent(new window.Event('click'));
+    await sleep(150);
+    t('点一下能打开文生图面板', doc.getElementById('t2i').hidden === false);
+    t('面板里有描述输入框', !!doc.getElementById('t2i-prompt'));
+    t('面板里有负面提示词输入框', !!doc.getElementById('t2i-negative'));
+    t('面板里有比例选择', doc.querySelectorAll('#t2i-ratios .chip').length >= 3,
+      doc.querySelectorAll('#t2i-ratios .chip').length);
+
+    // 比例切换
+    const chips = doc.querySelectorAll('#t2i-ratios .chip');
+    const threeTwo = Array.from(chips).find((c) => c.dataset.ratio === '3:2');
+    t('有 3:2 这个比例', !!threeTwo);
+    if (threeTwo) {
+      threeTwo.dispatchEvent(new window.Event('click'));
+      await sleep(80);
+      t('点了之后该比例高亮',
+        Array.from(doc.querySelectorAll('#t2i-ratios .chip'))
+          .find((c) => c.dataset.ratio === '3:2').classList.contains('on'));
+      t('出图尺寸跟着变（3:2 → 1536x1024）',
+        /1536x1024/.test(doc.getElementById('t2i-size-note').textContent),
+        doc.getElementById('t2i-size-note').textContent);
+    }
+
+    // 空描述不能生成
+    doc.getElementById('t2i-prompt').value = '';
+    const beforeEmpty = fake.seen.length;
+    doc.getElementById('t2i-go').dispatchEvent(new window.Event('click'));
+    await sleep(200);
+    t('空描述不会发起请求', fake.seen.length === beforeEmpty, fake.seen.length - beforeEmpty);
+    t('面板仍然开着（没被误关）', doc.getElementById('t2i').hidden === false);
+
+    // 正常生成
+    doc.getElementById('t2i-prompt').value = '山间晨雾的风景，暖色逆光，35mm 镜头';
+    doc.getElementById('t2i-prompt').dispatchEvent(new window.Event('input'));
+    doc.getElementById('t2i-negative').value = '文字,水印';
+    doc.getElementById('t2i-negative').dispatchEvent(new window.Event('input'));
+    await sleep(60);
+    const before = fake.seen.length;
+    fake.setColor([30, 90, 200]);
+    doc.getElementById('t2i-go').dispatchEvent(new window.Event('click'));
+    // 文生图走的是独立流程，用 busy 判断结束
+    for (let i = 0; i < 160 && S.busy; i++) await sleep(50);
+    await sleep(400);
+
+    const reqs = fake.seen.slice(before);
+    t('文生图发出了请求', reqs.length > 0, reqs.length);
+    if (reqs.length) {
+      const rq = reqs[0];
+      t('打到 /images/generations', /\/images\/generations/.test(rq.url), rq.url);
+      t('★ 请求体里没有图片字段（文生图就该是纯文字）',
+        rq.body && !('image' in rq.body) && !('input_image' in rq.body),
+        rq.body && Object.keys(rq.body));
+      t('请求里带了用户描述', /山间晨雾/.test(String(rq.body && rq.body.prompt || '')));
+      t('请求里带上了出片要求收尾', /出片要求|Requirements/.test(String(rq.body && rq.body.prompt || '')));
+      t('负面提示词传了过去', /文字,水印/.test(String(rq.body && rq.body.negative_prompt || '')),
+        rq.body && rq.body.negative_prompt);
+    }
+    t('生成后面板自动关闭', doc.getElementById('t2i').hidden === true);
+    t('生成后不再 busy', S.busy === false);
+
+    // 结果应该作为一张新照片打开
+    t('结果作为一张新文档打开', !!S.img && !!S.docCanvas, !!S.img);
+    t('新文档有实际尺寸', S.docW > 0 && S.docH > 0, [S.docW, S.docH]);
+    // 假服务器返回的是纯蓝 64x64，贴过来后画布应当是蓝色
+    if (S.docCanvas) {
+      const px = S.docCtx.getImageData(4, 4, 1, 1).data;
+      t('★ 画布内容就是模型返回的那张图（蓝色）',
+        px[2] > 150 && px[2] > px[0] + 60, [px[0], px[1], px[2]]);
+    }
+    // 生成后可以直接接着修（新照片应当能框选）
+    t('生成后处于可编辑状态', !!S.docCanvas && S.busy === false);
+
+    // 日志里要有一条 t2i 记录
+    const t2iLogs = (S.callLog || []).filter((e) => e.kind === 't2i');
+    t('调用日志记下了这次文生图', t2iLogs.length > 0, (S.callLog || []).length);
+    t('日志标了成功', t2iLogs.length > 0 && t2iLogs[0].ok === true);
+  }
+
   /* ---------- 无 JS 错误 ---------- */
   console.log('\n【15】运行健康度');
   const errs = logs.filter((l) => /JSDOM_ERROR|Uncaught/.test(l));

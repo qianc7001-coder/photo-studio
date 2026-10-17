@@ -4760,6 +4760,7 @@
         layers: !!$('layers') && !$('layers').hidden,
         photoinfo: !!$('photoinfo') && !$('photoinfo').hidden,
         exportpanel: !!$('exportpanel') && !$('exportpanel').hidden,
+        t2i: !!$('t2i') && !$('t2i').hidden,
         calllog: !!$('calllog') && !$('calllog').hidden,
         tutorial: tutorialOpen(),
         compare: !!$('compare') && !$('compare').hidden,
@@ -4776,6 +4777,7 @@
             case 'moremenu': closeMoreMenu(); break;
             case 'workPreview': $('work-preview').hidden = true; break;
             case 'settings': closeSettings(); break;
+            case 't2i': closeT2i(); break;
             case 'library': closeLibrary(); break;
             case 'history': closeHistory(); break;
             case 'layers': closeLayers(); break;
@@ -6084,6 +6086,185 @@
   }
   function closeSettings() { $('settings').hidden = true; }
 
+  /* ============================ 文生图 ============================
+   *
+   * 和「修图」是两条独立的路：
+   *   修图  = 打开照片 → 框选 → 带参考图请求 → 结果贴回选区
+   *   文生图 = 写描述 → 纯文字请求 → 结果直接作为一张新照片打开
+   *
+   * 刻意复用「生成中」遮罩、调用日志、成本统计、错误面板 ——
+   * 这几样和修图完全一样，用户不需要学两套；只有「结果怎么落地」不同。
+   */
+
+  /** 文生图的输入状态（不持久化：这是临时输入，不该污染设置） */
+  let t2i = { prompt: '', ratio: '1:1', negative: '' };
+
+  function openT2i() {
+    const el = $('t2i');
+    if (!el) return;
+    el.hidden = false;
+    renderT2iRatios();
+    syncT2iUI();
+    // 自动聚焦到描述框：进来就是要写字，省一次点击
+    setTimeout(() => {
+      const p = $('t2i-prompt');
+      if (p) { try { p.focus(); } catch (e) { /* 部分 WebView 不允许 */ } }
+    }, 60);
+  }
+  function closeT2i() { const el = $('t2i'); if (el) el.hidden = true; }
+
+  function renderT2iRatios() {
+    const box = $('t2i-ratios');
+    if (!box) return;
+    box.innerHTML = '';
+    for (const r of C.T2I_RATIOS) {
+      const b = document.createElement('button');
+      b.className = 'chip' + (r.id === t2i.ratio ? ' on' : '');
+      b.dataset.ratio = r.id;
+      b.textContent = r.label;
+      b.onclick = () => {
+        t2i.ratio = r.id;
+        renderT2iRatios();
+        syncT2iUI();
+      };
+      box.appendChild(b);
+    }
+  }
+
+  /** 把当前状态和「这次会花什么、发多大」同步到界面 */
+  function syncT2iUI() {
+    const m = currentModelParams();
+    const kind = m ? m.kind : null;
+    const plan = C.planT2iSize(t2i.ratio, S.cfg.provider, m ? m.sizeMode : 'image_size');
+    if ($('t2i-size-note')) {
+      $('t2i-size-note').textContent = '出图尺寸：' + plan.size
+        + (plan.note !== C.getT2iRatio(t2i.ratio).label ? '（该服务商规范尺寸，比例已自动修正）' : '');
+    }
+    const st = $('t2i-status');
+    if (st) {
+      st.className = 'status';
+      if (!S.cfg.apiKey) {
+        st.className = 'status bad';
+        st.textContent = '还没填 API Key，去设置里填一下才能生成。';
+      } else if (!S.cfg.model) {
+        st.className = 'status bad';
+        st.textContent = '还没选模型。';
+      } else {
+        // 用编辑模型做文生图也能出图，但和「参考我的照片」是两回事，
+        // 这里点名说明，免得用户以为是 bug
+        st.textContent = '模型：' + S.cfg.model
+          + (kind === 't2i' ? '' : '（编辑模型，纯文字出图可能不如专用文生图模型）');
+      }
+    }
+    const tip = $('t2i-tip');
+    if (tip) {
+      const est = estimateT2iCost();
+      tip.innerHTML = est.text;
+    }
+  }
+
+  /** 文生图的成本预估（复用修图那套单价表） */
+  function estimateT2iCost() {
+    try {
+      const est = currentEstimate();
+      if (!est || !est.known) return { text: '单价未知，可在设置里填写每张价格。' };
+      const cny = est.totalUsd * (Number(S.cfg.usdCny) || 7.1);
+      return {
+        text: '预计花费约 $' + est.totalUsd.toFixed(3)
+          + '（≈ ¥' + cny.toFixed(2) + '）· 1 次调用 · ' + (est.note || '')
+      };
+    } catch (e) {
+      return { text: '' };
+    }
+  }
+
+  /** 生图结果 → 一张新照片 */
+  async function openAsNewPhoto(canvas, name) {
+    // 转成 blob 再走 loadImageFromBlob：那条路已经处理好了
+    // 「工作分辨率上限 / EXIF / 作品库登记 / 会话恢复」等一整套，
+    // 直接 setImage(canvas) 会绕过这些，导出和恢复都会缺东西。
+    const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.95));
+    if (!blob) throw new Error('结果转换失败');
+    await loadImageFromBlob(blob, name || ('文生图-' + new Date().toISOString().slice(0, 10) + '.jpg'));
+  }
+
+  /** 跑一次文生图 */
+  async function runT2i() {
+    const prompt = String($('t2i-prompt') ? $('t2i-prompt').value : '').trim();
+    const negative = String($('t2i-negative') ? $('t2i-negative').value : '').trim();
+    t2i.prompt = prompt;
+    t2i.negative = negative;
+
+    const m = currentModelParams();
+    const check = C.checkT2i({
+      prompt, model: S.cfg.model,
+      kind: m ? m.kind : null
+    });
+    if (check) {
+      toast(check.title + '：' + check.message.split('\n')[0], 3600);
+      if ($('t2i-prompt')) { try { $('t2i-prompt').focus(); } catch (e) {} }
+      return;
+    }
+    if (!S.cfg.apiKey) { toast('先去设置里填 API Key', 3000); return; }
+
+    const fullPrompt = C.buildT2iPrompt(prompt, { isZh: S.cfg.lang !== 'en' });
+    const req = C.buildT2iRequest({
+      baseUrl: S.cfg.baseUrl,
+      apiKey: S.cfg.apiKey,
+      model: S.cfg.model,
+      prompt: fullPrompt,
+      negativePrompt: negative,
+      ratio: t2i.ratio,
+      providerId: S.cfg.provider,
+      seed: S.cfg.seed
+    });
+
+    const aborter = new AbortController();
+    S.t2iAborter = aborter;
+    const t0 = Date.now();
+    setBusy(true, '生成中', '文生图 · 大约 10–30 秒');
+    closeT2i();
+    try {
+      const json = await callModel(req, aborter);
+      const items = C.parseImageResponse(json);
+      if (!items.length) {
+        recordCallLog({
+          at: t0, ms: Date.now() - t0, ok: false, status: 200,
+          model: S.cfg.model, kind: 't2i', error: '接口没有返回图片', workId: ''
+        });
+        throw new Error('接口没有返回图片。这个模型可能不支持文生图，换一个试试。');
+      }
+      let blob;
+      if (items[0].dataUrl) {
+        const r = await fetch(items[0].dataUrl);
+        blob = await r.blob();
+      } else {
+        blob = await urlToBlob(items[0].url);
+      }
+      const gen = await blobToCanvas(blob);
+      const callCost = estimateCallCost();
+      recordCallLog({
+        at: t0, ms: Date.now() - t0, ok: true, status: 200,
+        model: S.cfg.model, kind: 't2i', error: '',
+        costUsd: callCost.usd, costNote: callCost.note, workId: ''
+      });
+      await openAsNewPhoto(gen, '文生图-' + Date.now().toString(36) + '.jpg');
+      toast('已生成新照片，可以继续框选精修', 3000);
+    } catch (err) {
+      if (err && err.name === 'AbortError') return;
+      recordCallLog({
+        at: t0, ms: Date.now() - t0, ok: false,
+        status: err && err.status ? err.status : 0,
+        model: S.cfg.model, kind: 't2i',
+        error: describeCallError(err), workId: ''
+      });
+      showGenError(err, { kind: 't2i', model: S.cfg.model, baseUrl: S.cfg.baseUrl });
+    } finally {
+      S.t2iAborter = null;
+      setBusy(false);
+    }
+  }
+
   /* ---------- 调用日志面板 ---------- */
 
   function openCallLog() {
@@ -6779,6 +6960,35 @@
     $('btn-pick').onclick = () => $('file-input').click();
     $('btn-home-pick').onclick = () => $('file-input').click();
     $('btn-demo').onclick = useDemoImage;
+
+    // ---- 文生图 ----
+    $('btn-home-t2i').onclick = openT2i;
+    $('btn-empty-t2i').onclick = openT2i;
+    document.querySelectorAll('#t2i [data-close]').forEach((el) => { el.onclick = closeT2i; });
+    $('t2i-go').onclick = runT2i;
+    $('t2i-prompt').addEventListener('input', () => {
+      t2i.prompt = $('t2i-prompt').value;
+      syncT2iUI();
+    });
+    $('t2i-negative').addEventListener('input', () => {
+      t2i.negative = $('t2i-negative').value;
+    });
+    const IDEAS = {
+      't2i-idea-1': '黄昏的江南水乡，石桥下停着一只小船，远处青瓦白墙，暖色逆光，35mm 镜头，浅景深',
+      't2i-idea-2': '窗边侧光的年轻女性肖像，米色毛衣，背景虚化的绿植，柔和自然光，85mm 人像镜头',
+      't2i-idea-3': '木桌上的手冲咖啡与翻开的旧书，晨光斜射，浅色木纹，温馨安静，微距质感',
+      't2i-idea-4': '雨后的现代美术馆外观，玻璃幕墙上挂着水珠，阴天柔光，对称构图，广角'
+    };
+    for (const id of Object.keys(IDEAS)) {
+      const b = $(id);
+      if (b) b.onclick = () => {
+        if ($('t2i-prompt')) {
+          $('t2i-prompt').value = IDEAS[id];
+          t2i.prompt = IDEAS[id];
+          syncT2iUI();
+        }
+      };
+    }
     $('btn-more').onclick = (e) => { e.stopPropagation(); toggleMoreMenu(); };
     $('btn-settings').onclick = () => { closeMoreMenu(); openSettings(); };
     $('btn-save').onclick = openExportPanel;

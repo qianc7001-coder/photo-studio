@@ -3660,6 +3660,84 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
 })();
 // ===== 多组供应商结束 =====
 
+
+/* ===== 文生图 =====
+ * 和修图是两条路：文生图**一个图片字段都不能带**。
+ * 一旦混进 image/input_image，就会被路由到编辑接口，
+ * 而文生图模型多半不认 —— 表现为「接口没返回图片」或直接被拒单。
+ */
+(function () {
+  console.log('\n【文生图】');
+  const req = (o) => C.buildT2iRequest(Object.assign({
+    baseUrl: 'https://api.siliconflow.cn/v1', apiKey: 'k',
+    model: 'Qwen/Qwen-Image', prompt: '山间晨雾', ratio: '1:1', providerId: 'siliconflow'
+  }, o));
+
+  // 1) 请求体必须是纯文字
+  const r1 = req();
+  t('打到 generations 端点', /\/images\/generations$/.test(r1.url), r1.url);
+  t('请求体里没有 image 字段', !('image' in r1.body));
+  t('请求体里没有 input_image 字段', !('input_image' in r1.body));
+  t('请求体里没有 images 字段', !('images' in r1.body));
+  t('带了 model 与 prompt', r1.body.model === 'Qwen/Qwen-Image' && r1.body.prompt === '山间晨雾');
+  t('带了鉴权头', r1.headers['Authorization'] === 'Bearer k');
+  t('Content-Type 是 JSON', r1.headers['Content-Type'] === 'application/json');
+
+  // 2) 尺寸字段按服务商规则走，且只出现一个
+  const hasSize = (b) => ['size', 'image_size', 'aspect_ratio'].filter((k) => k in b);
+  const sf = req({ ratio: '3:2' });
+  t('硅基流动用 image_size', hasSize(sf.body).join(',') === 'image_size', hasSize(sf.body));
+  t('3:2 换算成 1536x1024', sf.body.image_size === '1536x1024', sf.body.image_size);
+  const oa = req({ model: 'gpt-image-1', providerId: 'openai', baseUrl: 'https://api.openai.com/v1', ratio: '1:1' });
+  t('OpenAI 用 size', hasSize(oa.body).join(',') === 'size', hasSize(oa.body));
+  t('OpenAI 的 1:1 是 1024x1024', oa.body.size === '1024x1024', oa.body.size);
+  t('尺寸字段只出现一个（不会同时塞两种）', hasSize(oa.body).length === 1);
+  t('Kontext 系用 aspect_ratio', (() => {
+    const k = req({ model: 'black-forest-labs/FLUX.1-Kontext-pro', providerId: 'custom', ratio: '16:9' });
+    return hasSize(k.body).join(',') === 'aspect_ratio' && k.body.aspect_ratio === '16:9';
+  })());
+
+  // 3) 比例表
+  t('比例表非空且格式合法',
+    C.T2I_RATIOS.length >= 3 && C.T2I_RATIOS.every((r) => /^\d+:\d+$/.test(r.id)));
+  t('未知比例回落到第一个（不崩）', C.getT2iRatio('999:1').id === C.T2I_RATIOS[0].id);
+  t('按 id 能取到比例', C.getT2iRatio('16:9').w === 1536);
+
+  // 4) 可选字段
+  t('负面提示词会带上', req({ negativePrompt: '文字,水印' }).body.negative_prompt === '文字,水印');
+  t('种子会转成数字', req({ seed: '42' }).body.seed === 42);
+  t('空种子不写进请求', !('seed' in req({ seed: '' }).body));
+  t('不许把种子写成 NaN', !('seed' in req({ seed: 'abc' }).body));
+
+  // 5) 前置检查
+  t('空描述会被拦下', !!C.checkT2i({ prompt: '', model: 'm' }));
+  t('只有空格也会被拦下', !!C.checkT2i({ prompt: '   ', model: 'm' }));
+  t('太短的描述会被拦下', !!C.checkT2i({ prompt: '猫', model: 'm' }));
+  t('没选模型会被拦下', !!C.checkT2i({ prompt: '山间晨雾的照片', model: '' }));
+  t('正常输入放行', C.checkT2i({ prompt: '山间晨雾的风景照片', model: 'Qwen/Qwen-Image' }) === null);
+  t('拦下时给出标题与说明', (() => {
+    const c = C.checkT2i({ prompt: '', model: 'm' });
+    return !!(c && c.title && c.message);
+  })());
+
+  // 6) 提示词收尾
+  const p1 = C.buildT2iPrompt('山间晨雾', { isZh: true });
+  t('收尾会保留用户原话', /山间晨雾/.test(p1));
+  t('中文会补出片要求', /出片要求/.test(p1));
+  t('英文补英文要求', /Requirements/.test(C.buildT2iPrompt('misty mountain', { isZh: false })));
+  t('空描述返回空串（不凭空生成提示词）', C.buildT2iPrompt('', {}) === '');
+  t('收尾不会把用户的话改掉（原话在最前）', p1.indexOf('山间晨雾') === 0);
+
+  // 7) 尺寸被服务商修正时要说清楚
+  t('尺寸合规时 note 就是比例本身', C.planT2iSize('1:1', 'openai', 'size').note === '1:1');
+  t('planT2iSize 总能给出可解析尺寸',
+    C.T2I_RATIOS.every((r) => {
+      const pl = C.planT2iSize(r.id, 'openai', 'size');
+      return C.validateSize(pl.size, 'openai').ok;
+    }));
+})();
+// ===== 文生图结束 =====
+
 /* ---------- 检查更新 ---------- */
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

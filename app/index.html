@@ -77,10 +77,16 @@
     <div id="home">
       <div class="home-head">
         <div class="home-title">修改历史</div>
-        <button class="home-new" id="btn-home-pick">
-          <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
-          <span>修新照片</span>
-        </button>
+        <div class="home-acts">
+          <button class="home-new ghost" id="btn-home-t2i">
+            <svg viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
+            <span>文生图</span>
+          </button>
+          <button class="home-new" id="btn-home-pick">
+            <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+            <span>修新照片</span>
+          </button>
+        </div>
       </div>
       <div id="home-list" class="home-list"></div>
       <div id="home-empty" class="home-empty" hidden>
@@ -89,6 +95,7 @@
         <p>修过的照片会自动留档在这里<br>框选一块 → 写一句要求 → 模型改完自动贴回</p>
         <button class="primary" id="btn-pick">选择照片</button>
         <button class="ghost" id="btn-demo">用示例图试试</button>
+        <button class="ghost" id="btn-empty-t2i">没有照片？试试文生图</button>
       </div>
     </div>
 
@@ -315,6 +322,64 @@
     <div class="hist-foot" id="hist-foot" hidden>
       <button class="ghost" id="hist-preview-off" hidden>退出预览</button>
       <button class="primary" id="hist-jump" hidden>回到这一步</button>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= 文生图（不依赖任何照片） ======================= -->
+<div id="t2i" class="sheet" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-body">
+    <div class="sheet-head">
+      <h3>文生图</h3>
+      <button class="tb-btn icon" data-close>
+        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="sheet-scroll">
+      <div class="tip" style="margin:0 0 12px">
+        不用照片，直接靠文字生成一张新图。<b>有什么想法就写什么</b>：
+        主体、环境、光线、风格、镜头感都能写进去。<br>
+        生成结果会作为一张新照片打开，之后可以继续框选精修。
+      </div>
+
+      <div class="st-group">画面描述</div>
+      <div class="st-card">
+        <div class="st-row-col">
+          <textarea id="t2i-prompt" class="st-input st-textarea" rows="5"
+            placeholder="例：黄昏的江南水乡，石桥下有小船，远处青瓦白墙，暖色逆光，35mm 镜头，浅景深"></textarea>
+        </div>
+      </div>
+      <div class="tip">
+        不知道怎么写？试试
+        <button class="linkbtn" id="t2i-idea-1">风景</button>
+        <button class="linkbtn" id="t2i-idea-2">人像</button>
+        <button class="linkbtn" id="t2i-idea-3">静物</button>
+        <button class="linkbtn" id="t2i-idea-4">建筑</button>
+      </div>
+
+      <div class="st-group">比例</div>
+      <div class="st-card">
+        <div class="st-row-col">
+          <div class="chips" id="t2i-ratios"></div>
+          <div class="st-desc" id="t2i-size-note"></div>
+        </div>
+      </div>
+
+      <div class="st-group">不想出现的东西（可选）</div>
+      <div class="st-card">
+        <div class="st-row-col">
+          <input class="st-input" type="text" id="t2i-negative"
+            placeholder="例：文字、水印、人物、过曝" autocapitalize="off" autocorrect="off" spellcheck="false">
+        </div>
+      </div>
+
+      <div class="status" id="t2i-status"></div>
+      <div class="tip" id="t2i-tip"></div>
+    </div>
+    <div class="t2i-foot">
+      <button class="ghost" data-close>取消</button>
+      <button class="primary" id="t2i-go">生成</button>
     </div>
   </div>
 </div>

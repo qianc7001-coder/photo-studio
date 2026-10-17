@@ -1310,6 +1310,148 @@
     return 'images/generations';
   }
 
+  /* ====================== 文生图（不依赖任何照片） ======================
+   *
+   * 和「修图」是两条不同的路：
+   *   - 修图：一定带参考图，走 edits（或硅基流动的 generations+image 字段）
+   *   - 文生图：一张图都不带，只发文字，纯 generations + JSON
+   *
+   * 这里刻意不复用 buildImageRequest 的 kind 分支：一旦传错 imageDataUrl，
+   * 就会从 generations 变成 edits，而对文生图模型来说那是「多了一个不认识的
+   * 文件字段」，容易被上游拒单或忽略。文生图请求体就应该是干净的纯文字。
+   */
+
+  /** 文生图常用比例（与手机上常见的相纸/屏幕比例对齐） */
+  const T2I_RATIOS = [
+    { id: '1:1', label: '1:1', w: 1024, h: 1024 },
+    { id: '3:2', label: '3:2', w: 1536, h: 1024 },
+    { id: '2:3', label: '2:3', w: 1024, h: 1536 },
+    { id: '16:9', label: '16:9', w: 1536, h: 864 },
+    { id: '9:16', label: '9:16', w: 864, h: 1536 }
+  ];
+
+  function getT2iRatio(id) {
+    return T2I_RATIOS.find((r) => r.id === id) || T2I_RATIOS[0];
+  }
+
+  /**
+   * 给文生图任务算出该发什么尺寸。
+   *
+   * 不同服务商的「尺寸」语义不同：
+   *   - sizeMode 'size'         → 固定像素（OpenAI：1024x1024 / 1536x1024 / 1024x1536）
+   *   - sizeMode 'aspect_ratio' → 比例字符串（Kontext 系）
+   *   - sizeMode 'image_size'   → 固定像素（硅基流动）
+   *
+   * 关键：OpenAI 那类接口只认少数几个尺寸，直接把「16:9」翻译成 1536x864 会被拒。
+   * 所以这里统一走 conformSize 修正到合规值，而不是把用户选的比例硬塞进去。
+   * @returns {{size:string, aspectRatio:string, note:string}}
+   */
+  function planT2iSize(ratioId, providerId, sizeMode) {
+    const r = getT2iRatio(ratioId);
+    const pid = providerId || 'custom';
+    const mode = sizeMode || 'image_size';
+    if (mode === 'aspect_ratio') {
+      return { size: '', aspectRatio: r.id, note: r.label };
+    }
+    const c = conformSize(r.w, r.h, pid);
+    const v = validateSize(c.size, pid);
+    return {
+      size: c.size,
+      aspectRatio: r.id,
+      // 尺寸被服务商规范改过时如实说明，避免用户以为「选的是 16:9，
+      // 出来的怎么是别的比例」而以为是 bug
+      note: v.ok ? r.label : (r.label + ' → ' + c.size)
+    };
+  }
+
+  /**
+   * 构造文生图请求（纯文字，没有任何图片字段）。
+   * @returns {{url, headers, body, endpoint, size}}
+   */
+  function buildT2iRequest(o) {
+    const opt = o || {};
+    const baseUrl = opt.baseUrl || 'https://api.siliconflow.cn/v1';
+    const model = String(opt.model || '');
+    const m = modelParams(model);
+    const providerId = opt.providerId || 'custom';
+    const sizeMode = (m && m.sizeMode) || 'image_size';
+    const ratio = planT2iSize(opt.ratio, providerId, sizeMode);
+
+    const body = { model, prompt: String(opt.prompt || '') };
+    if (ratio.size) body.image_size = '';
+    // 按 sizeMode 写对应字段（只写一个，别把两种都塞进去）
+    if (sizeMode === 'aspect_ratio' && ratio.aspectRatio) {
+      body.aspect_ratio = ratio.aspectRatio;
+      delete body.image_size;
+    } else if (sizeMode === 'size' && ratio.size) {
+      body.size = ratio.size;
+      delete body.image_size;
+    } else if (ratio.size) {
+      body.image_size = ratio.size;
+    }
+    if (opt.negativePrompt) body.negative_prompt = String(opt.negativePrompt);
+    if (opt.seed !== '' && opt.seed != null && isFinite(opt.seed)) body.seed = Number(opt.seed);
+    if (opt.extra && typeof opt.extra === 'object') Object.assign(body, opt.extra);
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (opt.apiKey) headers['Authorization'] = 'Bearer ' + opt.apiKey;
+    return {
+      url: joinUrl(baseUrl, 'images/generations'),
+      headers,
+      body,
+      endpoint: 'images/generations',
+      size: body.size || body.image_size || body.aspect_ratio || ''
+    };
+  }
+
+  /**
+   * 文生图前的检查。
+   * 返回 null 表示可以发；否则返回 {title, message} 供界面展示。
+   *
+   * 这里刻意**不拦「选了编辑模型」**：很多编辑模型也能纯文字出图，
+   * 直接拦掉会让用户莫名其妙。但必须提醒 —— 否则他会以为
+   * 「我明明写了这么详细的描述，怎么出来的东西和我的照片没关系」。
+   */
+  function checkT2i(o) {
+    const opt = o || {};
+    const prompt = String(opt.prompt || '').trim();
+    if (!prompt) {
+      return { title: '还差一句描述', message: '文生图没有原图可参考，模型只能靠文字。\n写清楚「画什么、什么光线、什么风格」再生成。' };
+    }
+    if (prompt.length < 4) {
+      return { title: '描述太短了', message: '只有「' + prompt + '」两个字，模型猜不出你想要什么。\n多写一点：主体、环境、光线、风格。' };
+    }
+    if (!String(opt.model || '').trim()) {
+      return { title: '还没选模型', message: '去设置里选一个生图模型（文生图推荐 Qwen-Image、FLUX、dall-e-3）。' };
+    }
+    return null;
+  }
+
+  /**
+   * 文生图提示词收尾。
+   * 用户写的是一句人话，这里补上「出片质感」的通用要求 ——
+   * 不补的话模型常给一张构图随便、颜色发灰的图，摄影师就得反复重抽。
+   */
+  function buildT2iPrompt(userPrompt, opts) {
+    const o = opts || {};
+    const p = String(userPrompt || '').trim();
+    if (!p) return '';
+    const lines = [p];
+    if (o.isZh !== false) {
+      lines.push('');
+      lines.push('【出片要求】画面干净、主体清晰、透视自然，光线符合描述的环境；'
+        + '不要出现文字、水印、边框、拼贴或多格构图。'
+        + '质感接近真实摄影作品（合理的景深与颗粒），不要塑料感的 3D 渲染。');
+    } else {
+      lines.push('');
+      lines.push('[Requirements] Clean composition, clear subject, natural perspective, '
+        + 'lighting consistent with the described scene. No text, watermark, border, '
+        + 'collage or multi-panel layout. Photographic texture with natural depth of field '
+        + 'and grain; avoid plastic 3D-render look.');
+    }
+    return lines.join('\n');
+  }
+
   /** 需要 multipart 的接口（目前只有 OpenAI 系的 edits） */
   function needsMultipart(endpoint) {
     return endpoint === 'images/edits';
@@ -2876,6 +3018,7 @@
     { id: 'tutorial', z: 140, zh: '新手教程' },      // #tutorial（盖住一切）
     { id: 'moremenu', z: 130, zh: '更多菜单' },
     { id: 'workPreview', z: 120, zh: '作品预览' },   // #work-preview
+    { id: 't2i', z: 115, zh: '文生图' },             // #t2i（可从首页或设置里打开）
     { id: 'calllog', z: 110, zh: '调用日志' },       // #calllog（在设置之上打开）
     { id: 'settings', z: 100, zh: '设置' },
     { id: 'library', z: 100, zh: '修图记录' },
@@ -3519,7 +3662,12 @@
       costUsd: (e.costUsd === null || e.costUsd === undefined) ? null : num(e.costUsd, 0),
       costNote: typeof e.costNote === 'string' ? e.costNote.slice(0, 60) : '',
       endpoint: typeof e.endpoint === 'string' ? e.endpoint.slice(0, 200) : '',
+      // 这次调用是「改图」还是「文生图」。
+      // 两者花费结构不同（文生图没有参考图、改图有上下文外扩），
+      // 混在一起看会让「这张照片花了几次」的统计失去意义。
+      kind: (e.kind === 't2i' ? 't2i' : 'edit'),
       // 记录属于哪张作品（将来「这张照片花了几次」能直接查）
+      // 文生图没有作品归属（是凭空造一张新的），记空串
       workId: typeof e.workId === 'string' ? e.workId : ''
     };
     const out = [rec];
@@ -6391,6 +6539,8 @@
     // 模型
     PROVIDERS, getProvider, findModel, joinUrl, buildImageRequest, parseImageResponse, extractError,
     dataUrlToBytes, resolveEndpoint, needsMultipart, buildMultipartBody,
+    // 文生图
+    T2I_RATIOS, getT2iRatio, planT2iSize, buildT2iRequest, checkT2i, buildT2iPrompt,
     classifyModel, pickImageModels, findKnownModel, modelParams,
     validateImageRequest, diagnoseResponse,
     // 提示词
