@@ -5888,6 +5888,116 @@ async function run() {
     t('日志标了成功', t2iLogs.length > 0 && t2iLogs[0].ok === true);
   }
 
+  /* ---------- 生成后自动清空提示词 ---------- */
+  console.log('\n【51】生成成功后自动清空提示词（但失败/正在改写时不能清）');
+  {
+    const api = window.__PS_API;
+    // 准备一张照片（loadPhoto 是上一段里的局部函数，这里不能用，重新造一张）
+    {
+      const c = napi.createCanvas(400, 300);
+      const cx0 = c.getContext('2d');
+      cx0.fillStyle = 'rgb(120,120,120)';
+      cx0.fillRect(0, 0, 400, 300);
+      const inp = doc.getElementById('file-input');
+      Object.defineProperty(inp, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'clear.png', { type: 'image/png' })],
+        configurable: true
+      });
+      inp.dispatchEvent(new window.Event('change'));
+      await sleep(400);
+    }
+    t('清空测试的照片已载入', S.imgW === 400, S.imgW);
+    S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.contextPct = 0;
+    S.cfg.upscaleSmall = false; S.cfg.autoGrade = false;
+    S.rect = { x: 40, y: 40, w: 140, h: 120 };
+    const pEl = doc.getElementById('prompt');
+
+    // ---- 1) 成功 → 清空 ----
+    pEl.value = '把天空换成晚霞';
+    pEl.dispatchEvent(new window.Event('input'));
+    await sleep(60);
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 12000);
+    t('生成成功', S.pending !== null || S.jobs.length > 0);
+    t('★ 成功后提示词被清空', pEl.value === '', pEl.value);
+    if (S.pending) { doc.getElementById('cmp-discard').dispatchEvent(new window.Event('click')); await sleep(80); }
+
+    // ---- 2) 失败 → 必须保留（用户要照着改）----
+    const realFetch = window.fetch;
+    window.fetch = async (u, o) => {
+      if (String(u).includes('images/')) {
+        return {
+          ok: false, status: 500,
+          json: async () => ({ error: { message: 'boom' } }),
+          text: async () => JSON.stringify({ error: { message: 'boom' } }),
+          blob: async () => new window.Blob([])
+        };
+      }
+      return realFetch(u, o);
+    };
+    pEl.value = '这次一定会失败';
+    pEl.dispatchEvent(new window.Event('input'));
+    await sleep(60);
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 15000);
+    window.fetch = realFetch;
+    t('失败时提示词被保留（能照着改）', pEl.value === '这次一定会失败', pEl.value);
+    const errPanel = doc.getElementById('gen-error');
+    if (errPanel && !errPanel.hidden) {
+      const closeBtn = doc.getElementById('err-close');
+      if (closeBtn) closeBtn.dispatchEvent(new window.Event('click'));
+      await sleep(80);
+    }
+
+    // ---- 3) 生成期间用户改了字 → 不能清 ----
+    pEl.value = '第一条要求';
+    pEl.dispatchEvent(new window.Event('input'));
+    await sleep(60);
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    // 请求还在飞的时候改写输入框
+    await sleep(80);
+    pEl.value = '第二条要求，我正在写';
+    pEl.dispatchEvent(new window.Event('input'));
+    await waitGen(S, 12000);
+    t('★ 生成期间改了字，就不清空（不打断用户）',
+      pEl.value === '第二条要求，我正在写', pEl.value);
+    if (S.pending) { doc.getElementById('cmp-discard').dispatchEvent(new window.Event('click')); await sleep(80); }
+
+    // ---- 4) 本来空的也不会出问题 ----
+    pEl.value = '';
+    pEl.dispatchEvent(new window.Event('input'));
+    await sleep(60);
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 12000);
+    t('空提示词生成后仍是空（不崩）', pEl.value === '');
+    if (S.pending) { doc.getElementById('cmp-discard').dispatchEvent(new window.Event('click')); await sleep(80); }
+
+    // ---- 5) 文生图的描述框也要清 ----
+    api.goHome();
+    await sleep(150);
+    doc.getElementById('btn-home-t2i').dispatchEvent(new window.Event('click'));
+    await sleep(150);
+    const t2iEl = doc.getElementById('t2i-prompt');
+    t2iEl.value = '山间晨雾的风景照片';
+    t2iEl.dispatchEvent(new window.Event('input'));
+    await sleep(60);
+    doc.getElementById('t2i-go').dispatchEvent(new window.Event('click'));
+    for (let i = 0; i < 160 && S.busy; i++) await sleep(50);
+    await sleep(300);
+    t('★ 文生图成功后描述被清空', t2iEl.value === '', t2iEl.value);
+    t('文生图内存草稿也清了（重开面板不会又填回来）',
+      (() => {
+        api.goHome();
+        doc.getElementById('btn-home-t2i').dispatchEvent(new window.Event('click'));
+        return doc.getElementById('t2i-prompt').value === '';
+      })());
+    doc.querySelector('#t2i [data-close]').dispatchEvent(new window.Event('click'));
+    await sleep(80);
+
+    api.goHome();
+    await sleep(120);
+  }
+
   /* ---------- 无 JS 错误 ---------- */
   console.log('\n【15】运行健康度');
   const errs = logs.filter((l) => /JSDOM_ERROR|Uncaught/.test(l));

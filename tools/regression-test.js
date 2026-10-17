@@ -1983,6 +1983,76 @@ console.log('\n【发布】历史版本必须可下载（README 与归档一致�
 
 
 /* ---------- 历史版本保留 ---------- */
+
+/* ===== 生成成功后清空提示词 =====
+ * 用户要的：每次生成完，上一次的描述自动清掉，不用手动删。
+ * 但「清空」这件事很容易误伤，必须钉死三个前提：
+ *   1) 只在成功时清 —— 失败要留着原话改一改重试（重试按钮也靠它）
+ *   2) 用户已经在写新内容时不清 —— 否则会把他刚打的字抹掉
+ *   3) 清的是用户输入框里的原文，不是 buildPrompt 加工后的长串
+ *      （拿长串去比永远不相等，清空就永远不会发生）
+ */
+(function () {
+  console.log('\n【生成后清空提示词】');
+  const fs4 = require('fs');
+  const src = fs4.readFileSync(__dirname + '/../app/app.js', 'utf8');
+
+  t('有清理函数', /function clearPromptIfUnchanged\(/.test(src));
+
+  t('只跟原文比较（不用加工后的 promptText）', (() => {
+    const fn = src.slice(src.indexOf('function clearPromptIfUnchanged'), src.indexOf('function setBusy'));
+    return /el\.value/.test(fn) && /usedRaw/.test(fn);
+  })());
+
+  t('内容变了就不清（保护用户正在写的字）', (() => {
+    const fn = src.slice(src.indexOf('function clearPromptIfUnchanged'), src.indexOf('function setBusy'));
+    // 必须是「不相等就 return」的顺序：先比较再清
+    const cmp = fn.indexOf('if (now !== used) return;');
+    const clr = fn.indexOf("el.value = ''");
+    return cmp > 0 && clr > cmp;
+  })());
+
+  t('空内容不重复清', (() => {
+    const fn = src.slice(src.indexOf('function clearPromptIfUnchanged'), src.indexOf('function setBusy'));
+    return /if \(!now\) return;/.test(fn);
+  })());
+
+  t('清完派发 input 事件（让依赖它的界面刷新）', (() => {
+    const fn = src.slice(src.indexOf('function clearPromptIfUnchanged'), src.indexOf('function setBusy'));
+    return /dispatchEvent\(new Event\('input'/.test(fn);
+  })());
+
+  // 调用点必须只在成功分支（去掉注释行再匹配，否则会匹配到注释里的说明）
+  // 「去掉注释行」的局部工具：匹配调用点时必须去掉注释，
+  // 否则注释里提到的函数名会被误判成真的调用了
+  const stripLineComments = (s2) => s2.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  t('只在生成成功后调用（不在失败分支）', (() => {
+    // 注意：catch 必须从 runJob 之后开始找 —— 文件前面还有别的 catch，
+    // 直接 indexOf 会切出一个空段，断言永远失败（曾经踩过）
+    const from = src.indexOf('const r = await runJob(job)');
+    const to = src.indexOf('} catch (err) {', from);
+    return to > from && stripLineComments(src.slice(from, to))
+      .indexOf('clearPromptIfUnchanged(job.promptRaw)') > 0;
+  })());
+
+  t('失败分支里没有调用', (() => {
+    const i = src.indexOf('const r = await runJob(job)');
+    const c = src.indexOf('} catch (err) {', i);
+    if (c < 0) return false;
+    // 失败分支到函数体内的下一个大括号收尾为止
+    return stripLineComments(src.slice(c, c + 2000)).indexOf('clearPromptIfUnchanged') < 0;
+  })());
+
+  t('只在用户还在这张照片上时清', /job\.docVersion === S\.docVersion\) clearPromptIfUnchanged/.test(src));
+
+  t('任务快照里存了用户原文 promptRaw', /promptRaw: String\(\$\('prompt'\)\.value \|\| ''\)/.test(src));
+  t('promptRaw 存在但没覆盖 promptLabel（日志标签仍截断）', /promptLabel: String\(\$\('prompt'\)\.value \|\| ''\)\.trim\(\)\.slice\(0, 24\)/.test(src));
+
+  // 重试依赖提示词 —— 清空必须在「重试窗口」之外，否则重试会发出空提示词
+  t('重试按钮读的是输入框（所以失败时不能清）', /on\('err-retry', \(\) => \{ clearErrorPanel\(\); generate\(\); \}\)/.test(src));
+})();
+// ===== 生成后清空提示词结束 =====
+
 /* ---------- 检查更新 ---------- */
 console.log('\n【更新】应用内检测新版本（不能依赖 /releases/latest）');
 

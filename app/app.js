@@ -797,6 +797,35 @@
       setTimeout(() => { el.hidden = true; }, 260);
     }, ms || 2600);
   }
+  /**
+   * 生成成功后清空提示词输入框。
+   *
+   * 为什么需要：摄影师是一张一张连着修的，上一次的描述留在框里，
+   * 下次生成要么忘了改（白花一次钱），要么得先全选删掉。清掉更顺手。
+   *
+   * 但绝不能无脑清 —— 只在「框里还是那次生成用的原文」时才清：
+   *   - 生成期间用户改了字（说明已经在写下一条要求了）→ 不动，别打断他
+   *   - 失败/取消 → 根本不调这个函数（调用点只放在成功分支）
+   *
+   * @param {string} usedRaw 那次生成时输入框里的原文
+   */
+  function clearPromptIfUnchanged(usedRaw) {
+    const el = $('prompt');
+    if (!el) return;
+    const now = String(el.value || '');
+    const used = String(usedRaw == null ? '' : usedRaw);
+    // 用户已经在写新的了：保留，不回退他的输入
+    if (now !== used) return;
+    if (!now) return;           // 本来就是空的，没什么可清
+    el.value = '';
+    // 清空后通知一次，让依赖提示词的界面（成本预估之类）跟着刷新。
+    // 用 dispatch 而不是直接调内部函数：和用户手动输入走完全一样的路径，
+    // 不会漏掉任何一个监听者。
+    try {
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    } catch (e) { /* 极老内核不支持 Event 构造，忽略即可 */ }
+  }
+
   function setBusy(on, title, sub) {
     S.busy = on;
     $('busy').hidden = !on;
@@ -3088,6 +3117,11 @@
       req,
       kind,
       promptText,
+      // 用户输入框里的**原文**（未经 buildPrompt 加工）。
+      // 生成成功后要据此清空输入框，所以必须存原文而不是 promptText ——
+      // promptText 里塞了风格、环境描述、出片要求一大堆，和输入框对不上，
+      // 拿它做比较永远不相等，清空就永远不会发生。
+      promptRaw: String($('prompt').value || ''),
       promptLabel: String($('prompt').value || '').trim().slice(0, 24),
       upscale,
       imageBytes,
@@ -3256,6 +3290,16 @@
       // 累计花费（每次实际调用都算，无论结果落在哪）
       const spent = currentEstimate();
       if (spent) S.spend = C.accumulateSpend(S.spend, spent);
+
+      // 成功之后清空输入框，省得手动删掉上一次的描述。
+      // 三个前提都必须满足，缺一个就会误伤：
+      //   1) 只在**成功**时清 —— 失败时用户要照着原话改一改重试，
+      //      清了等于把他刚写的东西弄丢（而重试按钮也靠它）
+      //   2) 只在用户还在这张照片上时清 —— 他已经切到别的照片去写新描述了，
+      //      这时清空会把那张照片上正在写的字抹掉
+      //   3) 清的是**那次生成用的快照**对应的输入框内容（见 promptRaw），
+      //      期间用户改了字（说明在写新的），就不清，别打断他
+      if (job.docVersion === S.docVersion) clearPromptIfUnchanged(job.promptRaw);
 
       landJob(job, r);
     } catch (err) {
@@ -6113,6 +6157,25 @@
   }
   function closeT2i() { const el = $('t2i'); if (el) el.hidden = true; }
 
+  /**
+   * 文生图成功后清空描述框。
+   * 和修图那个 clearPromptIfUnchanged 同一个道理：只在「框里还是那次用的原文」
+   * 时才清，用户已经在写新描述就不动。
+   * @param {string} usedRaw 那次生成时输入框里的原文
+   */
+  function clearT2iIfUnchanged(usedRaw) {
+    const el = $('t2i-prompt');
+    if (!el) return;
+    const now = String(el.value || '');
+    const used = String(usedRaw == null ? '' : usedRaw);
+    if (now !== used) return;
+    if (!now) return;
+    el.value = '';
+    // 内存里的草稿也要一起清，否则下次打开面板又会把它填回去
+    t2i.prompt = '';
+    try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) { /* ignore */ }
+  }
+
   function renderT2iRatios() {
     const box = $('t2i-ratios');
     if (!box) return;
@@ -6248,6 +6311,13 @@
         model: S.cfg.model, kind: 't2i', error: '',
         costUsd: callCost.usd, costNote: callCost.note, workId: ''
       });
+      // 生成成功就把描述清掉：同一条描述连着生成两张的概率很低，
+      // 留着反而容易忘改、白花一次钱。
+      // 只在这条成功路径上清 —— 失败时用户要照着原话改了重试。
+      // 用 prompt 快照比较，期间用户改过字就不动（别打断他在写新的）。
+      // 放在 openAsNewPhoto **之前**：它会切走界面、重置一堆状态，
+      // 之后再动输入框容易碰上「文档已换、控件已刷新」的边界情况。
+      clearT2iIfUnchanged(prompt);
       await openAsNewPhoto(gen, '文生图-' + Date.now().toString(36) + '.jpg');
       toast('已生成新照片，可以继续框选精修', 3000);
     } catch (err) {
