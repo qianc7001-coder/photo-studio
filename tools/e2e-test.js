@@ -3807,6 +3807,115 @@ async function run() {
     doc.querySelector('#settings [data-close]').dispatchEvent(new window.Event('click'));
     await sleep(60);
 
+    /* ---------- 多组供应商配置 ---------- */
+    console.log('\n【多组供应商】能存好几套 API 并一键切换');
+    {
+      const api = window.__PS_API;
+      // 从干净状态开始（前面的用例可能已经存过配置）
+      S.cfg.presets = [];
+      S.cfg.activePreset = '';
+      doc.getElementById('btn-settings').dispatchEvent(new window.Event('click'));
+      await sleep(80);
+
+      t('设置里有「当前使用」下拉框', !!doc.getElementById('set-preset-select'));
+      t('设置里有保存按钮', !!doc.getElementById('btn-preset-save'));
+      t('设置里有重命名按钮', !!doc.getElementById('btn-preset-rename'));
+      t('设置里有删除按钮', !!doc.getElementById('btn-preset-delete'));
+      t('没存过配置时下拉框是禁用的',
+        doc.getElementById('set-preset-select').disabled === true);
+      t('没存过配置时重命名/删除不可点',
+        doc.getElementById('btn-preset-rename').disabled === true &&
+        doc.getElementById('btn-preset-delete').disabled === true);
+
+      // 第一组：OpenAI
+      S.cfg.provider = 'openai';
+      S.cfg.baseUrl = 'https://api.openai.com/v1';
+      S.cfg.apiKey = 'sk-openai-1111';
+      S.cfg.model = 'gpt-image-1';
+      doc.getElementById('btn-preset-save').dispatchEvent(new window.Event('click'));
+      await sleep(120);
+      t('保存后多了一组', api.vendorPresets().length === 1, api.vendorPresets().length);
+      t('保存后认得当前这组', !!api.activeVendorPreset());
+      t('保存后下拉框可用', doc.getElementById('set-preset-select').disabled === false);
+      t('下拉框里出现这一组',
+        doc.getElementById('set-preset-select').options.length === 1,
+        Array.from(doc.getElementById('set-preset-select').options).map((o) => o.textContent));
+      t('状态栏显示正在使用某组',
+        /正在使用/.test(doc.getElementById('preset-status').textContent),
+        doc.getElementById('preset-status').textContent);
+
+      // 第二组：硅基流动
+      S.cfg.provider = 'siliconflow';
+      S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
+      S.cfg.apiKey = 'sk-sf-2222';
+      S.cfg.model = 'Qwen/Qwen-Image-Edit';
+      doc.getElementById('btn-preset-save').dispatchEvent(new window.Event('click'));
+      await sleep(120);
+      t('能存第二组', api.vendorPresets().length === 2, api.vendorPresets().length);
+      t('两组各自保留自己的 Key',
+        api.vendorPresets().map((p) => p.apiKey).sort().join(',') === 'sk-openai-1111,sk-sf-2222',
+        api.vendorPresets().map((p) => p.apiKey));
+      t('下拉框列出两组',
+        doc.getElementById('set-preset-select').options.length === 2);
+
+      // 切回第一组：连接信息应整体换过去
+      const firstId = api.vendorPresets().find((p) => p.provider === 'openai').id;
+      const sel = doc.getElementById('set-preset-select');
+      sel.value = firstId;
+      sel.dispatchEvent(new window.Event('change'));
+      await sleep(150);
+      t('切换后服务商变成 OpenAI', S.cfg.provider === 'openai', S.cfg.provider);
+      t('切换后接口地址跟着换', /api\.openai\.com/.test(S.cfg.baseUrl), S.cfg.baseUrl);
+      t('切换后 Key 跟着换', S.cfg.apiKey === 'sk-openai-1111', S.cfg.apiKey);
+      t('切换后模型跟着换', S.cfg.model === 'gpt-image-1', S.cfg.model);
+      t('切回后设置页输入框显示的也是这组',
+        doc.getElementById('set-apikey').value === 'sk-openai-1111',
+        doc.getElementById('set-apikey').value);
+      t('切换不动其它设置（导出预设）', S.cfg.exportPreset === (S.cfg.exportPreset || 'full'));
+
+      // 手改 Key：不再算「在用某组」，必须出现「未保存」提示
+      const keyEl = doc.getElementById('set-apikey');
+      keyEl.value = 'sk-hand-edited';
+      keyEl.dispatchEvent(new window.Event('input'));
+      await sleep(120);
+      t('手改 Key 后不再算「在用某组」', api.activeVendorPreset() === null);
+      t('手改后下拉框出现「未保存」选项',
+        Array.from(doc.getElementById('set-preset-select').options)
+          .some((o) => /未保存/.test(o.textContent)),
+        Array.from(doc.getElementById('set-preset-select').options).map((o) => o.textContent));
+      t('手改后状态栏提示不属于任何一组',
+        /不属于任何一组/.test(doc.getElementById('preset-status').textContent),
+        doc.getElementById('preset-status').textContent);
+
+      // 切回干净的组，再测删除
+      sel.value = firstId;
+      sel.dispatchEvent(new window.Event('change'));
+      await sleep(150);
+      t('切回又恢复正常', api.activeVendorPreset() && api.activeVendorPreset().id === firstId);
+      const beforeDel = api.vendorPresets().length;
+      window.confirm = () => true;
+      doc.getElementById('btn-preset-delete').dispatchEvent(new window.Event('click'));
+      await sleep(150);
+      t('删除后少了一组', api.vendorPresets().length === beforeDel - 1, api.vendorPresets().length);
+      t('删除只删记录，当前连接不变', S.cfg.apiKey === 'sk-openai-1111', S.cfg.apiKey);
+
+      // 持久化：写进 localStorage
+      const savedCfg = JSON.parse(window.localStorage.getItem('photoStudio.cfg.v1') || '{}');
+      t('配置组写进了 localStorage', Array.isArray(savedCfg.presets), typeof savedCfg.presets);
+      t('存档里的组结构与内存一致',
+        (savedCfg.presets || []).length === api.vendorPresets().length);
+
+      // 收尾：恢复干净状态，别影响后面的用例
+      S.cfg.presets = [];
+      S.cfg.activePreset = '';
+      S.cfg.provider = 'siliconflow';
+      S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
+      S.cfg.apiKey = 'sk-test-key';
+      S.cfg.model = 'Qwen/Qwen-Image-Edit';
+      doc.querySelector('#settings [data-close]').dispatchEvent(new window.Event('click'));
+      await sleep(80);
+    }
+
     // 下面这一段的前提是「画面上只有一条自由笔迹」。
     // 前面为了验证自动配色多画了一条直线，这里先清掉再继续 ——
     // 否则后面的「点一下删掉」「存档里有 1 条」全部对不上。
@@ -3824,7 +3933,10 @@ async function run() {
     // 直接读 localStorage 会读到空，是测试的时序问题，不是保存坏了。
     // 等过防抖窗口再断言（真机上用户不会在这个时间点查存档）。
     await sleep(1500);
-    const sess31 = JSON.parse(window.localStorage.getItem('photoStudio.session.v1') || 'null');
+    // 读「最后一次真正写盘的内容」而不是直接读 localStorage：
+    // 存档是 1200ms 防抖写入的异步操作，前面多跑一个用例就会改变时序，
+    // 直接读会和它抢，导致偶发失败（不是保存坏了）。
+    const sess31 = window.__PS_API.lastSavedSession();
     t('笔迹写进了会话存档', !!(sess31 && sess31.guides && sess31.guides.length === 1),
       sess31 && sess31.guides && sess31.guides.length);
     t('存档里的笔迹带 points', !!(sess31 && sess31.guides[0].points &&

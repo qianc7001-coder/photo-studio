@@ -499,6 +499,27 @@
     </div>
     <div class="sheet-scroll">
 
+      <!-- ============ 供应商配置（多组保存） ============ -->
+      <div class="st-group">供应商配置</div>
+      <div class="st-card">
+        <label class="st-row">
+          <span class="st-label">当前使用</span>
+          <select class="st-value" id="set-preset-select"></select>
+        </label>
+        <div class="st-row-actions">
+          <button class="st-btn" id="btn-preset-save">保存当前配置</button>
+          <button class="st-btn" id="btn-preset-rename">重命名</button>
+        </div>
+        <div class="st-row-actions">
+          <button class="st-btn st-btn-danger" id="btn-preset-delete">删除这一组</button>
+        </div>
+      </div>
+      <div class="status" id="preset-status"></div>
+      <div class="tip" id="preset-tip">
+        可以把几套 API 分别存起来（比如硅基流动跑量、OpenAI 画质好、再来一个备用中转），
+        需要时一键切换。<b>每组各自保存服务商、接口地址、Key 和模型</b>，其它设置不受影响。
+      </div>
+
       <!-- ============ 生图模型 ============ -->
       <div class="st-group">生图模型</div>
       <div class="st-card">

@@ -1017,6 +1017,208 @@
     return p.models.find((m) => m.id === modelId) || null;
   }
 
+  /* ============ 多组供应商（预设） ============
+   *
+   * 解决的问题：摄影师手里常有好几个 API（硅基流动跑量大、OpenAI 画质好、
+   * 再来一个中转备用）。以前只有一套 provider/baseUrl/apiKey/model，
+   * 换一次就要把地址、Key、模型名全部重打一遍 —— 而 Key 是密文显示，
+   * 重打等于让用户去别处翻出来再抄一次，很容易错。
+   *
+   * 设计取舍：
+   *   - 一组预设只存「连接四件事」：provider / baseUrl / apiKey / model。
+   *     其它设置（融合强度、导出格式……）是全局的，不该跟着供应商切换变来变去。
+   *   - 存 Key 本身没有新增风险：单组配置本来就明文存在 localStorage，
+   *     多组只是改变组织方式，不改变密钥暴露面。
+   *   - 当前激活的那组由 cfg.activePreset 记住；id 与「当前连接」分开存，
+   *     这样用户切走之后又切回来，同一组的模型/Key 还能原样恢复。
+   */
+
+  /** 一组预设里存哪些字段（顺序即界面顺序） */
+  const PRESET_KEYS = ['provider', 'baseUrl', 'apiKey', 'model'];
+
+  /** 最多存多少组 —— 太多会让下拉列表变成一团，也不符合实际使用 */
+  const PRESET_MAX = 12;
+
+  function genPresetId(seed) {
+    const base = String(seed || 'p').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8) || 'p';
+    return base + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+  }
+
+  /**
+   * 把一组预设整理成规范形状。脏数据不能让设置页崩掉。
+   * @param {object} p
+   * @param {number} idx 用于兜底命名
+   */
+  function normalizePreset(p, idx) {
+    const o = p && typeof p === 'object' ? p : {};
+    const provider = typeof o.provider === 'string' && o.provider ? o.provider : 'siliconflow';
+    const prov = getProvider(provider);
+    const baseUrl = typeof o.baseUrl === 'string' && o.baseUrl.trim()
+      ? o.baseUrl.trim()
+      : (prov && prov.baseUrl) || '';
+    const model = typeof o.model === 'string' ? o.model.trim() : '';
+    const name = typeof o.name === 'string' && o.name.trim()
+      ? o.name.trim().slice(0, 40)
+      : '';
+    return {
+      id: typeof o.id === 'string' && o.id ? o.id : genPresetId(provider),
+      name: name || defaultPresetName({ provider, baseUrl, model }, idx),
+      provider,
+      baseUrl,
+      apiKey: typeof o.apiKey === 'string' ? o.apiKey : '',
+      model
+    };
+  }
+
+  /**
+   * 没起名字时自动给一个能一眼认出来的名字。
+   * 用「服务商 + 模型尾名」，比「配置 1 / 配置 2」有用得多 ——
+   * 用户扫一眼下拉就知道哪组是 OpenAI、哪组是硅基流动。
+   */
+  function defaultPresetName(p, idx) {
+    const o = p || {};
+    const prov = getProvider(o.provider);
+    const provLabel = (prov && prov.id === o.provider && prov.label)
+      ? String(prov.label).replace(/\s*[（(].*$/, '').trim()
+      : String(o.provider || '自定义');
+    const tail = String(o.model || '').split('/').pop();
+    const short = tail ? tail.replace(/[-_]?(pro|turbo|preview|latest|\d{4,})$/i, '') : '';
+    if (short) return (provLabel + ' · ' + short).slice(0, 40);
+    if (provLabel) return (provLabel + ' · 配置' + ((idx || 0) + 1)).slice(0, 40);
+    return '配置' + ((idx || 0) + 1);
+  }
+
+  /**
+   * 规范化整个预设列表。
+   * - 去掉非对象项
+   * - id 去重（重复的重新生成，否则「切换」会切到错的那组）
+   * - 超过上限截断
+   */
+  function normalizePresets(list) {
+    const src = Array.isArray(list) ? list : [];
+    const out = [];
+    const seen = Object.create(null);
+    for (let i = 0; i < src.length; i++) {
+      const item = src[i];
+      if (!item || typeof item !== 'object') continue;
+      const p = normalizePreset(item, out.length);
+      if (seen[p.id]) p.id = genPresetId(p.provider);
+      seen[p.id] = 1;
+      out.push(p);
+      if (out.length >= PRESET_MAX) break;
+    }
+    return out;
+  }
+
+  /** 从当前配置里「取一份」预设（用于新建 / 回写） */
+  function presetFromCfg(cfg, name) {
+    const c = cfg || {};
+    const base = {
+      provider: c.provider || 'siliconflow',
+      baseUrl: c.baseUrl || '',
+      apiKey: c.apiKey || '',
+      model: c.model || ''
+    };
+    if (name) base.name = String(name).slice(0, 40);
+    return base;
+  }
+
+  /** 这组预设和当前配置的「连接四件事」是否完全一致 */
+  function presetMatchesCfg(p, cfg) {
+    if (!p || !cfg) return false;
+    return String(p.provider) === String(cfg.provider)
+      && String(p.baseUrl || '') === String(cfg.baseUrl || '')
+      && String(p.apiKey || '') === String(cfg.apiKey || '')
+      && String(p.model || '') === String(cfg.model || '');
+  }
+
+  /**
+   * 找出当前配置对应的是哪一组预设。
+   * 找不到返回 null —— 说明用户手改过连接信息，当前状态不属于任何一组。
+   * @returns {object|null}
+   */
+  function findActivePreset(presets, cfg) {
+    const list = Array.isArray(presets) ? presets : [];
+    // 优先看记录的 activePreset，且要求内容仍然一致：
+    // 用户可能切到某组后又手改了 Key，那时就不该再算作「在用这组」。
+    const byId = cfg && cfg.activePreset
+      ? list.find((p) => p.id === cfg.activePreset)
+      : null;
+    if (byId && presetMatchesCfg(byId, cfg)) return byId;
+    return list.find((p) => presetMatchesCfg(p, cfg)) || null;
+  }
+
+  /**
+   * 把一组预设应用到配置上（不写 localStorage，调用方负责持久化）。
+   * 只改连接四件事，其它设置原样保留。
+   */
+  function applyPreset(cfg, preset) {
+    const c = cfg || {};
+    const p = normalizePreset(preset, 0);
+    c.provider = p.provider;
+    c.baseUrl = p.baseUrl;
+    c.apiKey = p.apiKey;
+    c.model = p.model;
+    c.activePreset = p.id;
+    return c;
+  }
+
+  /**
+   * 计划一次「保存为预设」。
+   * 名字重名时自动加序号，而不是报错让用户改名 ——
+   * 用户只是想把当前这套存下来，不该被命名规则拦住。
+   *
+   * 存满时**拒绝**而不是挤掉最老的：每组里都有一条 API Key，
+   * 静默删掉一组等于把用户手里的密钥弄丢了，他再想用就得重新去翻。
+   * 宁可让界面提示「先删一组」。
+   * @returns {{presets:Array, preset:object|null, created:boolean, full?:boolean}}
+   */
+  function planSavePreset(presets, cfg, name) {
+    const list = normalizePresets(presets);
+    const base = presetFromCfg(cfg, name);
+    const wantName = (name && String(name).trim())
+      ? String(name).trim().slice(0, 40)
+      : defaultPresetName(base, list.length);
+    // 内容完全一样 → 覆盖那一组（改名），避免存出一堆重复项
+    const same = list.find((p) => presetMatchesCfg(p, cfg));
+    if (same) {
+      same.name = wantName;
+      same.id = same.id;
+      (cfg || {}).activePreset = same.id;
+      return { presets: list, preset: same, created: false };
+    }
+    let finalName = wantName;
+    let n = 2;
+    while (list.some((p) => p.name === finalName)) {
+      finalName = (wantName.replace(/（\d+）$/, '') + '（' + n + '）').slice(0, 40);
+      n++;
+    }
+    // 存满了：不再新建（也不挤掉老的），交给界面提示「先删一组」
+    if (list.length >= PRESET_MAX) {
+      return { presets: list, preset: null, created: false, full: true };
+    }
+    const p = normalizePreset(Object.assign({}, base, { name: finalName, id: genPresetId(base.provider) }), list.length);
+    list.push(p);
+    (cfg || {}).activePreset = p.id;
+    return { presets: list, preset: p, created: true };
+  }
+
+  /** 删除一组预设；若删的正是当前激活那组，清掉 activePreset 标记 */
+  function planDeletePreset(presets, cfg, id) {
+    const list = normalizePresets(presets).filter((p) => p.id !== id);
+    const c = cfg || {};
+    if (c.activePreset === id) delete c.activePreset;
+    return list;
+  }
+
+  /** 改一组的名字 */
+  function planRenamePreset(presets, id, name) {
+    const list = normalizePresets(presets);
+    const p = list.find((x) => x.id === id);
+    if (p && name && String(name).trim()) p.name = String(name).trim().slice(0, 40);
+    return list;
+  }
+
   function joinUrl(base, path) {
     const b = String(base || '').replace(/\/+$/, '');
     const p = String(path || '').replace(/^\/+/, '');
@@ -6131,6 +6333,10 @@
     createUndoStack, makeUndoCommand, commandDirection,
     buildTimeline, describeCommand, planHistoryJump,
     CFG_REV, migrateCfg,
+    // 多组供应商预设
+    PRESET_KEYS, PRESET_MAX, normalizePreset, normalizePresets, defaultPresetName,
+    genPresetId, presetFromCfg, presetMatchesCfg, findActivePreset, applyPreset,
+    planSavePreset, planDeletePreset, planRenamePreset,
     // 作品库（跨天记录）
     storageBytes, estimateWorkBytes, normalizeWork, sortWorksNewestFirst,
     planLibrary, dayStartTs, describeWorkAge, formatWorkClock,

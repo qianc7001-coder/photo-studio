@@ -3568,6 +3568,98 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
 })();
 // ===== 滑块只能拖滑块头块结束 =====
 
+
+/* ===== 多组供应商（预设） =====
+ * 用户要能存好几套 API（硅基流动 / OpenAI / 备用中转），一键切换。
+ * 关键不变量：
+ *   - 只存「连接四件事」，别的设置不跟着切
+ *   - 内容一样的再存一次是「覆盖」，不该堆重复项
+ *   - 手改过连接信息后，不该再显示「正在用某组」
+ *   - 脏数据（null / 字符串 / 缺字段）不能让设置页崩
+ */
+(function () {
+  console.log('\n【多组供应商】');
+  const base = () => ({ provider: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-a', model: 'gpt-image-1' });
+
+  t('预设只存连接四件事', C.PRESET_KEYS.join(',') === 'provider,baseUrl,apiKey,model', C.PRESET_KEYS);
+  t('设有上限（列表不会无限长）', C.PRESET_MAX > 0 && C.PRESET_MAX <= 20, C.PRESET_MAX);
+
+  // 1) 保存
+  let cfg = base(), list = [];
+  let r = C.planSavePreset(list, cfg, '');
+  list = r.presets;
+  t('首次保存会新建一组', r.created === true && list.length === 1);
+  t('保存后记为当前激活组', cfg.activePreset === r.preset.id);
+  t('没起名字时自动命名（含模型尾名）', /gpt-image-1/.test(r.preset.name), r.preset.name);
+  t('自动命名不是「配置 1」这种无信息量名字', !/^配置[0-9]+$/.test(r.preset.name), r.preset.name);
+
+  // 2) 内容相同的再存一次 → 覆盖，不堆重复
+  r = C.planSavePreset(list, cfg, '我的 GPT');
+  list = r.presets;
+  t('内容相同再保存是覆盖而非新建', r.created === false && list.length === 1, list.length);
+  t('覆盖时名字会更新', r.preset.name === '我的 GPT', r.preset.name);
+
+  // 3) 第二组
+  const cfg2 = { provider: 'siliconflow', baseUrl: 'https://api.siliconflow.cn/v1', apiKey: 'sk-b', model: 'Qwen/Qwen-Image-Edit' };
+  r = C.planSavePreset(list, cfg2, '硅基');
+  list = r.presets;
+  t('可以存多组', list.length === 2, list.length);
+  t('多组各自保留自己的 Key', list.map((p) => p.apiKey).sort().join(',') === 'sk-a,sk-b');
+
+  // 4) 识别当前在用哪组
+  const hit = C.findActivePreset(list, cfg2);
+  t('能认出当前在用哪一组', !!hit && hit.name === '硅基', hit && hit.name);
+  t('手改了 Key 就不再算「在用某组」',
+    C.findActivePreset(list, Object.assign({}, cfg2, { apiKey: 'sk-zzz', activePreset: '' })) === null);
+
+  // 5) 切换
+  const first = list[0];
+  const switched = C.applyPreset({ exportPreset: 'web', fusion: 0.3 }, first);
+  t('切换会带上 provider/baseUrl', switched.provider === first.provider && switched.baseUrl === first.baseUrl);
+  t('切换会带上 Key 与模型', switched.apiKey === first.apiKey && switched.model === first.model);
+  t('切换不动其它设置（导出预设保持原样）', switched.exportPreset === 'web' && switched.fusion === 0.3);
+  t('切换后 activePreset 指向该组', switched.activePreset === first.id);
+
+  // 6) 删除
+  let l2 = C.planDeletePreset(list, cfg2, hit.id);
+  t('删除后数量减一', l2.length === 1, l2.length);
+  t('删掉当前组会清掉激活标记', cfg2.activePreset === undefined);
+  t('删除只影响目标组', l2[0].id === first.id);
+
+  // 7) 改名
+  let l3 = C.planRenamePreset(list, first.id, '主力号');
+  t('可以改名', l3.find((p) => p.id === first.id).name === '主力号');
+
+  // 8) 脏数据
+  const dirty = C.normalizePresets([null, 1, 'x', {}, { provider: 'openai' }, { id: 'dup', provider: 'openai' }, { id: 'dup', provider: 'openai' }]);
+  t('脏数据不产生 null 项', dirty.every((p) => p && typeof p === 'object'));
+  t('id 会去重（否则切换会切错组）', new Set(dirty.map((p) => p.id)).size === dirty.length, dirty.map((p) => p.id));
+  t('缺失 baseUrl 时按服务商补默认值', /api\.openai\.com/.test(dirty.find((p) => p.provider === 'openai').baseUrl));
+  t('非数组输入返回空数组', C.normalizePresets(null).length === 0 && C.normalizePresets('x').length === 0);
+
+  // 9) 重名自动加序号（不拦着用户）
+  let l4 = [], c4 = { provider: 'openai', baseUrl: 'u', apiKey: 'k1', model: 'm' };
+  l4 = C.planSavePreset(l4, c4, '同名').presets;
+  const second = C.planSavePreset(l4, Object.assign({}, c4, { apiKey: 'k2' }), '同名');
+  t('重名自动加序号而不是报错', second.preset.name === '同名（2）', second.preset.name);
+
+  // 10) 上限：存满后拒绝新建，绝不能挤掉已有的一组
+  //     （每组里都存着一条 API Key，静默删掉等于把用户的密钥弄丢）
+  let l5 = [], c5 = { provider: 'openai', baseUrl: 'u', apiKey: '', model: 'm' };
+  let fullRet = null;
+  for (let i = 0; i < C.PRESET_MAX + 5; i++) {
+    const rr = C.planSavePreset(l5, Object.assign({}, c5, { apiKey: 'k' + i, model: 'm' + i }), 'n' + i);
+    l5 = rr.presets;
+    if (rr.full) fullRet = rr;
+  }
+  t('存满后不再新增', l5.length === C.PRESET_MAX, l5.length);
+  t('存满时明确告知（full 标记）', !!fullRet && fullRet.full === true);
+  t('存满时不挤掉已有组（Key 全在）',
+    l5.every((p) => /^k\d+$/.test(p.apiKey)), l5.map((p) => p.apiKey).slice(0, 3));
+  t('超限后不崩、内容仍合法', l5.every((p) => p && p.id && typeof p.name === 'string'));
+})();
+// ===== 多组供应商结束 =====
+
 /* ---------- 检查更新 ---------- */
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

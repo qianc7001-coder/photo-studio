@@ -1443,6 +1443,31 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 /* 破坏性操作：红色文字 */
 #settings .st-row-btn.st-danger .st-label { color: #ff8b8b; }
 
+/* 一行里排两个操作按钮（供应商配置用）。
+   不能复用 .st-row-btn —— 那条是给「整行可点的 <button>」的，
+   这里是 <div> 里放两个独立按钮，语义不同。 */
+#settings .st-row-actions {
+  display: flex;
+  gap: 9px;
+  padding: 11px 14px;
+  position: relative;
+}
+#settings .st-row-actions .st-btn { flex: 1 1 0; min-width: 0; }
+#settings .st-row-actions .st-btn.st-btn-danger {
+  color: #ff8b8b;
+  border-color: rgba(255, 139, 139, .28);
+}
+#settings .st-row-actions .st-btn.st-btn-danger:active { background: #33262b; }
+#settings .st-card > .st-row-actions + .st-row-actions::before {
+  content: '';
+  position: absolute;
+  left: 14px; right: 0; top: 0;
+  height: 1px;
+  background: var(--line-soft);
+}
+/* 没有可切换的配置时，这行按钮整体不可点 */
+#settings .st-row-actions .st-btn:disabled { opacity: .4; }
+
 /* 非交互行（状态显示这类） */
 #settings .st-row-plain { cursor: default; }
 

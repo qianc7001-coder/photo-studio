@@ -191,6 +191,10 @@
     // 工具栏高度（px）。0 = 用默认完全展开。
     // 存下来是为了「用户调好的高度不该被换图/重启重置」。
     barHeight: 0,
+    // 多组供应商配置。默认空数组 —— 单组用户（大多数）看不到任何变化，
+    // 设置页那张卡片只在存过配置后才显得有用。
+    presets: [],
+    activePreset: '',
     guideStrokeOverlay: true,
     expPresetChosen: false,
     expFormat: 'jpeg',
@@ -243,7 +247,10 @@
     'priceOverride', 'usdCny',
     'historyBudgetMB', 'autoSaveSession',
     'keepAlive', 'keepAliveAlways',
-    'fusion', 'fusionCenter', 'fusionGrain', 'envFit', 'autoCheckUpdate'
+    'fusion', 'fusionCenter', 'fusionGrain', 'envFit', 'autoCheckUpdate',
+    // 多组供应商：presets 是数组（每组含 provider/baseUrl/apiKey/model），
+    // activePreset 记住当前用的是哪一组（手改连接信息后可能不再指向任何一组）
+    'presets', 'activePreset'
   ];
 
   /**
@@ -294,6 +301,15 @@
       c.guideStrokeOverlay = true;
       c.barHeight = clampNum(c.barHeight, 0, 2000, 0);
       c.expPresetChosen = c.expPresetChosen === true;
+      // 多组供应商：存档可能是脏数据（手改、旧版、写了一半），
+      // 必须先规范化再用 —— 否则设置页渲染时拿 p.name 会直接报错。
+      c.presets = C.normalizePresets(c.presets);
+      if (typeof c.activePreset !== 'string') c.activePreset = '';
+      // activePreset 指向一组已不存在的配置时清掉，
+      // 免得下拉框选中一个空项、界面上看不出当前在用哪组。
+      if (c.activePreset && !c.presets.some((p) => p.id === c.activePreset)) {
+        c.activePreset = '';
+      }
       if (!c.baseUrl && c.provider) {
         const p = C.getProvider(c.provider);
         if (p && p.baseUrl) c.baseUrl = p.baseUrl;
@@ -1598,6 +1614,7 @@
     if (!S.guides.length) return;
     S.guides = [];
     updateGuideBadge();
+    scheduleSessionSave();   // 清空也要落盘，否则重开会把线"复活"
     draw();
     toast('已清空引导线');
   }
@@ -2004,6 +2021,7 @@
       if (hitIdx >= 0) {
         S.guides.splice(hitIdx, 1);
         updateGuideBadge();
+        scheduleSessionSave();   // 删线也要落盘，否则重开又冒出来
         draw();
         toast('已删除一条引导线');
         return;
@@ -2179,6 +2197,10 @@
       }
       S.gesture = null;
       updateGuideBadge();
+      // 引导线也是用户的手工成果，必须立刻排一次会话保存。
+      // 以前这里没存：画完线直接切走/被杀，重开应用线就没了 ——
+      // 而「画好的线」正是下一次生成的依据，丢了等于白画。
+      scheduleSessionSave();
       draw();
       updateUI();
       return;
@@ -6207,6 +6229,7 @@
     fillProviderList();
     fillPresetList();
     updatePresetUI();
+    syncVendorPresets();
     updateCallLogBrief();
     $('set-provider').value = S.cfg.provider;
     $('set-baseurl').value = S.cfg.baseUrl;
@@ -6288,6 +6311,129 @@
       o.value = m.id; o.label = m.label;
       dl.appendChild(o);
     }
+  }
+
+  /* ============ 多组供应商配置（设置页第一张卡片） ============ */
+
+  /**
+   * 把预设列表画进下拉框，并标出「当前连接是否属于某一组」。
+   *
+   * 关键点：当前连接可能是**手动改出来的**（比如临时换了个 Key），
+   * 这时它不属于任何一组。必须有一个「未保存」的选项，否则下拉框
+   * 会停在某一组上，让用户误以为「我现在的配置就是这组」——
+   * 而他真正在用的 Key 已经和这组不一样了。
+   */
+  function syncVendorPresets() {
+    const sel = $('set-preset-select');
+    if (!sel) return;
+    const list = S.cfg.presets || [];
+    const active = C.findActivePreset(list, S.cfg);
+    sel.innerHTML = '';
+    if (!list.length) {
+      const o = document.createElement('option');
+      o.value = ''; o.textContent = '（还没有保存过配置）';
+      sel.appendChild(o);
+      sel.disabled = true;
+    } else {
+      sel.disabled = false;
+      if (!active) {
+        const o = document.createElement('option');
+        o.value = ''; o.textContent = '当前连接（未保存）';
+        sel.appendChild(o);
+      }
+      for (const p of list) {
+        const o = document.createElement('option');
+        o.value = p.id;
+        o.textContent = p.name;
+        sel.appendChild(o);
+      }
+      sel.value = active ? active.id : '';
+    }
+    // 没有「这一组」时，重命名/删除没有对象可操作
+    const has = !!active;
+    if ($('btn-preset-rename')) $('btn-preset-rename').disabled = !has;
+    if ($('btn-preset-delete')) $('btn-preset-delete').disabled = !has;
+    if ($('btn-preset-save')) $('btn-preset-save').disabled = false;
+    updateVendorStatus(active);
+  }
+
+  function updateVendorStatus(active) {
+    const el = $('preset-status');
+    if (!el) return;
+    const list = S.cfg.presets || [];
+    el.className = 'status';
+    if (!list.length) {
+      el.textContent = '把当前这套 API 存下来，以后一键切换。';
+      return;
+    }
+    if (!active) {
+      el.textContent = '当前连接不属于任何一组（下面的地址/Key 被手改过）。'
+        + '想保留就点「保存当前配置」。';
+      return;
+    }
+    const dots = [];
+    dots.push(active.apiKey ? ('Key 已填（尾号 ' + String(active.apiKey).slice(-4) + '）') : '没填 Key');
+    dots.push(active.model ? ('模型 ' + active.model.split('/').pop()) : '没选模型');
+    el.className = 'status ok';
+    el.textContent = '正在使用「' + active.name + '」· ' + dots.join(' · ')
+      + '（共 ' + list.length + ' 组）';
+  }
+
+  /** 切换当前使用的配置组 */
+  function useVendorPreset(id) {
+    const list = S.cfg.presets || [];
+    const p = list.find((x) => x.id === id);
+    if (!p) return;
+    C.applyPreset(S.cfg, p);
+    saveCfg();
+    syncSettingsUI();
+    fillModelList();
+    updateProviderTip();
+    updatePriceTip();
+    if (S.img) { snapRectToModel(); rebuildViewCanvas(); draw(); }
+    updateUI();
+    toast('已切换到「' + p.name + '」', 2200);
+  }
+
+  /** 保存当前连接为一组配置（内容与已有组相同则覆盖那一组） */
+  function saveVendorPreset() {
+    if (!S.cfg.baseUrl && !S.cfg.apiKey && !S.cfg.model) {
+      toast('当前还没有可保存的连接信息，先填接口地址和 Key', 3000);
+      return;
+    }
+    const r = C.planSavePreset(S.cfg.presets || [], S.cfg, '');
+    if (r.full) {
+      toast('最多只能存 ' + C.PRESET_MAX + ' 组，先删掉一组再存', 3200);
+      return;
+    }
+    S.cfg.presets = r.presets;
+    saveCfg();
+    syncVendorPresets();
+    toast(r.created ? ('已保存为「' + r.preset.name + '」') : ('已更新「' + r.preset.name + '」'), 2400);
+  }
+
+  /** 重命名当前这一组 */
+  function renameVendorPreset() {
+    const active = C.findActivePreset(S.cfg.presets || [], S.cfg);
+    if (!active) { toast('当前连接还没保存成一组，先点「保存当前配置」', 2800); return; }
+    const name = window.prompt('给这组配置起个名字（比如「主力号」「OpenAI 备用」）', active.name);
+    if (name === null) return;
+    S.cfg.presets = C.planRenamePreset(S.cfg.presets, active.id, name);
+    saveCfg();
+    syncVendorPresets();
+    toast('已重命名', 1800);
+  }
+
+  /** 删除当前这一组（只删这条记录，不影响正在用的连接） */
+  function deleteVendorPreset() {
+    const active = C.findActivePreset(S.cfg.presets || [], S.cfg);
+    if (!active) { toast('当前没有选中任何一组', 2000); return; }
+    if (!window.confirm('删除配置「' + active.name + '」？\n\n'
+      + '只删除这条保存记录，当前正在用的接口地址和 Key 不会变。')) return;
+    S.cfg.presets = C.planDeletePreset(S.cfg.presets, S.cfg, active.id);
+    saveCfg();
+    syncVendorPresets();
+    toast('已删除「' + active.name + '」', 2000);
   }
 
   function fillPresetList() {
@@ -6844,15 +6990,21 @@
       S.cfg.baseUrl = p.baseUrl || S.cfg.baseUrl;
       const first = p.models.find((m) => m.id);
       if (first && S.cfg.provider !== 'custom') S.cfg.model = first.id;
+      // 换服务商等于换了整套连接：原来那组配置已经不匹配了，标记要清掉，
+      // 否则卡片仍显示「正在使用「OpenAI」」而实际连接已经是硅基流动。
+      delete S.cfg.activePreset;
       saveCfg(); syncSettingsUI();
       if (S.img) { rebuildViewCanvas(); draw(); }
       updateUI();
     });
-    bindField('set-baseurl', 'baseUrl');
-    bindField('set-apikey', 'apiKey');
+    bindField('set-baseurl', 'baseUrl', (el) => el.value.trim(), syncVendorPresets);
+    bindField('set-apikey', 'apiKey', (el) => el.value.trim(), syncVendorPresets);
     bindField('set-model', 'model', null, () => {
       if (S.img && S.rect) { snapRectToModel(); draw(); }
       fillModelList(); updateProviderTip(); updatePriceTip();
+      // 换了模型就等于连接信息变了 —— 可能已经不再属于原来那一组，
+      // 卡片上的「正在使用某组」必须跟着变，否则会误导用户。
+      syncVendorPresets();
     });
     bindField('set-netmode', 'netMode', null, updateProviderTip);
     bindField('set-ctx', 'contextPct', (el) => Number(el.value));
@@ -6931,6 +7083,16 @@
         toast('已按新的工作分辨率重新载入');
       }
     });
+
+    // ---- 供应商配置（多组）----
+    $('set-preset-select').addEventListener('change', (e) => {
+      const id = e.target.value;
+      if (!id) return;            // 「未保存」那项只是状态展示，不触发切换
+      useVendorPreset(id);
+    });
+    $('btn-preset-save').onclick = saveVendorPreset;
+    $('btn-preset-rename').onclick = renameVendorPreset;
+    $('btn-preset-delete').onclick = deleteVendorPreset;
 
     $('btn-detect').onclick = detectModels;
     $('detect-close').onclick = () => { $('detect-box').hidden = true; };
@@ -7144,6 +7306,9 @@
 
   let sessionSaveTimer = null;
 
+  /** 最后一次真正写进存档的会话内容（测试用；也便于排查「存档里到底是什么」） */
+  let lastSavedSession = null;
+
   /**
    * 打包缓存：只缓存「贵的那部分」，便宜的字段每次都现读。
    *
@@ -7251,6 +7416,10 @@
       const payload = buildSessionPayload();
       if (!payload) return;
       localStorage.setItem(LS_KEY_SESSION, JSON.stringify(payload));
+      // 记下最后一次**真正写进去**的内容。
+      // 测试要断言「存档里有什么」，而防抖写入是异步的（1200ms），
+      // 直接读 localStorage 会和别的用例抢时序；读这里就没有竞争。
+      lastSavedSession = payload;
     } catch (e) {
       // 空间不足：清掉会话，避免影响正常使用
       try { localStorage.removeItem(LS_KEY_SESSION); } catch (e2) { /* ignore */ }
@@ -7654,6 +7823,12 @@
     // 首页 / 工具栏 / 照片信息 / 导出（供测试与外部调用）
     renderHome,
     isHomeVisible,
+    // 多组供应商配置
+    syncVendorPresets, useVendorPreset, saveVendorPreset,
+    renameVendorPreset, deleteVendorPreset,
+    vendorPresets: () => S.cfg.presets,
+    lastSavedSession: () => lastSavedSession,
+    activeVendorPreset: () => C.findActivePreset(S.cfg.presets || [], S.cfg),
     setToolbarVisible,
     syncToolbar,
     expandToolbar,
@@ -7682,7 +7857,7 @@
     saveWhere: () => S.cfg.expSaveWhere,
     // 引导线（供测试与外部调用）
     guides: () => S.guides,
-    setGuides: (list) => { S.guides = (list || []).map(C.normalizeGuide); updateGuideBadge(); draw(); },
+    setGuides: (list) => { S.guides = (list || []).map(C.normalizeGuide); updateGuideBadge(); scheduleSessionSave(); draw(); },
     clearGuides,
     renderGuideKinds,
     updateGuideBarVisibility,
