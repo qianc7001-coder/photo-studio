@@ -4241,6 +4241,76 @@
     };
   }
 
+  /* ====================== 画布背景 ======================
+   *
+   * 照片周围的空白区域，默认是主题色。但很多人修图时喜欢垫一张背景
+   * （比如把要仿的参考图、或者一张灰卡铺在后面），所以支持导入自定义图。
+   *
+   * 三个必须考虑的点：
+   *   1) 背景图可能很大（相机直出 6000×4000）。直接当纹理画会很卡，
+   *      所以导入时就压到长边 1600 —— 它只是垫底，不需要原分辨率。
+   *   2) 模糊是**在绘制时**做的（用 canvas filter），不是预先生成的。
+   *      这样拖动模糊滑块能立刻看到效果，且只存一张图。
+   *   3) 亮度/暗化：一张亮背景会把照片衬托得发灰，
+   *      所以给一个「压暗」档，让照片始终是视觉焦点。
+   */
+
+  /** 背景图长边上限（垫底用，不需要原分辨率） */
+  const BG_MAX_SIDE = 1600;
+
+  /** 模糊档位上限（px，按 CSS 像素算） */
+  const BG_BLUR_MAX = 30;
+
+  /** 背景压暗档位上限（0~100） */
+  const BG_DIM_MAX = 100;
+
+  /** 默认背景设置 */
+  function emptyBg() {
+    return { dataUrl: '', blur: 0, dim: 0, fit: 'cover' };
+  }
+
+  /**
+   * 规范化背景设置。脏数据（手改 localStorage、旧版本残留）不能让界面崩。
+   * dataUrl 必须是 data:image/... —— 否则 canvas 画不出来，还会静默留下黑底。
+   */
+  function normalizeBg(b) {
+    const o = b && typeof b === 'object' ? b : {};
+    const url = typeof o.dataUrl === 'string' && /^data:image\//i.test(o.dataUrl)
+      ? o.dataUrl : '';
+    return {
+      dataUrl: url,
+      blur: clamp(num(o.blur, 0), 0, BG_BLUR_MAX),
+      dim: clamp(num(o.dim, 0), 0, BG_DIM_MAX),
+      // cover = 铺满（会裁切）；contain = 整张塞进去（会留边）
+      fit: o.fit === 'contain' ? 'contain' : 'cover'
+    };
+  }
+
+  /**
+   * 算背景图该怎么画到视口里。
+   * @returns {null|{x,y,w,h}} 没有背景图或尺寸非法时返回 null
+   */
+  function planBgDraw(vw, vh, imgW, imgH, fit) {
+    const W = Math.max(0, Math.round(num(vw, 0)));
+    const H = Math.max(0, Math.round(num(vh, 0)));
+    const iw = Math.max(0, Math.round(num(imgW, 0)));
+    const ih = Math.max(0, Math.round(num(imgH, 0)));
+    if (!W || !H || !iw || !ih) return null;
+    const scale = fit === 'contain'
+      ? Math.min(W / iw, H / ih)      // 整张塞进去
+      : Math.max(W / iw, H / ih);     // 铺满、溢出裁掉
+    const w = iw * scale;
+    const h = ih * scale;
+    return { x: (W - w) / 2, y: (H - h) / 2, w, h };
+  }
+
+  /** 背景压暗时叠的黑幕透明度（0~1） */
+  function bgScrimAlpha(dim) {
+    const d = clamp(num(dim, 0), 0, BG_DIM_MAX) / BG_DIM_MAX;
+    // 上限 0.85：再高就完全看不出背景了，那就失去了「垫一张图」的意义
+    return d * 0.85;
+  }
+
   /* ====================== 主题 ======================
    *
    * 三档：
@@ -6887,6 +6957,9 @@
     CFG_REV, migrateCfg,
     // 主题
     THEMES, getTheme, resolveTheme,
+    // 画布背景
+    BG_MAX_SIDE, BG_BLUR_MAX, BG_DIM_MAX,
+    emptyBg, normalizeBg, planBgDraw, bgScrimAlpha,
     // 多组供应商预设
     PRESET_KEYS, PRESET_MAX, normalizePreset, normalizePresets, defaultPresetName,
     genPresetId, presetFromCfg, presetMatchesCfg, findActivePreset, applyPreset,

@@ -197,6 +197,8 @@
     activePreset: '',
     // 主题：auto 跟随系统 / dark / light
     theme: 'auto',
+    // 画布背景：{ dataUrl, blur, dim, fit }
+    bg: null,
     guideStrokeOverlay: true,
     expPresetChosen: false,
     expFormat: 'jpeg',
@@ -250,7 +252,7 @@
     'historyBudgetMB', 'autoSaveSession',
     'keepAlive', 'keepAliveAlways',
     'fusion', 'fusionCenter', 'fusionGrain', 'envFit', 'autoCheckUpdate',
-    'theme',
+    'theme', 'bg',
     // 多组供应商：presets 是数组（每组含 provider/baseUrl/apiKey/model），
     // activePreset 记住当前用的是哪一组（手改连接信息后可能不再指向任何一组）
     'presets', 'activePreset'
@@ -307,6 +309,8 @@
       // 多组供应商：存档可能是脏数据（手改、旧版、写了一半），
       // 必须先规范化再用 —— 否则设置页渲染时拿 p.name 会直接报错。
       c.presets = C.normalizePresets(c.presets);
+      // 画布背景：脏数据会让 canvas 画出黑块，必须规范化
+      c.bg = C.normalizeBg(c.bg);
       if (typeof c.activePreset !== 'string') c.activePreset = '';
       // activePreset 指向一组已不存在的配置时清掉，
       // 免得下拉框选中一个空项、界面上看不出当前在用哪组。
@@ -1719,12 +1723,168 @@
     } catch (e) { /* ignore */ }
   }
 
+  /* ---------- 画布背景（纯色 / 自定义图 + 模糊 + 压暗） ----------
+   *
+   * 为什么要统一成一个函数：这段「先铺背景」的逻辑在三个地方各写了一遍
+   * （draw / drawGradeThumb / goHome），以前是纯色填充所以重复也无所谓；
+   * 现在要画图 + 模糊 + 压暗，三份实现必然会走偏 ——
+   * 比如回到首页时忘了压暗，用户会看到背景忽然变亮。
+   */
+
+  /** 缓存解码好的背景图，避免每帧重新解码 */
+  let bgImage = null;
+  let bgImageKey = '';
+
+  /** 取背景图（带缓存）。没有背景图返回 null */
+  function getBgImage() {
+    const bg = S.cfg.bg || {};
+    const url = bg.dataUrl || '';
+    if (!url) { bgImage = null; bgImageKey = ''; return null; }
+    if (bgImage && bgImageKey === url) return bgImage;
+    bgImageKey = url;
+    bgImage = new Image();
+    bgImage.onload = () => { try { draw(); } catch (e) { /* ignore */ } };
+    bgImage.onerror = () => { bgImage = null; bgImageKey = ''; };
+    bgImage.src = url;
+    // decode() 比 onload 更可靠（onload 可能在元素已可用时才触发，
+    // 而这里每帧都要判断"能不能画"）。不支持 decode 的老内核退回 naturalWidth。
+    if (bgImage.complete && bgImage.naturalWidth) return bgImage;
+    // 还没解码好：先返回 null（这一帧画纯色），解码完 onload 会重绘。
+    // 注意**不能**在这里 await —— paintBackground 在每帧的同步路径里。
+    return null;
+  }
+
+  /**
+   * 把背景铺满视口。抽出来是因为三处都要用，且逻辑不简单。
+   * @param {CanvasRenderingContext2D} c
+   * @param {number} vw 视口宽（CSS px）
+   * @param {number} vh
+   */
+  function paintBackground(c, vw, vh) {
+    if (!c) return;
+    const bg = C.normalizeBg(S.cfg.bg);
+    const img = getBgImage();
+    // 没有背景图 → 用主题色（原来的行为）
+    if (!img) {
+      c.fillStyle = bgColor;
+      c.fillRect(0, 0, vw, vh);
+      return;
+    }
+    const plan = C.planBgDraw(vw, vh, img.naturalWidth, img.naturalHeight, bg.fit);
+    if (!plan) {
+      c.fillStyle = bgColor;
+      c.fillRect(0, 0, vw, vh);
+      return;
+    }
+    // 先铺底色：cover 模式下背景图会被放大，边缘可能出现缝隙，
+    // 不铺底会露出透明（看起来像闪白）
+    c.fillStyle = bgColor;
+    c.fillRect(0, 0, vw, vh);
+
+    // 模糊用 canvas filter，实时生效，不用预生成模糊图。
+    // 注意 filter 必须在这张图上设完再还原，否则会影响后面的绘画。
+    try {
+      if (bg.blur > 0) c.filter = 'blur(' + bg.blur + 'px)';
+      // 模糊会把边缘吸黑/透明，稍微放大一点点盖住
+      const grow = bg.blur > 0 ? bg.blur * 2 : 0;
+      c.drawImage(img, plan.x - grow, plan.y - grow, plan.w + grow * 2, plan.h + grow * 2);
+    } catch (e) {
+      // 老内核不支持 filter：退化成不模糊也要把图画出来
+      try { c.drawImage(img, plan.x, plan.y, plan.w, plan.h); } catch (e2) { /* ignore */ }
+    } finally {
+      try { c.filter = 'none'; } catch (e3) { /* ignore */ }
+    }
+
+    // 压暗：亮背景会把照片衬得发灰，垫一层黑让照片始终是焦点
+    const a = C.bgScrimAlpha(bg.dim);
+    if (a > 0) {
+      c.fillStyle = 'rgba(0,0,0,' + a.toFixed(3) + ')';
+      c.fillRect(0, 0, vw, vh);
+    }
+  }
+
+  /** 把背景设置刷到设置界面 */
+  function syncBgUI() {
+    const bg = C.normalizeBg(S.cfg.bg);
+    const has = !!bg.dataUrl;
+    if ($('bg-state')) {
+      $('bg-state').textContent = has
+        ? ('已设置' + (bg.blur > 0 ? ' · 模糊 ' + Math.round(bg.blur) : ''))
+        : '默认（主题色）';
+    }
+    if ($('btn-bg-clear')) $('btn-bg-clear').hidden = !has;
+    // 没设背景时，模糊/压暗/铺法都没有意义 —— 藏起来，别让人调了没反应
+    for (const id of ['bg-blur-row', 'bg-dim-row', 'bg-fit-row']) {
+      if ($(id)) $(id).hidden = !has;
+    }
+    if ($('set-bg-blur')) {
+      $('set-bg-blur').value = String(Math.round(bg.blur));
+      if ($('bg-blur-val')) $('bg-blur-val').textContent = String(Math.round(bg.blur));
+    }
+    if ($('set-bg-dim')) {
+      $('set-bg-dim').value = String(Math.round(bg.dim));
+      if ($('bg-dim-val')) $('bg-dim-val').textContent = String(Math.round(bg.dim));
+    }
+    const chips = $('bg-fit-chips');
+    if (chips) {
+      chips.innerHTML = '';
+      for (const f of [{ id: 'cover', zh: '铺满' }, { id: 'contain', zh: '完整显示' }]) {
+        const b = document.createElement('button');
+        b.className = 'chip' + (f.id === bg.fit ? ' on' : '');
+        b.textContent = f.zh;
+        b.onclick = () => {
+          const n = C.normalizeBg(S.cfg.bg);
+          n.fit = f.id;
+          S.cfg.bg = n;
+          saveCfg();
+          syncBgUI();
+          draw();
+        };
+        chips.appendChild(b);
+      }
+    }
+  }
+
+  /** 导入背景图（压到长边上限再存，避免大图拖慢绘制） */
+  async function loadBgImage(file) {
+    if (!file) return;
+    try {
+      const bmp = await decodeToWorkSize(file, C.BG_MAX_SIDE);
+      const w = bmp.width, h = bmp.height;
+      const scale = Math.min(1, C.BG_MAX_SIDE / Math.max(w, h));
+      const cw = Math.max(1, Math.round(w * scale));
+      const ch = Math.max(1, Math.round(h * scale));
+      const c = makeCanvas(cw, ch);
+      c.getContext('2d').drawImage(bmp, 0, 0, cw, ch);
+      const n = C.normalizeBg(S.cfg.bg);
+      n.dataUrl = canvasToDataUrl(c, 'image/jpeg', 0.85);
+      S.cfg.bg = n;
+      // 换图后缓存必须失效，否则还画着上一张
+      bgImage = null; bgImageKey = '';
+      saveCfg();
+      syncBgUI();
+      draw();
+      toast('背景已设置', 2000);
+    } catch (e) {
+      toast('这张图打不开，换一张试试', 3200);
+    }
+  }
+
+  /** 恢复默认背景（纯主题色） */
+  function clearBg() {
+    S.cfg.bg = C.normalizeBg({});
+    bgImage = null; bgImageKey = '';
+    saveCfg();
+    syncBgUI();
+    draw();
+    toast('已恢复默认背景', 1800);
+  }
+
   function draw() {
     if (!ctx) return;
     const v = viewSize();
     ctx.clearRect(0, 0, v.w, v.h);
-    ctx.fillStyle = bgColor;
-    ctx.fillRect(0, 0, v.w, v.h);
+    paintBackground(ctx, v.w, v.h);
 
     if (!S.viewCanvas) return;
     const r = C.imageRectToScreen({ x: 0, y: 0, w: S.docW, h: S.docH }, S.view);
@@ -2175,8 +2335,7 @@
     if (!ctx || !thumb) return;
     const v = viewSize();
     ctx.clearRect(0, 0, v.w, v.h);
-    ctx.fillStyle = bgColor;
-    ctx.fillRect(0, 0, v.w, v.h);
+    paintBackground(ctx, v.w, v.h);
     const r = C.imageRectToScreen({ x: 0, y: 0, w: S.docW, h: S.docH }, S.view);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
@@ -5326,7 +5485,7 @@
 
     // 7) 清空画布并切回首页布局
     const v = viewSize();
-    if (ctx) { ctx.clearRect(0, 0, v.w, v.h); ctx.fillStyle = bgColor; ctx.fillRect(0, 0, v.w, v.h); }
+    if (ctx) { ctx.clearRect(0, 0, v.w, v.h); paintBackground(ctx, v.w, v.h); }
     renderHome();
     syncToolbar();
     updateUI();
@@ -7046,6 +7205,7 @@
     updatePresetUI();
     syncVendorPresets();
     renderThemeChips();
+    syncBgUI();
     updateCallLogBrief();
     $('set-provider').value = S.cfg.provider;
     $('set-baseurl').value = S.cfg.baseUrl;
@@ -7598,6 +7758,38 @@
     $('btn-demo').onclick = useDemoImage;
 
     // ---- 文生图 ----
+    // ---- 画布背景 ----
+    $('btn-bg-pick').onclick = () => { $('bg-input').click(); };
+    $('bg-input').addEventListener('change', async (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (f) await loadBgImage(f);
+      try { e.target.value = ''; } catch (e2) { /* ignore */ }
+    });
+    $('btn-bg-clear').onclick = clearBg;
+    $('set-bg-blur').addEventListener('input', (e) => {
+      const n = C.normalizeBg(S.cfg.bg);
+      n.blur = Number(e.target.value) || 0;
+      S.cfg.bg = n;
+      if ($('bg-blur-val')) $('bg-blur-val').textContent = String(Math.round(n.blur));
+      draw();                    // 拖动中即时预览，不写配置（松手再存）
+    });
+    $('set-bg-blur').addEventListener('change', () => {
+      saveCfg(); syncBgUI();
+    });
+    $('set-bg-dim').addEventListener('input', (e) => {
+      const n = C.normalizeBg(S.cfg.bg);
+      n.dim = Number(e.target.value) || 0;
+      S.cfg.bg = n;
+      if ($('bg-dim-val')) $('bg-dim-val').textContent = String(Math.round(n.dim));
+      draw();
+    });
+    $('set-bg-dim').addEventListener('change', () => {
+      saveCfg(); syncBgUI();
+    });
+    // 滑块也只能拖滑块头（和设置页其它滑块一致）
+    if ($('set-bg-blur')) applyThumbOnlySliders(document.querySelector('#set-bg-blur').parentNode);
+    if ($('set-bg-dim')) applyThumbOnlySliders(document.querySelector('#set-bg-dim').parentNode);
+
     // ---- 参考图 ----
     $('btn-add-ref').onclick = () => { $('ref-input').click(); };
     $('ref-input').addEventListener('change', async (e) => {
@@ -8714,6 +8906,10 @@
     lastSavedSession: () => lastSavedSession,
     // 参考图
     refImages: () => refImages,
+    // 画布背景
+    syncBgUI, loadBgImage, clearBg,
+    bgState: () => C.normalizeBg(S.cfg.bg),
+    resetBgCache: () => { bgImage = null; bgImageKey = ''; },
     lastRefNote: () => lastRefNote,
     addRefImages, clearRefImages, renderRefImages, refLimit,
     activeVendorPreset: () => C.findActivePreset(S.cfg.presets || [], S.cfg),

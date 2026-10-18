@@ -2411,6 +2411,77 @@ console.log('\n【发布】历史版本必须可下载（README 与归档一致�
   ]);
 })();
 
+
+/* ===== 主题必须「换得干净」=====
+ * 用户反馈：浅色主题下照片四周是浅灰，但顶栏和底部工具栏还是深色 ——
+ * 那种割裂比全深色还难看。
+ *
+ * 根因是这些「浮在照片上面」的容器各自写死了深色 rgba，
+ * 换主题时它们不会跟着变，而深色模式下又完全看不出问题。
+ * 这里把「不许再写死深色背景」钉成硬规则。
+ */
+(function () {
+  console.log('\n【主题一致性】');
+  const fsU = require('fs');
+  const css = fsU.readFileSync(__dirname + '/../app/style.css', 'utf8');
+
+  const pick = (sel) => {
+    const m = new RegExp(sel + '\\s*\\{([\\s\\S]*?)\\}').exec(css);
+    return m ? m[1] : '';
+  };
+  const light = pick('html\\[data-theme="light"\\]');
+  const dark = pick('html\\[data-theme="dark"\\]');
+
+  // 顶栏/底栏/浮层/遮罩/错误面板都必须有主题化的底色变量
+  const chromeVars = ['--chrome', '--chrome-soft', '--chrome-deep', '--chrome-mid',
+    '--overlay', '--notice', '--error-bg', '--switch-off', '--row-press'];
+  t('浅色主题定义了所有容器底色',
+    chromeVars.every((v) => light.indexOf(v + ':') >= 0),
+    chromeVars.filter((v) => light.indexOf(v + ':') < 0));
+  t('深色主题也定义了（防止缺省时退回浅色）',
+    chromeVars.every((v) => dark.indexOf(v + ':') >= 0),
+    chromeVars.filter((v) => dark.indexOf(v + ':') < 0));
+
+  // 浅色下这些容器必须是「浅」的
+  t('浅色顶栏/底栏是浅色', (() => {
+    const m = /--chrome:\s*rgba\((\d+),\s*(\d+),\s*(\d+)/.exec(light);
+    if (!m) return false;
+    return Number(m[1]) > 200 && Number(m[2]) > 200 && Number(m[3]) > 200;
+  })());
+  t('浅色错误面板是浅红而不是深红', (() => {
+    const m = /--error-bg:\s*rgba\((\d+),\s*(\d+),\s*(\d+)/.exec(light);
+    if (!m) return false;
+    return Number(m[1]) > 200;   // 红通道高 = 浅色
+  })());
+
+  // 硬规则：正文里不许再出现写死的深色背景
+  const lines = css.split('\n');
+  const offenders = [];
+  lines.forEach((l, i) => {
+    if (/^\s*--/.test(l)) return;                       // 变量定义
+    if (/^\s*(\/\*|\*)/.test(l)) return;                // 注释
+    // 半透明遮罩/强调色/品牌色属于设计固定值，不在此列
+    if (/rgba\(4, 6, 9|rgba\(0, 0, 0|rgba\(77, 163, 255|rgba\(53, 208|rgba\(255, 176|rgba\(43, 127, 224/.test(l)) return;
+    // 品牌蓝渐变（按钮主色）在所有主题下都该是蓝的
+    if (/linear-gradient\(#4da3ff, #2b7fe0\)/.test(l)) return;
+    // 白点（滑块头/开关圆钮）在深色主题下就该是白的
+    if (/background:\s*#fff\b/.test(l)) return;
+    const m = /background[^;]*rgba\((\d+),\s*(\d+),\s*(\d+)/.exec(l);
+    if (m) {
+      const [r, g, b] = [Number(m[1]), Number(m[2]), Number(m[3])];
+      // 三个通道都低于 60 = 明确的深色底
+      if (r < 60 && g < 60 && b < 60) offenders.push((i + 1) + ': ' + l.trim());
+    }
+    const h = /background[^;]*?(#[0-9a-fA-F]{6})/.exec(l);
+    if (h) {
+      const v = h[1].toLowerCase();
+      const rr = parseInt(v.slice(1, 3), 16), gg = parseInt(v.slice(3, 5), 16), bb = parseInt(v.slice(5, 7), 16);
+      if (rr < 60 && gg < 60 && bb < 60) offenders.push((i + 1) + ': ' + l.trim());
+    }
+  });
+  t('★ 没有写死的深色背景（换主题会漏）', offenders.length === 0, offenders.slice(0, 6));
+})();
+
 /* ---------- 检查更新 ---------- */
 console.log('\n【更新】应用内检测新版本（不能依赖 /releases/latest）');
 

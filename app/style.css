@@ -41,6 +41,18 @@
   --danger-text: #ff8b8b;
   /* 遮罩 */
   --scrim: rgba(0, 0, 0, .55);
+  /* 顶栏 / 底栏 / 悬浮控件这类「浮在照片上面」的底色。
+     它们必须和主题一致，否则浅色主题下会出现
+     「照片四周是浅灰，顶栏和工具栏还是深色」这种割裂感（用户反馈过）。 */
+  --chrome: rgba(24, 29, 38, .96);
+  --chrome-soft: rgba(24, 29, 38, .88);
+  --chrome-deep: rgba(12, 16, 22, .86);
+  --chrome-mid: rgba(20, 26, 36, .92);
+  --switch-off: #39414f;
+  --row-press: #2b323f;
+  --overlay: rgba(8, 10, 14, .72);
+  --notice: rgba(20, 32, 48, .96);
+  --error-bg: rgba(38, 20, 22, .97);
   --r: 12px;
   --r-sm: 8px;
   --sh: 0 8px 30px rgba(0, 0, 0, .5);
@@ -97,6 +109,18 @@ html[data-theme="light"] {
   --guide-ink: #ffffff;
   --danger-text: #c62828;
   --scrim: rgba(20, 26, 36, .32);
+  /* 浅色下顶栏/底栏/浮层要用近白半透明，压不住照片时也不刺眼 */
+  --chrome: rgba(255, 255, 255, .94);
+  --chrome-soft: rgba(255, 255, 255, .88);
+  --chrome-deep: rgba(248, 250, 253, .90);
+  --chrome-mid: rgba(255, 255, 255, .92);
+  --switch-off: #c9d0db;
+  --row-press: #e6eaf2;
+  /* 浅色下的遮罩要浅，否则整屏压黑很难看 */
+  --overlay: rgba(240, 243, 248, .82);
+  --notice: rgba(232, 240, 252, .97);
+  /* 错误面板：浅色下用浅红底，深红底在浅色主题里太刺眼 */
+  --error-bg: rgba(255, 236, 236, .98);
   /* 阴影在浅色下要更淡，否则像脏污 */
   --sh: 0 8px 24px rgba(24, 32, 46, .14);
 }
@@ -129,6 +153,15 @@ html[data-theme="dark"] {
   --guide-ink: #06231e;
   --danger-text: #ff8b8b;
   --scrim: rgba(0, 0, 0, .55);
+  --chrome: rgba(24, 29, 38, .96);
+  --chrome-soft: rgba(24, 29, 38, .88);
+  --chrome-deep: rgba(12, 16, 22, .86);
+  --chrome-mid: rgba(20, 26, 36, .92);
+  --switch-off: #39414f;
+  --row-press: #2b323f;
+  --overlay: rgba(8, 10, 14, .72);
+  --notice: rgba(20, 32, 48, .96);
+  --error-bg: rgba(38, 20, 22, .97);
   --sh: 0 8px 30px rgba(0, 0, 0, .5);
 }
 
@@ -179,7 +212,7 @@ button:disabled { opacity: .38; cursor: default; }
   /* 更多菜单要相对顶栏定位 */
   position: relative;
   padding: calc(6px + var(--sat)) calc(8px + var(--sar)) 6px calc(8px + var(--sal));
-  background: linear-gradient(#1b2029, #161a21);
+  background: var(--chrome);
   border-bottom: 1px solid var(--line);
   flex: 0 0 auto;
   z-index: 20;
@@ -257,7 +290,7 @@ button:disabled { opacity: .38; cursor: default; }
   max-width: 92%;
   max-width: min(92%, 460px);
   padding: 10px 15px;
-  background: rgba(24, 29, 38, .96);
+  background: var(--chrome);
   border: 1px solid var(--line);
   border-radius: 999px;
   font-size: 12.5px; text-align: center;
@@ -271,7 +304,7 @@ button:disabled { opacity: .38; cursor: default; }
 #busy {
   position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 50;
   display: flex; align-items: center; justify-content: center;
-  background: rgba(8, 10, 14, .72);
+  background: var(--overlay);
   backdrop-filter: blur(3px);
 }
 .busy-card {
@@ -301,7 +334,7 @@ button:disabled { opacity: .38; cursor: default; }
 .hud-group { display: flex; align-items: center; gap: 4px; pointer-events: auto; }
 .hud-btn {
   min-width: 34px; height: 32px; padding: 0 9px;
-  background: rgba(24, 29, 38, .88);
+  background: var(--chrome-soft);
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
   color: var(--text-dim); font-size: 13px;
@@ -313,7 +346,7 @@ button:disabled { opacity: .38; cursor: default; }
 #sel-info { gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
 .hud-pill {
   padding: 4px 9px; border-radius: 999px;
-  background: rgba(24, 29, 38, .88);
+  background: var(--chrome-soft);
   border: 1px solid var(--line);
   font-size: 11px; font-variant-numeric: tabular-nums;
   backdrop-filter: blur(8px);
@@ -336,7 +369,7 @@ button:disabled { opacity: .38; cursor: default; }
   top: 12px;
   display: flex; align-items: center; gap: 8px;
   padding: 10px 10px 10px 14px;
-  background: rgba(20, 32, 48, .96);
+  background: var(--notice);
   border: 1px solid rgba(77, 163, 255, .4);
   border-radius: 12px;
   box-shadow: var(--sh);
@@ -365,7 +398,7 @@ ul.whatsnew li { margin-bottom: 5px; }
   max-height: 58%;
   overflow-y: auto;
   padding: 14px 16px;
-  background: rgba(38, 20, 22, .97);
+  background: var(--error-bg);
   border: 1px solid rgba(255, 90, 90, .4);
   border-radius: 14px;
   box-shadow: var(--sh);
@@ -396,7 +429,7 @@ ul.whatsnew li { margin-bottom: 5px; }
 
 #compare {
   position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 60;
-  background: #0b0d11;
+  background: var(--bg);
   touch-action: none;
 }
 #cmp-cv { display: block; width: 100%; height: 100%; }
@@ -425,7 +458,7 @@ ul.whatsnew li { margin-bottom: 5px; }
   position: absolute; top: calc(12px + var(--sat));
   padding: 4px 11px; border-radius: 999px;
   font-size: 11px; font-weight: 600;
-  background: rgba(12, 16, 22, .82); border: 1px solid var(--line);
+  background: var(--chrome-deep); border: 1px solid var(--line);
   backdrop-filter: blur(6px);
 }
 .cmp-tag.left { left: 12px; }
@@ -448,7 +481,7 @@ ul.whatsnew li { margin-bottom: 5px; }
 
 #bottombar {
   flex: 0 0 auto;
-  background: linear-gradient(#161a21, #12151b);
+  background: var(--chrome);
   border-top: 1px solid var(--line);
   padding-bottom: var(--sab);
   z-index: 20;
@@ -1334,7 +1367,7 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
   max-width: 92%;
   padding: 6px 13px;
   border-radius: 999px;
-  background: rgba(20, 26, 36, .92);
+  background: var(--chrome-mid);
   border: 1px solid rgba(77, 163, 255, .45);
   color: var(--accent);
   font-size: 12px; font-weight: 600;
@@ -1491,7 +1524,7 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   color: #fff;
-  background: rgba(12, 16, 22, .86);
+  background: var(--chrome-deep);
   border: 1px solid rgba(77, 163, 255, .45);
   backdrop-filter: blur(6px);
   pointer-events: none;
@@ -1507,7 +1540,7 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
   font-size: 12px;
   font-weight: 600;
   color: var(--text);
-  background: rgba(12, 16, 22, .86);
+  background: var(--chrome-deep);
   border: 1px solid var(--line);
   backdrop-filter: blur(6px);
 }
@@ -1701,7 +1734,7 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
   height: 27px;
   margin: 0;
   border-radius: 14px;
-  background: #39414f;
+  background: var(--switch-off);
   position: relative;
   cursor: pointer;
   transition: background .2s;
@@ -1762,7 +1795,7 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
   color: var(--danger-text);
   border-color: rgba(255, 139, 139, .28);
 }
-#settings .st-row-actions .st-btn.st-btn-danger:active { background: #33262b; }
+#settings .st-row-actions .st-btn.st-btn-danger:active { background: var(--row-press); }
 #settings .st-card > .st-row-actions + .st-row-actions::before {
   content: '';
   position: absolute;

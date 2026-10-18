@@ -183,6 +183,24 @@ function startFakeModel() {
 async function run() {
   const fake = await startFakeModel();
   console.log(`\n假模型服务器：127.0.0.1:${fake.port}\n`);
+  /* ---------- 画布背景测试用的小工具 ---------- */
+  /** 直接读主画布像素（CSS px 坐标，内部已按 DPR 换算） */
+  function readCanvasPx(x, y) {
+    const d = window.devicePixelRatio || 1;
+    const sx = Math.round(x * d), sy = Math.round(y * d);
+    const im = cv.getContext('2d').getImageData(sx, sy, 1, 1).data;
+    return [im[0], im[1], im[2]];
+  }
+  /** 让背景图缓存失效（模拟换图） */
+  function bgImageReset() {
+    if (window.__PS_API && window.__PS_API.resetBgCache) window.__PS_API.resetBgCache();
+  }
+  function variance(arr) {
+    if (!arr.length) return 0;
+    const m = arr.reduce((a, b) => a + b, 0) / arr.length;
+    return arr.reduce((a, b) => a + (b - m) * (b - m), 0) / arr.length;
+  }
+
   console.log('【1】启动与初始化');
 
   const html = fs.readFileSync(path.join(APP, 'index.html'), 'utf8');
@@ -6567,6 +6585,149 @@ async function run() {
 
     S.cfg.provider = 'siliconflow';
     S.cfg.model = 'Qwen/Qwen-Image-Edit';
+    api.goHome();
+    await sleep(150);
+  }
+
+  /* ---------- 画布背景：自定义图 + 模糊 + 压暗 ---------- */
+  console.log('\n【57】画布背景：能导入、能模糊、能压暗');
+  {
+    const api = window.__PS_API;
+    S.library = [];
+    window.localStorage.removeItem('photoStudio.library.v1');
+    api.saveLibrary();
+    S.jobs = [];
+    api.goHome();
+    await sleep(150);
+
+    // 干净起点
+    S.cfg.bg = window.PSCore.normalizeBg({});
+    bgImageReset();
+
+    // 这一段需要真实解码的 Image（默认 jsdom 的 Image 不解码，naturalWidth 永远是 0，
+    // 而 paintBackground 正是靠 naturalWidth 判断能不能画）。
+    // 真实浏览器里这些都是标准行为，所以这是**测试环境**的补齐，不是产品妥协。
+    const savedImage = window.Image;
+    window.Image = class {
+      constructor() {
+        this.onload = null; this.onerror = null;
+        this.width = 0; this.height = 0; this._src = '';
+      }
+      get naturalWidth() { return this.width; }
+      get naturalHeight() { return this.height; }
+      get complete() { return this.width > 0 && this.height > 0; }
+      set src(v) {
+        this._src = v;
+        const m = /^data:[^;]+;base64,(.*)$/.exec(String(v));
+        if (!m) { setTimeout(() => this.onerror && this.onerror(new Error('bad src')), 0); return; }
+        napi.loadImage(Buffer.from(m[1], 'base64')).then((im) => {
+          this.__real = im;
+          this.width = im.width; this.height = im.height;
+          if (this.onload) this.onload();
+        }).catch((e) => { if (this.onerror) this.onerror(e); });
+      }
+      get src() { return this._src; }
+    };
+
+    // 载入一张照片（背景要能画在照片四周）
+    {
+      const c = napi.createCanvas(300, 200);
+      const cx0 = c.getContext('2d');
+      cx0.fillStyle = 'rgb(240, 240, 240)';
+      cx0.fillRect(0, 0, 300, 200);
+      const inp = doc.getElementById('file-input');
+      Object.defineProperty(inp, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'bgtest.png', { type: 'image/png' })],
+        configurable: true
+      });
+      inp.dispatchEvent(new window.Event('change'));
+      await sleep(400);
+    }
+    t('照片已载入', S.imgW === 300, S.imgW);
+
+    // 默认背景下：画布四周是主题色（深灰）
+    api.draw();
+    await sleep(120);
+    const pxDefault = readCanvasPx(2, 2);
+    t('默认背景是主题色（深色）', pxDefault[0] < 60 && pxDefault[1] < 60, pxDefault);
+
+    // 导入一张纯红背景图
+    {
+      const c = napi.createCanvas(200, 150);
+      const cx0 = c.getContext('2d');
+      cx0.fillStyle = 'rgb(200, 20, 20)';
+      cx0.fillRect(0, 0, 200, 150);
+      const inp = doc.getElementById('bg-input');
+      Object.defineProperty(inp, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'bg.png', { type: 'image/png' })],
+        configurable: true
+      });
+      inp.dispatchEvent(new window.Event('change'));
+      await sleep(700);
+    }
+    t('★ 背景图被记录', !!S.cfg.bg && /^data:image\//.test(S.cfg.bg.dataUrl || ''),
+      S.cfg.bg && String(S.cfg.bg.dataUrl).slice(0, 24));
+    t('背景图有压缩上限（不会原样存大图）',
+      (S.cfg.bg.dataUrl || '').length > 0 && (S.cfg.bg.dataUrl || '').length < 400000,
+      (S.cfg.bg.dataUrl || '').length);
+
+    // 等图片解码完成后应能画出红色
+    await sleep(500);
+    api.draw();
+    await sleep(200);
+    const pxRed = readCanvasPx(2, 2);
+    t('★ 画布四周真的画出了背景图（偏红）',
+      pxRed[0] > 120 && pxRed[0] > pxRed[2] + 40, pxRed);
+
+    // 压暗：画面应当变暗，但仍是红色系
+    S.cfg.bg = Object.assign({}, S.cfg.bg, { dim: 100 });
+    api.draw();
+    await sleep(150);
+    const pxDim = readCanvasPx(2, 2);
+    t('★ 压暗后背景变暗', pxDim[0] < pxRed[0] - 30, { before: pxRed, after: pxDim });
+    t('压暗后仍能看出是红色（没被压成全黑）', pxDim[0] > 15, pxDim);
+
+    // 模糊：把压暗关掉，用一张有明显边界的图验证模糊会让像素更均匀
+    S.cfg.bg = Object.assign({}, S.cfg.bg, { dim: 0, blur: 0 });
+    api.draw();
+    await sleep(150);
+    const sharpSamples = [];
+    for (let k = 0; k < 8; k++) sharpSamples.push(readCanvasPx(2 + k * 3, 2)[0]);
+    const sharpVar = variance(sharpSamples);
+    S.cfg.bg = Object.assign({}, S.cfg.bg, { blur: 20 });
+    api.draw();
+    await sleep(200);
+    const blurSamples = [];
+    for (let k = 0; k < 8; k++) blurSamples.push(readCanvasPx(2 + k * 3, 2)[0]);
+    const blurVar = variance(blurSamples);
+    t('★ 模糊把背景抹匀了（像素方差下降）',
+      blurVar <= sharpVar + 1, { sharp: sharpVar.toFixed(1), blur: blurVar.toFixed(1) });
+
+    // 模糊值本身要被夹住
+    t('模糊上限生效', (() => {
+      const b = window.PSCore.normalizeBg({ blur: 999 });
+      return b.blur === window.PSCore.BG_BLUR_MAX;
+    })());
+
+    // 恢复默认
+    S.cfg.bg = window.PSCore.normalizeBg({});
+    bgImageReset();
+    api.draw();
+    await sleep(200);
+    const pxBack = readCanvasPx(2, 2);
+    t('★ 恢复默认后回到主题色', pxBack[0] < 60, pxBack);
+
+    // 界面接线
+    t('设置里有「选图」按钮', !!doc.getElementById('btn-bg-pick'));
+    t('设置里有模糊滑块', !!doc.getElementById('set-bg-blur'));
+    t('设置里有压暗滑块', !!doc.getElementById('set-bg-dim'));
+    t('没有背景图时模糊/压暗被藏起来', (() => {
+      api.syncBgUI();
+      return doc.getElementById('bg-blur-row').hidden === true &&
+        doc.getElementById('bg-dim-row').hidden === true;
+    })());
+
+    window.Image = savedImage;
     api.goHome();
     await sleep(150);
   }

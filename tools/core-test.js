@@ -4105,6 +4105,68 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
 })();
 // ===== 主题结束 =====
 
+
+/* ===== 画布背景：自定义图 + 模糊 + 压暗 ===== */
+(function () {
+  console.log('\n【画布背景】');
+
+  // 默认值
+  const d = C.emptyBg();
+  t('默认没有背景图', d.dataUrl === '' && d.blur === 0 && d.dim === 0);
+  t('默认铺法是 cover', d.fit === 'cover');
+
+  // 规范化：脏数据不能崩
+  t('null 也能规范化', (() => {
+    const b = C.normalizeBg(null);
+    return b.dataUrl === '' && b.blur === 0;
+  })());
+  t('非 data:image 的 URL 会被丢弃',
+    C.normalizeBg({ dataUrl: 'javascript:alert(1)' }).dataUrl === '');
+  t('http URL 也会被丢弃（只接受内嵌图）',
+    C.normalizeBg({ dataUrl: 'https://evil/x.png' }).dataUrl === '');
+  t('合法 data:image 保留',
+    C.normalizeBg({ dataUrl: 'data:image/png;base64,AAA' }).dataUrl === 'data:image/png;base64,AAA');
+  t('模糊夹到上限', C.normalizeBg({ blur: 999 }).blur === C.BG_BLUR_MAX);
+  t('模糊不接受负数', C.normalizeBg({ blur: -5 }).blur === 0);
+  t('压暗夹到 0~100', C.normalizeBg({ dim: 999 }).dim === C.BG_DIM_MAX);
+  t('非法铺法回落 cover', C.normalizeBg({ fit: 'zzz' }).fit === 'cover');
+  t('contain 保留', C.normalizeBg({ fit: 'contain' }).fit === 'contain');
+
+  // 绘制计划
+  const cover = C.planBgDraw(400, 300, 1600, 1200, 'cover');
+  t('cover 铺满整个视口', cover && cover.x === 0 && cover.y === 0 && cover.w === 400 && cover.h === 300, cover);
+  const contain = C.planBgDraw(400, 300, 1600, 600, 'contain');
+  t('contain 整张塞进去（有余边）', contain && contain.w === 400 && contain.h === 150, contain);
+  t('contain 居中', contain && Math.abs(contain.y - 75) < 0.01, contain && contain.y);
+  // cover 时图片比视口大（超出裁掉），不能露出空白
+  const coverTall = C.planBgDraw(400, 300, 400, 1200, 'cover');
+  t('cover 下窄高图会横向拉满、纵向溢出', coverTall && coverTall.w === 400 && coverTall.h >= 300, coverTall);
+  t('尺寸为 0 时返回 null（不画）', C.planBgDraw(0, 300, 100, 100, 'cover') === null);
+  t('图片尺寸为 0 时返回 null', C.planBgDraw(400, 300, 0, 100, 'cover') === null);
+  t('乱传参数不崩', C.planBgDraw(null, undefined, 'x', NaN, 'cover') === null);
+
+  // 压暗
+  t('压暗 0 时全透明', C.bgScrimAlpha(0) === 0);
+  t('压暗 100 时有明显黑幕', C.bgScrimAlpha(100) > 0.7, C.bgScrimAlpha(100));
+  t('压暗不到全黑（否则看不见背景，失去意义）', C.bgScrimAlpha(100) <= 0.9, C.bgScrimAlpha(100));
+  t('压暗单调递增', C.bgScrimAlpha(20) < C.bgScrimAlpha(60));
+  t('压暗越界被夹住', C.bgScrimAlpha(999) === C.bgScrimAlpha(100));
+
+  // 接线检查：三处画背景必须都走同一个函数
+  const fsB = require('fs');
+  const appSrc = fsB.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  t('有统一的背景绘制函数', /function paintBackground\(/.test(appSrc));
+  t('draw 用统一函数', /function draw\(\)[\s\S]{0,300}paintBackground\(ctx/.test(appSrc));
+  t('调色预览也用它（否则拖动时背景会闪）',
+    /function drawGradeThumb\([\s\S]{0,300}paintBackground\(ctx/.test(appSrc));
+  t('回首页也用它（否则背景忽然变亮）',
+    /clearRect\(0, 0, v\.w, v\.h\); paintBackground\(ctx/.test(appSrc));
+  t('不再残留旧的纯色填充', !/ctx\.fillStyle = bgColor;\s*\n\s*ctx\.fillRect\(0, 0, v\.w, v\.h\);\s*\n\s*\n\s*if \(!S\.viewCanvas\)/.test(appSrc));
+  t('背景图有解码缓存（不然每帧解码会很卡）', /bgImageKey === url/.test(appSrc));
+  t('换背景后缓存会失效', /bgImage = null; bgImageKey = '';/.test(appSrc));
+})();
+// ===== 画布背景结束 =====
+
 /* ---------- 检查更新 ---------- */
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

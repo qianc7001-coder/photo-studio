@@ -843,6 +843,30 @@
         </div>
       </div>
 
+      <!-- 画布背景：照片四周垫的图 -->
+      <div class="st-card">
+        <div class="st-row">
+          <span class="st-label">画布背景 <i class="st-desc-inline" id="bg-state">默认（主题色）</i></span>
+          <button class="chip" id="btn-bg-pick">选图</button>
+          <button class="chip" id="btn-bg-clear" hidden>恢复默认</button>
+        </div>
+        <label class="st-row" id="bg-blur-row" hidden>
+          <span class="st-label">模糊 <i class="st-desc-inline">背景太抢眼就调大</i></span>
+          <input type="range" id="set-bg-blur" min="0" max="30" step="1" value="0">
+          <span class="st-badge" id="bg-blur-val">0</span>
+        </label>
+        <label class="st-row" id="bg-dim-row" hidden>
+          <span class="st-label">压暗 <i class="st-desc-inline">亮背景会把照片衬得发灰</i></span>
+          <input type="range" id="set-bg-dim" min="0" max="100" step="5" value="0">
+          <span class="st-badge" id="bg-dim-val">0</span>
+        </label>
+        <div class="st-row st-row-plain" id="bg-fit-row" hidden>
+          <span class="st-label">铺法</span>
+          <div class="chips" id="bg-fit-chips"></div>
+        </div>
+      </div>
+      <div class="tip">背景只影响修图界面，不会被导出，也不会发给模型。</div>
+
       <div class="st-group">隐私</div>
       <div class="st-card">
         <label class="st-row">
@@ -908,6 +932,8 @@
 <input type="file" id="file-input" accept="image/*" hidden>
 <!-- 参考图：可多选（额外发给模型，告诉它「照这个改」） -->
 <input type="file" id="ref-input" accept="image/*" multiple hidden>
+<!-- 画布背景图 -->
+<input type="file" id="bg-input" accept="image/*" hidden>
 
 <script src="version.js"></script>
 <script src="core.js"></script>
