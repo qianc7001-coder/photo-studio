@@ -4064,6 +4064,20 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('不加参考图时 image 就是主图', r4.body.image === MAIN);
   t('不加参考图时 refUsed=0', !r4.refUsed && !r4.refCapped);
 
+  // 5b) ★ multipart 模式下 refUsed 必须如实上报
+  //
+  // 这是「加了参考图但界面说模型不支持」的真实根因：
+  // multipart 的图由 buildMultipartBody 追加，buildImageRequest 不碰，
+  // 于是 refUsed 一直是 0 —— 图明明发出去了，界面和日志却记成 0 张。
+  const mpOpen = req({
+    model: 'gpt-image-2', providerId: 'openai', imageField: 'image',
+    refDataUrls: [R1, R2]
+  });
+  t('★★ multipart 模式下 refUsed 如实上报（不是 0）',
+    mpOpen.refUsed === 2 && mpOpen.refCapped === 0, [mpOpen.refUsed, mpOpen.refCapped]);
+  t('multipart 模式下不会把参考图塞进 JSON body',
+    !('images' in mpOpen.body) && !('ref_image' in mpOpen.body), Object.keys(mpOpen.body));
+
   // 6) 超出上限要截断而不是全发
   const many = [R1, R2, R1, R2, R1, R2];
   const r5 = req({ model: 'Qwen/Qwen-Image-Edit-2509', imageField: 'image', refDataUrls: many });
@@ -4074,8 +4088,46 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   const fsR = require('fs');
   const core = fsR.readFileSync(__dirname + '/../app/core.js', 'utf8');
   const mpFn = core.slice(core.indexOf('function buildMultipartBody'), core.indexOf('function parseImageResponse'));
-  t('★ multipart 参考图用 image[] 字段', /file\('image\[\]'/.test(mpFn));
-  t('★ multipart 主图字段可配置（不写死 image）', /o\.imageField \|\| 'image'/.test(mpFn));
+  // 关键不变量：有参考图时，**主图和参考图必须用同一个字段名**（都带 []）。
+  //
+  // OpenAI /images/edits 的规矩是「多张图全部用 image[]」。
+  // 混用（主图 image、参考图 image[]）时服务端只认一种，另一批被静默丢弃：
+  // 出图看着成功，但要么没用上参考图，要么改错了对象 —— 从返回值完全看不出来。
+  // 这是「参考图不生效」最常见的原因，所以直接对生成的字节做断言。
+  const namesOf = (mp) => {
+    const t2 = Buffer.from(mp.body).toString('latin1');
+    return [...t2.matchAll(/name="([^"]+)"/g)].map((m) => m[1]);
+  };
+  const MAIN2 = 'data:image/jpeg;base64,MAIN';
+  const R1b = 'data:image/jpeg;base64,REF1';
+  const R2b = 'data:image/jpeg;base64,REF2';
+
+  const mpMulti = C.buildMultipartBody({
+    imageDataUrl: MAIN2, imageField: 'image',
+    refDataUrls: [R1b, R2b], model: 'gpt-image-2', prompt: 'x'
+  });
+  const multiNames = namesOf(mpMulti).filter((n) => /image/.test(n));
+  t('★ 有参考图时主图也用 image[]（字段统一）',
+    multiNames.every((n) => n === 'image[]'), multiNames);
+  t('★ 主图 + 2 张参考图 = 3 个 image[] 文件',
+    multiNames.length === 3, multiNames.length);
+
+  const mpSingle = C.buildMultipartBody({
+    imageDataUrl: MAIN2, imageField: 'image', model: 'gpt-image-2', prompt: 'x'
+  });
+  const singleNames = namesOf(mpSingle).filter((n) => /image/.test(n));
+  t('没有参考图时保持单数 image（兼容只认单图的第三方）',
+    singleNames.length === 1 && singleNames[0] === 'image', singleNames);
+
+  // 字段名已经带 [] 时不能拼成 image[][]
+  const mpDup = C.buildMultipartBody({
+    imageDataUrl: MAIN2, imageField: 'image[]',
+    refDataUrls: [R1b], model: 'm', prompt: 'x'
+  });
+  t('★ 不会拼成 image[][]', namesOf(mpDup).every((n) => n !== 'image[][]'),
+    namesOf(mpDup).filter((n) => /image/.test(n)));
+
+  t('图片字段名可配置（不写死 image）', /o\.imageField \|\| 'image'/.test(mpFn));
 })();
 // ===== 参考图结束 =====
 
@@ -4166,6 +4218,99 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('换背景后缓存会失效', /bgImage = null; bgImageKey = '';/.test(appSrc));
 })();
 // ===== 画布背景结束 =====
+
+
+/* ===== 日志详情：把一条记录翻译成「能排查」的信息 ===== */
+(function () {
+  console.log('\n【日志详情】');
+
+  const rowsOf = (e) => {
+    const m = {};
+    for (const r of C.buildCallLogDetail(e)) m[r.k] = r;
+    return m;
+  };
+
+  // 1) 基本信息
+  const r1 = rowsOf({
+    kind: 'edit', transport: 'multipart', imageField: 'image[]',
+    refCount: 2, refUsed: 2, guideCount: 1,
+    endpoint: 'https://api.openai.com/v1/images/edits',
+    status: 200, ok: true, bodyBytes: 2500000,
+    imgW: 1024, imgH: 1024, imgBytes: 180000, promptLen: 56
+  });
+  t('能看出是修图还是文生图', r1['类型'] && /修图/.test(r1['类型'].v));
+  t('文生图会标出来', rowsOf({ kind: 't2i' })['类型'].v === '文生图');
+  t('能看出请求方式（multipart / JSON）',
+    r1['请求方式'] && /multipart/.test(r1['请求方式'].v));
+  t('JSON 路径也标得出来',
+    /JSON/.test(rowsOf({ transport: 'json' })['请求方式'].v));
+  t('能看出图片字段名', r1['图片字段'].v === 'image[]');
+  t('正常的图片字段不告警', r1['图片字段'].warn === false);
+  t('★ 有参考图但字段没带 [] 会告警',
+    rowsOf({ transport: 'multipart', imageField: 'image', refCount: 2 })['图片字段'].warn === true);
+  t('没有参考图时字段写成 image 不算错',
+    rowsOf({ transport: 'multipart', imageField: 'image' })['图片字段'].warn === false);
+
+  // 2) 参考图：这是「加了却不生效」的唯一证据
+  t('参考图全发出去了', /已发出 2 张/.test(r1['参考图'].v), r1['参考图'].v);
+  t('参考图一张都没发出去 → 告警',
+    rowsOf({ refCount: 2, refUsed: 0 })['参考图'].warn === true);
+  t('★ 说明"当前模型不支持"（用户才知道换模型）',
+    /不支持/.test(rowsOf({ refCount: 2, refUsed: 0 })['参考图'].v));
+  t('部分被截断也告警，并说清发了几张',
+    (() => {
+      const r = rowsOf({ refCount: 3, refUsed: 1 })['参考图'];
+      return r.warn === true && /实际发出 1 张/.test(r.v) && /超出模型上限/.test(r.v);
+    })());
+  t('没加参考图时显示「无」', rowsOf({ refCount: 0 })['参考图'].v === '无');
+
+  // 3) 其它排查项
+  t('请求体大小可读（MB）', /MB/.test(r1['请求体大小'].v), r1['请求体大小'].v);
+  t('★ 请求体过大才告警（>8MB 易被网关拒）',
+    rowsOf({ bodyBytes: 20 * 1048576 })['请求体大小'].warn === true &&
+    rowsOf({ bodyBytes: 100000 })['请求体大小'].warn === false);
+  t('发送图片尺寸与体积', /1024×1024/.test(r1['发送图片'].v));
+  t('提示词长度', r1['提示词长度'].v === '56 字');
+  t('引导线条数', /1 条/.test(r1['引导线'].v));
+  t('接口地址', /images\/edits/.test(r1['接口地址'].v));
+  t('失败时把原因列出来并告警',
+    (() => {
+      const r = rowsOf({ ok: false, status: 400, error: '模型额度超了' })['失败原因'];
+      return r && r.warn === true && /额度/.test(r.v);
+    })());
+  t('失败的 HTTP 状态也告警',
+    rowsOf({ ok: false, status: 400 })['HTTP 状态'].warn === true);
+
+  // 4) 空数据不能崩
+  t('空对象返回空数组', C.buildCallLogDetail({}).length === 0);
+  t('null 也不崩', C.buildCallLogDetail(null).length === 0);
+  t('undefined 也不崩', C.buildCallLogDetail(undefined).length === 0);
+})();
+
+/* ===== 诊断包：导出必须脱敏 ===== */
+(function () {
+  console.log('\n【诊断包】');
+  const fsD = require('fs');
+  const js = fsD.readFileSync(__dirname + '/../app/app.js', 'utf8');
+
+  t('有构建诊断包的函数', /function buildDiagnosticBundle\(/.test(js));
+  t('有导出诊断包的函数', /function exportDiagnostics\(/.test(js));
+  t('★ API Key 必须打码', /apiKeyMasked: maskSecret\(cfg\.apiKey\)/.test(js));
+  t('★ 提示词只留开头（不导出全文）',
+    /String\(e\.prompt\)\.slice\(0, 40\)/.test(js));
+  t('诊断包里说明了自己是什么（便于日后回看）', /_readme/.test(js));
+  t('带上应用版本', /appVersion: APP_VERSION/.test(js));
+  t('带上 WebView 版本（兼容问题必需）', /webview:/.test(js));
+  t('带上影响出图的配置项',
+    /contextPct: cfg\.contextPct/.test(js) && /maxRes: cfg\.maxRes/.test(js));
+  t('不把整个 cfg 原样倒出去（会带 key）',
+    !/cfg: S\.cfg\b(?!\.)/.test(js));
+  t('界面上有「导出诊断包」按钮', /id="calllog-export-diag"/.test(
+    fsD.readFileSync(__dirname + '/../app/index.html', 'utf8')));
+  t('按钮已经接线', /exportDiagnostics\(\)/.test(js));
+  t('日志条目有「查看详情」按钮', /查看详情/.test(js));
+  t('详情默认收起（不淹掉列表）', /box\.hidden = true/.test(js));
+})();
 
 /* ---------- 检查更新 ---------- */
 console.log(`\n${pass} passed, ${fail} failed`);

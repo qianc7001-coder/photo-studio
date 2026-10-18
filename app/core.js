@@ -1365,11 +1365,33 @@
     // multipart 类接口不走这里 —— 它们由 buildMultipartBody 单独处理。
     // 返回值里的 refUsed/refCapped 要如实带回给界面：
     // 用户传了 3 张但接口只收 1 张时，必须明确告诉他而不是静默丢掉。
+    // 参考图（JSON 类接口在这里挂进 body）。
+    //
+    // refUsed / refCapped 是**给用户看、给日志记**的依据，必须反映
+    // 「这次到底几张会发出去」，而不是「我在这里挂了几张」。
+    //
+    // 这里踩过一个很隐蔽的坑：multipart 模式下参考图由 buildMultipartBody
+    // 追加，这个函数不碰，于是 refUsed 一直是 0 ——
+    // 结果界面显示「当前模型不支持参考图」、日志也记成 0 张，
+    // 而实际上图已经发出去了。用户看到的就是"加了参考图但没生效"。
+    //
+    // 所以按能力表算「应该发几张」，与实际挂载解耦：
+    //   multipartArray → 由 multipart 负责，数量 = min(加了, 上限)
+    //   jsonArray/jsonSingle → 已经在上面挂好了，用实际返回值
+    //   none → 一张都不发
     let refUsed = 0, refCapped = 0;
-    if (Array.isArray(o.refDataUrls) && o.refDataUrls.length) {
-      const r = attachJsonRefs(body, o.model, o.providerId, o.refDataUrls);
-      refUsed = r.used;
-      refCapped = r.capped;
+    const refsIn = Array.isArray(o.refDataUrls) ? o.refDataUrls.filter(Boolean) : [];
+    if (refsIn.length) {
+      const cap = refCapability(o.model, o.providerId);
+      if (cap.mode === 'multipartArray') {
+        const use = Math.min(refsIn.length, cap.max);
+        refUsed = use;
+        refCapped = refsIn.length - use;
+      } else {
+        const r = attachJsonRefs(body, o.model, o.providerId, refsIn);
+        refUsed = r.used;
+        refCapped = r.capped;
+      }
     }
     return { url, headers, body, refUsed, refCapped };
   }
@@ -1598,16 +1620,25 @@
       push('\r\n');
     };
 
-    // 主图（要修改的那张）
-    file(o.imageField || 'image', o.imageDataUrl, 'source.' + mimeToExt(dataUrlToBytes(o.imageDataUrl).mime));
-    // 参考图：OpenAI 的 /images/edits 用 image[] 才能收多张。
-    // 注意字段名必须带方括号 —— 写成 image 会把主图顶掉，
-    // 模型拿到的是最后上传的那张（很隐蔽：出图看着正常，但改错了对象）。
-    const refs = Array.isArray(o.refDataUrls) ? o.refDataUrls : [];
+    // ---- 主图与参考图 ----
+    //
+    // OpenAI /images/edits 的规矩：**多张图必须全部用同一个字段名 `image[]`**。
+    // 混用会出事 —— 主图用 `image`、参考图用 `image[]` 时，
+    // 服务端只认其中一种，另一批被静默丢掉：
+    //   出图看着"成功"，但要么没用上参考图，要么改错了对象。
+    // 这是"参考图不生效"最常见的原因，而且从返回值上完全看不出来。
+    //
+    // 所以：有参考图 → 主图也写成 `image[]`，全体统一；
+    //       没参考图 → 保持原来的单数字段，兼容那些只认单图的第三方中转。
+    const refs = (Array.isArray(o.refDataUrls) ? o.refDataUrls : []).filter(Boolean);
+    // 去掉可能已经带上的 []，避免拼成 image[][]
+    const baseField = String(o.imageField || 'image').replace(/\[\]$/, '');
+    const multi = refs.length > 0;
+    const mainName = multi ? (baseField + '[]') : baseField;
+    file(mainName, o.imageDataUrl, 'source.' + mimeToExt(dataUrlToBytes(o.imageDataUrl).mime));
     for (let ri = 0; ri < refs.length; ri++) {
       const u = refs[ri];
-      if (!u) continue;
-      file('image[]', u, 'ref' + (ri + 1) + '.' + mimeToExt(dataUrlToBytes(u).mime));
+      file(mainName, u, 'ref' + (ri + 1) + '.' + mimeToExt(dataUrlToBytes(u).mime));
     }
     if (o.maskDataUrl) file('mask', o.maskDataUrl, 'mask.png');
     field('model', o.model);
@@ -4005,6 +4036,81 @@
    * @param {number} max  上限（默认 CALL_LOG_MAX）
    * @returns {Array} 新数组
    */
+  /**
+   * 把一条调用日志翻译成「人能看懂 + 能排查」的键值对。
+   *
+   * 为什么不直接把整个对象 JSON.stringify 出来：
+   *   - 字段名是英文，用户看不懂 transport / imageField 是什么
+   *   - 一堆 null 会把真正重要的信息淹掉
+   *   - 看不出「哪个值是异常的」——而这正是排查时最需要的
+   * 所以这里逐项翻译，并对可疑值打 warn 标记（界面上标红）。
+   *
+   * @returns {Array<{k:string, v:string, warn:boolean}>}
+   */
+  function buildCallLogDetail(e) {
+    const rows = [];
+    const add = (k, v, warn) => {
+      if (v === undefined || v === null || v === '') return;
+      rows.push({ k: k, v: String(v), warn: !!warn });
+    };
+    const o = e || {};
+
+    add('类型', o.kind === 't2i' ? '文生图' : (o.kind ? '修图' : ''));
+
+    // 传输方式：multipart 和 JSON 是完全不同的路径，排查时必须先知道这个
+    if (o.transport) {
+      add('请求方式', o.transport === 'multipart'
+        ? 'multipart 表单（OpenAI 系）'
+        : 'JSON（多数第三方中转）');
+    }
+    if (o.imageField) {
+      // 有参考图时字段名必须是数组形式（image[]），否则服务端只认一张。
+      // 这里记的是实际发出去的字段名，所以能直接据此判断有没有出错。
+      const bad = o.refCount > 0 && o.transport === 'multipart' && !/\[\]$/.test(o.imageField);
+      add('图片字段', o.imageField, bad);
+    }
+
+    // 参考图：这是「加了参考图却不生效」的唯一证据
+    if (o.refCount !== undefined && o.refCount !== null) {
+      if (o.refCount > 0) {
+        const used = num(o.refUsed, 0);
+        if (used === 0) {
+          add('参考图', '加了 ' + o.refCount + ' 张，但一张都没发出去（当前模型不支持）', true);
+        } else if (used < o.refCount) {
+          add('参考图', '加了 ' + o.refCount + ' 张，实际发出 ' + used + ' 张（超出模型上限）', true);
+        } else {
+          add('参考图', '已发出 ' + used + ' 张');
+        }
+      } else {
+        add('参考图', '无');
+      }
+    }
+
+    if (o.guideCount) add('引导线', o.guideCount + ' 条（已画进请求图）');
+
+    if (o.endpoint) add('接口地址', o.endpoint);
+    if (o.status) add('HTTP 状态', o.status, !o.ok);
+
+    // 请求体大小：太大容易被网关拒（413/502），这是很常见的隐蔽失败原因
+    if (o.bodyBytes) {
+      const mb = o.bodyBytes / 1048576;
+      add('请求体大小', mb >= 1 ? mb.toFixed(2) + ' MB' : Math.round(o.bodyBytes / 1024) + ' KB',
+        mb > 8);
+    }
+
+    if (o.imgW && o.imgH) {
+      add('发送图片', o.imgW + '×' + o.imgH +
+        (o.imgBytes ? '（' + formatBytes(o.imgBytes) + '）' : ''));
+    }
+
+    if (o.promptLen) add('提示词长度', o.promptLen + ' 字');
+    if (o.costNote) add('花费说明', o.costNote, /未知/.test(String(o.costNote)));
+
+    if (!o.ok && o.error) add('失败原因', o.error, true);
+
+    return rows;
+  }
+
   function appendCallLog(list, entry, max) {
     const cap = Math.max(1, Math.round(num(max, CALL_LOG_MAX)));
     const e = entry || {};
@@ -4034,7 +4140,19 @@
       kind: (e.kind === 't2i' ? 't2i' : 'edit'),
       // 记录属于哪张作品（将来「这张照片花了几次」能直接查）
       // 文生图没有作品归属（是凭空造一张新的），记空串
-      workId: typeof e.workId === 'string' ? e.workId : ''
+      workId: typeof e.workId === 'string' ? e.workId : '',
+
+      // ---- 排查用字段 ----
+      // 这里是**白名单**：没列进来的键会被静默丢掉。
+      // 之前就踩过 —— 记了 transport/refCount 却没在这里登记，
+      // 于是日志详情里永远看不到「参考图发没发出去」，
+      // 而那几个字段正是排查「参考图不生效」的唯一证据。
+      transport: (e.transport === 'multipart' ? 'multipart' : 'json'),
+      imageField: typeof e.imageField === 'string' ? e.imageField.slice(0, 40) : '',
+      refCount: Math.max(0, Math.round(num(e.refCount, 0))),
+      refUsed: Math.max(0, Math.round(num(e.refUsed, 0))),
+      guideCount: Math.max(0, Math.round(num(e.guideCount, 0))),
+      bodyBytes: Math.max(0, Math.round(num(e.bodyBytes, 0)))
     };
     const out = [rec];
     const src = Array.isArray(list) ? list : [];
@@ -6982,7 +7100,7 @@
     // 滑块「只能拖滑块头」（防止设置页点轨道误触跳值）
     sliderThumbGeometry, planSliderHit, SLIDER_THUMB_PX,
     // 调用日志（每次模型调用都留痕）
-    appendCallLog, callLogStats, callLogToText, callLogToJson, truncateText, formatDateTime,
+    appendCallLog, callLogStats, buildCallLogDetail, callLogToText, callLogToJson, truncateText, formatDateTime,
     CALL_LOG_MAX, CALL_LOG_PROMPT_CHARS,
     // 新手教程
     TUTORIAL_STEPS, TUTORIAL_LEN, planTutorial, planTutorialStep,

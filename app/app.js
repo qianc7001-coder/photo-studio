@@ -3822,6 +3822,19 @@
       promptLabel: String($('prompt').value || '').trim().slice(0, 24),
       upscale,
       imageBytes,
+      // 排查用：参考图去向、传输方式、字段名。
+      // 这些是「参考图有没有真的发出去」的唯一证据，必须跟着任务走。
+      refUrls,
+      refUsed: req.refUsed || 0,
+      transport: req.multipart ? 'multipart' : 'json',
+      // 记录**实际发出去的**字段名（有参考图时会自动变成 image[]）。
+      // 存配置值没有意义 —— 排查时要看的是请求里到底是什么，
+      // 否则日志说 image、实际发 image[]，看日志反而会误判。
+      imageField: (function () {
+        const base = String((m ? m.imageField : 'image') || 'image').replace(/\[\]$/, '');
+        return (refUrls.length > 0 && req.multipart) ? (base + '[]') : base;
+      })(),
+      guides: selGuides,
       feather: Number(S.cfg.feather) || 0,
       colorMatch: (Number(S.cfg.colorMatch) || 0) / 100,
       aborter: null
@@ -3851,7 +3864,26 @@
       costUsd: callCost.usd,
       costNote: callCost.note,
       // 归属用**任务里记的** workId，不是当前的 —— 用户可能已经换图了
-      workId: job.workId || ''
+      workId: job.workId || '',
+      // ---- 排查用：这几项平时看不出来，但出问题时决定性质 ----
+      kind: job.kind || 'edit',
+      // 参考图：发了几张、请求体里到底带没带（"参考图不生效"最常见的原因）
+      refCount: (job.refUrls || []).length,
+      refUsed: job.refUsed === undefined ? 0 : job.refUsed,
+      // 是不是 multipart 表单（OpenAI 系走这条），以及**实际发出**的图片字段名
+      transport: job.req.multipart ? 'multipart' : 'json',
+      imageField: job.imageField || 'image',
+      // 请求体大小：太大容易被网关拒（413/502），这是很常见的隐蔽失败原因。
+      // JSON 路径也要算 —— 用序列化后的长度，否则永远显示 0。
+      bodyBytes: job.req.multipart
+        ? (job.req.multipart.body ? job.req.multipart.body.length : 0)
+        : (function () {
+          try { return JSON.stringify(job.req.body || {}).length; } catch (e) { return 0; }
+        })(),
+      // 提示词长度（日志里会被截断，这里存真实长度）
+      promptLen: (job.promptText || '').length,
+      // 是否带了引导线（画进图里的线）
+      guideCount: (job.guides || []).length
     };
 
     let json;
@@ -7209,8 +7241,164 @@
         er.textContent = '原因：' + e.error;
         item.appendChild(er);
       }
+
+      // ---- 详情（点一下展开）----
+      //
+      // 摘要只够判断"成没成"，排查问题需要的是请求到底长什么样：
+      // 参考图发没发出去、走的哪种传输、图片字段名、请求体多大…
+      // 这些在摘要里放不下，全放又太吵，所以默认收起。
+      const detailRows = C.buildCallLogDetail(e);
+      if (detailRows.length) {
+        const btn = document.createElement('button');
+        btn.className = 'cl-more';
+        btn.type = 'button';
+        btn.textContent = '查看详情';
+        const box = document.createElement('div');
+        box.className = 'cl-detail';
+        box.hidden = true;
+        for (const row of detailRows) {
+          const r = document.createElement('div');
+          r.className = 'cl-detail-row';
+          const k = document.createElement('span');
+          k.className = 'cl-detail-k';
+          k.textContent = row.k;
+          const v = document.createElement('span');
+          v.className = 'cl-detail-v' + (row.warn ? ' warn' : '');
+          v.textContent = row.v;
+          r.appendChild(k); r.appendChild(v);
+          box.appendChild(r);
+        }
+        btn.onclick = () => {
+          box.hidden = !box.hidden;
+          btn.textContent = box.hidden ? '查看详情' : '收起详情';
+        };
+        item.appendChild(btn);
+        item.appendChild(box);
+      }
       list.appendChild(item);
     }
+  }
+
+  /**
+   * 收集一份「诊断包」：日志 + 环境 + 当前配置（已脱敏）。
+   *
+   * 为什么要单独做一个：光有日志往往不够定位问题。
+   * 比如「参考图不生效」，需要同时知道：
+   *   - 当时用的什么模型、是不是走了 multipart
+   *   - 应用版本、安卓版本、WebView 版本
+   *   - 用户是不是把某个开关关了
+   * 这些散落在各个地方，让用户一项项报过来不现实，
+   * 所以一次性打包成一份，方便直接发给我。
+   *
+   * **脱敏是硬要求**：API Key、完整提示词原文都不能带出去。
+   * Key 只留头尾几位，提示词只留长度和前 40 字。
+   */
+  function buildDiagnosticBundle() {
+    const env = {
+      appVersion: APP_VERSION,
+      // 构建时间：version.js 里如果有就带上，没有就留空。
+      // 不能直接引用 __BUILD_AT__ —— 未定义时是 ReferenceError，
+      // 而 try/catch 挡不住引用错误之外的时序问题（且会把诊断包整个搞崩）。
+      buildTime: (function () {
+        try {
+          return (typeof window !== 'undefined' && window.__PS_BUILD_AT__) || '';
+        } catch (e) { return ''; }
+      })(),
+      userAgent: navigator.userAgent || '',
+      platform: navigator.platform || '',
+      dpr: window.devicePixelRatio || 1,
+      screen: (window.screen ? (window.screen.width + 'x' + window.screen.height) : ''),
+      viewport: (function () {
+        const v = viewSize ? viewSize() : null;
+        return v ? (Math.round(v.w) + 'x' + Math.round(v.h)) : '';
+      })(),
+      // WebView 版本决定了很多兼容行为，排查必需
+      webview: (function () {
+        const m = /Chrome\/([\d.]+)/.exec(navigator.userAgent || '');
+        return m ? m[1] : '';
+      })(),
+      compat: (S.compat && S.compat.level) || null,
+      language: navigator.language || '',
+      online: navigator.onLine !== false
+    };
+
+    // 配置：只带「影响请求」的项，且 Key 脱敏
+    const cfg = S.cfg || {};
+    const safeCfg = {
+      provider: cfg.provider,
+      baseUrl: cfg.baseUrl,
+      model: cfg.model,
+      apiKeyMasked: maskSecret(cfg.apiKey),
+      // 以下这些都会实打实影响出图结果，排查时经常是元凶
+      contextPct: cfg.contextPct,
+      feather: cfg.feather,
+      colorMatch: cfg.colorMatch,
+      maxRes: cfg.maxRes,
+      upscaleSmall: cfg.upscaleSmall,
+      mosaic: cfg.mosaic,
+      lang: cfg.lang,
+      seed: cfg.seed,
+      quality: cfg.quality,
+      format: cfg.format,
+      netMode: cfg.netMode,
+      keepAlive: cfg.keepAlive,
+      autoGrade: cfg.autoGrade,
+      // 主题和背景不影响出图，但影响"看到的和导出的是否一致"，带上很便宜
+      theme: cfg.theme,
+      bgConfigured: !!(cfg.bg && cfg.bg.dataUrl)
+    };
+
+    // 日志：原样带上，但每条都把提示词压到 40 字（完整文本留在应用里）
+    const logs = (S.callLog || []).map((e) => Object.assign({}, e, {
+      prompt: e.prompt ? String(e.prompt).slice(0, 40) + '…' : '',
+      // workId 是内部随机串，对排查没用，去掉减小体积
+      workId: undefined
+    }));
+
+    return {
+      // 说明这份文件是什么、怎么来的 —— 用户隔几天再看也能明白
+      _readme: '枫叶修图诊断包：日志 + 环境 + 配置（API Key 与提示词已脱敏）',
+      exportedAt: new Date().toISOString(),
+      env,
+      cfg: safeCfg,
+      stats: C.callLogStats(S.callLog || []),
+      logs
+    };
+  }
+
+  /** 把密钥脱敏成 sk-****abcd（保留头尾，便于确认"是不是用错了那把 key"） */
+  function maskSecret(k) {
+    const s = String(k || '');
+    if (!s) return '';
+    if (s.length <= 8) return '****';
+    return s.slice(0, 4) + '****' + s.slice(-4);
+  }
+
+  /** 导出诊断包（一份 JSON，含环境与脱敏配置） */
+  async function exportDiagnostics() {
+    const bundle = buildDiagnosticBundle();
+    const text = JSON.stringify(bundle, null, 2);
+    const blob = new Blob([text], { type: 'application/json' });
+    const name = C.timestampName('diagnostics', 'json');
+    if (nativeSaveAvailable()) {
+      const r = await nativeSave(blob, name, 'downloads');
+      if (r.ok) { toast('诊断包已导出到 ' + r.path, 3600); return; }
+      if (r.canceled) { toast('已取消'); return; }
+      toast((r.error || '保存失败') + ' · 改用分享', 4000);
+    }
+    const file = new File([blob], name, { type: 'application/json' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: '诊断包' }); toast('已分享'); return; }
+      catch (e) { /* 取消则继续走下载 */ }
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    toast('已导出 ' + name, 3200);
   }
 
   /**
@@ -8267,6 +8455,8 @@
     if (clJson) clJson.onclick = () => exportCallLog('json');
     const clText = $('calllog-export-text');
     if (clText) clText.onclick = () => exportCallLog('text');
+    const clDiag = $('calllog-export-diag');
+    if (clDiag) clDiag.onclick = () => exportDiagnostics();
     const clClear = $('calllog-clear');
     if (clClear) clClear.onclick = () => {
       if (!confirm('清空所有调用日志？这只影响日志记录，不影响作品库和设置。')) return;
@@ -8918,6 +9108,8 @@
     loadCallLog,
     saveCallLog,
     recordCallLog,
+    // 日志详情与诊断包
+    buildDiagnosticBundle, exportDiagnostics, maskSecret,
     renderCallLog,
     openCallLog,
     closeCallLog,

@@ -551,6 +551,14 @@
         <button class="st-btn" id="calllog-export-json">导出 JSON</button>
         <button class="st-btn" id="calllog-export-text">导出文本</button>
       </div>
+      <div class="st-actions" style="margin-top:8px">
+        <button class="st-btn" id="calllog-export-diag">导出诊断包</button>
+      </div>
+      <div class="tip" style="margin:8px 0 0">
+        <b>排查问题请用「诊断包」</b>：它在日志之外还带上应用版本、安卓/WebView 版本、
+        网络方式和你当前的所有相关设置（<b>API Key 已打码，提示词只留开头</b>）。
+        一条日志看不出问题的时候，这个能定位到根因。
+      </div>
       <div id="calllog-list"></div>
       <div id="calllog-empty" class="tip" style="text-align:center;padding:20px 0" hidden>
         还没有任何调用记录。生成一次后这里就会出现。

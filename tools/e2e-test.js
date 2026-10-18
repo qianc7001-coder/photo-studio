@@ -73,8 +73,19 @@ function parseMultipart(headers, buf) {
     const nm = /name="([^"]+)"/.exec(head);
     if (!nm) continue;
     const fm = /filename="([^"]+)"/.exec(head);
-    if (fm) out.files[nm[1]] = { name: fm[1], data: body, length: body.length };
-    else out.fields[nm[1]] = body.toString('utf8').replace(/\r\n$/, '');
+    if (fm) {
+      // 同名多文件必须**全部保留** —— 之前直接覆盖，只剩最后一个。
+      // 而「主图 + 参考图都叫 image[]」正是要验证的场景：
+      // 覆盖之后无论字段对不对都只能看到一个，断言就永远成立（假绿）。
+      out.files[nm[1]] = { name: fm[1], data: body, length: body.length };
+      if (!out.fileList) out.fileList = [];
+      out.fileList.push({ field: nm[1], name: fm[1], data: body, length: body.length });
+      if (!out.fileFields) out.fileFields = {};
+      if (!out.fileFields[nm[1]]) out.fileFields[nm[1]] = [];
+      out.fileFields[nm[1]].push({ name: fm[1], data: body, length: body.length });
+    } else {
+      out.fields[nm[1]] = body.toString('utf8').replace(/\r\n$/, '');
+    }
   }
   return out;
 }
@@ -6813,6 +6824,208 @@ async function run() {
     t('★ 每个二级页都能进且都有返回', allOk, ids);
 
     api.closeSettings();
+    await sleep(120);
+  }
+
+  /* ---------- 日志详情 + 诊断包 ---------- */
+  console.log('\n【59】日志详情与诊断包：能排查问题且不泄密');
+  {
+    const api = window.__PS_API;
+
+    // 造一条带参考图的真实调用日志
+    S.callLog = [];
+    api.recordCallLog({
+      at: Date.now(), ms: 3200, ok: true, status: 200,
+      provider: 'openai', model: 'gpt-image-2', kind: 'edit',
+      prompt: '把这块背景换成傍晚的海边，光线自然一点', promptLen: 22,
+      transport: 'multipart', imageField: 'image[]',
+      refCount: 2, refUsed: 2, guideCount: 1,
+      endpoint: 'https://api.openai.com/v1/images/edits',
+      bodyBytes: 3145728, imgW: 1024, imgH: 1024, imgBytes: 180000,
+      costUsd: 0.04, costNote: '按次计费', workId: 'w1'
+    });
+    api.recordCallLog({
+      at: Date.now(), ms: 800, ok: false, status: 400,
+      provider: 'openai', model: 'gpt-image-2', kind: 'edit',
+      prompt: '失败的这次', transport: 'multipart', imageField: 'image',
+      refCount: 2, refUsed: 0, error: '模型额度超了', workId: 'w1'
+    });
+    await sleep(120);
+    t('日志已记录 2 条', api.callLog().length === 2, api.callLog().length);
+
+    // ---- 1) 详情可展开 ----
+    api.openCallLog();
+    await sleep(250);
+    t('日志面板已打开', doc.getElementById('calllog').hidden === false);
+    const moreBtns = doc.querySelectorAll('#calllog-list .cl-more');
+    t('★ 每条日志都有「查看详情」', moreBtns.length === 2, moreBtns.length);
+    // 注意：日志按「最新在前」排列，所以 [0] 是后记的那条（失败），[1] 是成功的。
+    // 断言必须按这个顺序来，否则会拿错条目、得到莫名其妙的结论。
+    t('★★ 详情默认收起（不淹掉列表）', (() => {
+      const boxes = doc.querySelectorAll('#calllog-list .cl-detail');
+      return boxes.length === 2 && Array.prototype.every.call(boxes, (b) => b.hidden === true);
+    })());
+
+    // 展开成功那条（索引 1：最新在前）
+    moreBtns[1].dispatchEvent(new window.Event('click'));
+    await sleep(150);
+    const box0 = doc.querySelectorAll('#calllog-list .cl-detail')[1];
+    t('★ 点击后详情展开', box0.hidden === false);
+    t('★ 详情里有「请求方式」（排查第一步）', /请求方式/.test(box0.textContent), box0.textContent.slice(0, 80));
+    t('★ 详情里有「参考图」去向', /参考图/.test(box0.textContent));
+    t('详情里有图片字段名', /图片字段/.test(box0.textContent));
+    t('详情里有请求体大小', /请求体大小/.test(box0.textContent));
+    t('按钮文案变成「收起详情」', /收起/.test(moreBtns[1].textContent), moreBtns[1].textContent);
+
+    // 再点收起
+    moreBtns[1].dispatchEvent(new window.Event('click'));
+    await sleep(120);
+    t('再点一次能收起', doc.querySelectorAll('#calllog-list .cl-detail')[1].hidden === true);
+
+    // 失败那条（索引 0）：参考图没发出去必须告警
+    moreBtns[0].dispatchEvent(new window.Event('click'));
+    await sleep(150);
+    const box1 = doc.querySelectorAll('#calllog-list .cl-detail')[0];
+    t('★★ 失败的日志里能看出参考图一张都没发',
+      /一张都没发出去|不支持/.test(box1.textContent), box1.textContent.slice(0, 120));
+    t('★ 可疑项被标红（warn 类）',
+      box1.querySelectorAll('.cl-detail-v.warn').length > 0,
+      box1.querySelectorAll('.cl-detail-v.warn').length);
+
+    // ---- 2) 诊断包 ----
+    t('有「导出诊断包」按钮', !!doc.getElementById('calllog-export-diag'));
+
+    // 设置一把假 key，验证脱敏
+    S.cfg.apiKey = 'sk-abcdefghijklmnopqrstuvwxyz123456';
+    S.cfg.provider = 'openai';
+    S.cfg.model = 'gpt-image-2';
+    S.cfg.baseUrl = 'https://api.openai.com/v1';
+    const bundle = api.buildDiagnosticBundle();
+    const json = JSON.stringify(bundle);
+
+    t('★ 诊断包含日志', Array.isArray(bundle.logs) && bundle.logs.length === 2, bundle.logs && bundle.logs.length);
+    t('★ 含环境信息（版本/UA/WebView）',
+      !!bundle.env && !!bundle.env.appVersion && 'userAgent' in bundle.env && 'webview' in bundle.env,
+      bundle.env && Object.keys(bundle.env));
+    t('★ 含影响出图的配置', !!bundle.cfg && 'contextPct' in bundle.cfg && 'maxRes' in bundle.cfg);
+
+    // 脱敏是硬要求
+    t('★★ API Key 不出现在诊断包里', json.indexOf('sk-abcdefghijklmnopqrstuvwxyz123456') < 0);
+    t('★★ Key 打码后保留头尾（便于确认用错没）',
+      /sk-a\*\*\*\*3456/.test(bundle.cfg.apiKeyMasked), bundle.cfg.apiKeyMasked);
+    t('★★ 提示词被截断（不留全文）', (() => {
+      const p = bundle.logs[0].prompt || '';
+      return p.length <= 41 && (p.length < 22 || /…$/.test(p));
+    })(), bundle.logs[0] && bundle.logs[0].prompt);
+    t('诊断包说明了自己是什么', /诊断包/.test(String(bundle._readme)));
+    t('带导出时间', !!bundle.exportedAt);
+    t('含统计', !!bundle.stats && typeof bundle.stats.count === 'number');
+
+    // ---- 3) 导出的三种格式都可调用（不真的写盘） ----
+    t('导出 JSON 函数在', typeof api.exportCallLog === 'function');
+    t('导出诊断包函数在', typeof api.exportDiagnostics === 'function');
+    t('文本导出也在', (() => {
+      const txt = window.PSCore.callLogToText(api.callLog(), { now: Date.now(), version: 'x' });
+      return typeof txt === 'string' && txt.length > 0;
+    })());
+
+    api.closeCallLog();
+    await sleep(120);
+    S.callLog = [];
+  }
+
+  /* ---------- 参考图 × gpt-image 系：字段必须统一 ---------- */
+  console.log('\n【60】参考图配 OpenAI 模型：字段名必须统一（否则参考图静默失效）');
+  {
+    const api = window.__PS_API;
+    S.jobs = [];
+    api.goHome();
+    await sleep(120);
+
+    {
+      const c = napi.createCanvas(400, 300);
+      const cx0 = c.getContext('2d');
+      cx0.fillStyle = 'rgb(80, 100, 120)';
+      cx0.fillRect(0, 0, 400, 300);
+      const inp = doc.getElementById('file-input');
+      Object.defineProperty(inp, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'mp.png', { type: 'image/png' })],
+        configurable: true
+      });
+      inp.dispatchEvent(new window.Event('change'));
+      await sleep(400);
+    }
+    S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.contextPct = 0;
+    S.cfg.upscaleSmall = false; S.cfg.autoGrade = false;
+    window.confirm = () => true;
+
+    // 走 OpenAI 系（multipart 路径）
+    S.cfg.provider = 'openai';
+    S.cfg.baseUrl = 'https://api.openai.com/v1';
+    S.cfg.model = 'gpt-image-2';
+    api.clearRefImages();
+
+    const mkPng = (color) => {
+      const c = napi.createCanvas(120, 90);
+      const x = c.getContext('2d');
+      x.fillStyle = color;
+      x.fillRect(0, 0, 120, 90);
+      return new Uint8Array(c.toBuffer('image/png'));
+    };
+    const ri = doc.getElementById('ref-input');
+    Object.defineProperty(ri, 'files', {
+      value: [new window.File([mkPng('rgb(210,30,30)')], 'r1.png', { type: 'image/png' })],
+      configurable: true
+    });
+    ri.dispatchEvent(new window.Event('change'));
+    await sleep(600);
+    t('参考图已加上', api.refImages().length === 1, api.refImages().length);
+
+    S.rect = { x: 40, y: 40, w: 160, h: 120 };
+    doc.getElementById('prompt').value = 'multipart 参考图测试';
+    const before = fake.seen.length;
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 15000);
+    {
+      const tw = Date.now();
+      while (!S.pending && S.jobs.some((j) => j.status === 'running') && Date.now() - tw < 15000) await sleep(100);
+    }
+
+    const sent = fake.seen.slice(before).filter((x) => x.multipart || (x.body && x.body.prompt));
+    t('发起了 multipart 请求', sent.length > 0, sent.length);
+    if (sent.length) {
+      const mp = sent[0].multipart || {};
+      // 用 fileList（保留同名多文件）；老桩只有 files 时退回它
+      const files = mp.fileList || Object.values(mp.files || {}).map((f) => ({ field: f.name, name: f.name }));
+      const imgFiles = files.filter((f) => /image/.test(f.field || f.name || ''));
+      const fieldNames = imgFiles.map((f) => f.field).filter(Boolean);
+      t('★★ 所有图片字段名一致（都带 []）',
+        fieldNames.length >= 2 && fieldNames.every((n) => n === 'image[]'), fieldNames);
+      t('★★ 主图 + 1 张参考图 = 2 个 image[] 文件', imgFiles.length === 2, imgFiles.length);
+      t('请求里没有混用的单数 image 字段',
+        fieldNames.indexOf('image') < 0, fieldNames);
+      t('两张图的内容不同（主图与参考图确实是两张）', (() => {
+        if (imgFiles.length < 2) return false;
+        return imgFiles[0].data.length > 0 && imgFiles[1].data.length > 0 &&
+          !imgFiles[0].data.equals(imgFiles[1].data);
+      })());
+    }
+
+    if (S.pending) { doc.getElementById('cmp-discard').dispatchEvent(new window.Event('click')); await sleep(120); }
+
+    // 日志里应该能看出这次是 multipart + image[]
+    const last = api.callLog()[0];
+    t('★ 日志记下了 multipart 传输方式', last && last.transport === 'multipart', last && last.transport);
+    t('★★ 日志记下了实际字段名 image[]', last && last.imageField === 'image[]', last && last.imageField);
+    t('★ 日志记下了参考图张数', last && last.refCount === 1 && last.refUsed === 1,
+      last && [last.refCount, last.refUsed]);
+    t('★ 日志记下了请求体大小（>0）', last && last.bodyBytes > 0, last && last.bodyBytes);
+
+    api.clearRefImages();
+    S.cfg.provider = 'siliconflow';
+    S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
+    S.cfg.model = 'Qwen/Qwen-Image-Edit';
+    api.goHome();
     await sleep(120);
   }
 

@@ -1244,10 +1244,53 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
   overflow: hidden;
 }
 .cl-error {
-  font-size: 11.5px; color: #ffb0b0;
+  font-size: 11.5px; color: var(--danger-text);
   margin-top: 5px;
   word-break: break-word;
 }
+
+/* 日志详情：默认收起，点一下展开。
+   排查要看的是「请求到底长什么样」，但那信息量大，
+   全铺开会把列表淹掉，所以默认收着。 */
+.cl-more {
+  margin-top: 7px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+}
+.cl-more:active { background: var(--press); }
+.cl-detail {
+  margin-top: 7px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+}
+.cl-detail-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 2px 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.cl-detail-k {
+  flex: 0 0 auto;
+  min-width: 68px;
+  color: var(--text-faint);
+}
+.cl-detail-v {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+/* 可疑值标红：排查时一眼就能看到哪项不对 */
+.cl-detail-v.warn { color: var(--danger-text); }
 
 .lib-day {
   font-size: 11px; font-weight: 600; letter-spacing: .6px;
