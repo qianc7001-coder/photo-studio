@@ -2250,6 +2250,53 @@ console.log('\n【发布】历史版本必须可下载（README 与归档一致�
 })();
 // ===== 通知可用性结束 =====
 
+
+/* ===== 底部/顶部提示条不该常驻 =====
+ * 用户反馈：「某某在后台已生成的弹窗字样，不要一直悬浮在界面上，几秒后消失即可」。
+ * 关键区分：**结果型**提示（已生成/失败）要自动收，
+ * **进行中**提示（正在生成）绝不能自动收 —— 否则用户以为后台停了。
+ */
+(function () {
+  console.log('\n【提示条自动消失】');
+  const fsJ = require('fs');
+  const js = fsJ.readFileSync(__dirname + '/../app/app.js', 'utf8');
+
+  t('有自动隐藏的调度函数', /function scheduleBadgeAutoHide\(/.test(js));
+  t('结果型提示会排自动隐藏', /scheduleBadgeAutoHide\(b\);/.test(js));
+  t('★ 只有「没有任务在跑」时才自动隐藏',
+    /const isResult = b && b\.running === 0 && \(b\.done > 0 \|\| b\.failed > 0\)/.test(js));
+  t('★ 正在生成时明确不清计时器/不隐藏', (() => {
+    const fn = js.slice(js.indexOf('function scheduleBadgeAutoHide'),
+      js.indexOf('/** 任务完成后清掉「已看过」的标记'));
+    // 进行中分支应当把计时器清掉并返回，而不是排一个隐藏
+    return /if \(!isResult\) \{[\s\S]{0,200}clearTimeout\(badgeHideTimer\)[\s\S]{0,120}return;/.test(fn);
+  })());
+  t('隐藏延迟是「几秒」量级（不超 6 秒）', (() => {
+    const m = /\}, (\d{3,5})\);\s*\n\s*\}/.exec(js.slice(js.indexOf('function scheduleBadgeAutoHide'),
+      js.indexOf('/** 任务完成后清掉「已看过」的标记')));
+    const ms = m ? Number(m[1]) : 0;
+    return ms >= 1500 && ms <= 6000;
+  })());
+  t('同一条提示藏过之后不再冒出来', /badgeDismissedText\b/.test(js));
+  t('隐藏前再确认一次状态（期间又开始生成就不藏）',
+    /const nb = C\.planJobBadge\(S\.jobs\);/.test(js));
+})();
+
+/* ===== 缩放：± 按钮已移除 ===== */
+(function () {
+  console.log('\n【双指缩放替代按钮】');
+  const fsJ = require('fs');
+  const js = fsJ.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html = fsJ.readFileSync(__dirname + '/../app/index.html', 'utf8');
+
+  t('HTML 里没有 zoom-in 按钮', !/id="zoom-in"/.test(html));
+  t('HTML 里没有 zoom-out 按钮', !/id="zoom-out"/.test(html));
+  t('百分比标签保留（可点复位）', /id="zoom-label"/.test(html));
+  t('绑定处做了判空（元素不在也不崩）',
+    /if \(\$\('zoom-in'\)\) \$\('zoom-in'\)\.onclick/.test(js));
+  t('双指缩放实现仍在', /S\.pointers\.size === 2/.test(js) && /type: 'pinch'/.test(js));
+})();
+
 /* ---------- 检查更新 ---------- */
 console.log('\n【更新】应用内检测新版本（不能依赖 /releases/latest）');
 

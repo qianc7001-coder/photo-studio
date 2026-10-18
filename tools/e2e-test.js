@@ -1670,10 +1670,22 @@ async function run() {
 
   /* ---------- 缩放平移 ---------- */
   console.log('\n【11】缩放 / 平移 / 工具');
+  // ± 按钮已移除（用户要求：双指缩放更好用，左下角小按钮容易误触）。
+  // 这里改成真的用双指手势验证缩放 —— 也更贴近真实交互。
   const s0 = S.view.scale;
-  doc.getElementById('zoom-in').dispatchEvent(new window.Event('click'));
+  t('左下角没有 ± 缩放按钮了',
+    doc.getElementById('zoom-in') === null && doc.getElementById('zoom-out') === null);
+  t('百分比标签还在（点一下复位）', !!doc.getElementById('zoom-label'));
+  ptr('pointerdown', 380, 300, 21);
+  ptr('pointerdown', 420, 300, 22);
+  await sleep(20);
+  ptr('pointermove', 350, 300, 21);
+  ptr('pointermove', 460, 300, 22);
   await sleep(30);
-  t('放大生效', S.view.scale > s0, [s0, S.view.scale]);
+  ptr('pointerup', 350, 300, 21);
+  ptr('pointerup', 460, 300, 22);
+  await sleep(60);
+  t('★ 双指捏合能放大（按钮没了也有替代）', S.view.scale > s0, [s0, S.view.scale]);
   doc.getElementById('btn-fit').dispatchEvent(new window.Event('click'));
   await sleep(30);
   // 按当前文档尺寸计算期望的适配比例（不再硬编码，避免受前面用例换图影响）
@@ -6412,6 +6424,149 @@ async function run() {
     // 5) 收尾
     row.dispatchEvent(new window.Event('change'));
     await sleep(200);
+    api.goHome();
+    await sleep(150);
+  }
+
+  /* ---------- 参考图：额外发给模型的图 ---------- */
+  console.log('\n【56】参考图：能加、能删、真的发出去');
+  {
+    const api = window.__PS_API;
+    S.library = [];
+    window.localStorage.removeItem('photoStudio.library.v1');
+    api.saveLibrary();
+    S.jobs = [];
+    api.goHome();
+    await sleep(150);
+
+    // 主照片
+    {
+      const c = napi.createCanvas(400, 300);
+      const cx0 = c.getContext('2d');
+      cx0.fillStyle = 'rgb(70, 90, 110)';
+      cx0.fillRect(0, 0, 400, 300);
+      const inp = doc.getElementById('file-input');
+      Object.defineProperty(inp, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'refmain.png', { type: 'image/png' })],
+        configurable: true
+      });
+      inp.dispatchEvent(new window.Event('change'));
+      await sleep(400);
+    }
+    t('主照片已载入', S.imgW === 400, S.imgW);
+    S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.contextPct = 0;
+    S.cfg.upscaleSmall = false; S.cfg.autoGrade = false;
+    // 用多图版模型，才能验证「多张一起发」
+    S.cfg.provider = 'siliconflow';
+    S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
+    S.cfg.model = 'Qwen/Qwen-Image-Edit-2509';
+    window.confirm = () => true;
+
+    t('界面上有「加参考图」按钮', !!doc.getElementById('btn-add-ref'));
+    t('有隐藏的多选文件输入', !!doc.getElementById('ref-input'));
+
+    // 加两张参考图（走真实解析路径）
+    const mkPng = (color) => {
+      const c = napi.createCanvas(120, 90);
+      const x = c.getContext('2d');
+      x.fillStyle = color;
+      x.fillRect(0, 0, 120, 90);
+      return new Uint8Array(c.toBuffer('image/png'));
+    };
+    const refInput = doc.getElementById('ref-input');
+    Object.defineProperty(refInput, 'files', {
+      value: [
+        new window.File([mkPng('rgb(200,40,40)')], 'ref-a.png', { type: 'image/png' }),
+        new window.File([mkPng('rgb(40,180,60)')], 'ref-b.png', { type: 'image/png' })
+      ],
+      configurable: true
+    });
+    refInput.dispatchEvent(new window.Event('change'));
+    await sleep(600);
+
+    t('★ 参考图加进来了（2 张）', api.refImages().length === 2, api.refImages().length);
+    t('每张都压成了 dataUrl',
+      api.refImages().every((r) => /^data:image\//.test(r.dataUrl)),
+      api.refImages().map((r) => String(r.dataUrl).slice(0, 20)));
+    t('每张都有缩略图', api.refImages().every((r) => !!r.thumb));
+    t('界面渲染出 2 个缩略图',
+      doc.querySelectorAll('#ref-list .ref-thumb').length === 2,
+      doc.querySelectorAll('#ref-list .ref-thumb').length);
+
+    // 生成：请求里必须真的带上参考图
+    S.rect = { x: 40, y: 40, w: 160, h: 120 };
+    doc.getElementById('prompt').value = '参考图测试';
+    const before = fake.seen.length;
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 15000);
+    {
+      const tw = Date.now();
+      while (!S.pending && S.jobs.some((j) => j.status === 'running') && Date.now() - tw < 15000) await sleep(100);
+    }
+    const reqs = fake.seen.slice(before).filter((x) => x.body && x.body.prompt);
+    console.log('[DBG56] mode=', S.mode, 'rect=', JSON.stringify(S.rect), 'busy=', S.busy,
+      'pending=', !!S.pending, 'edits=', S.edits.length,
+      'errPanel=', (function(){var e=doc.getElementById('gen-error');return e&&!e.hidden?e.textContent.slice(0,100):'hidden';})());
+    t('发起了请求', reqs.length > 0, reqs.length);
+    if (reqs.length) {
+      const b = reqs[0].body;
+      t('★ 请求里带了 images 数组', Array.isArray(b.images), Object.keys(b));
+      t('★ 数组里是主图 + 2 张参考图（共 3）',
+        Array.isArray(b.images) && b.images.length === 3,
+        b.images && b.images.length);
+      t('第一张是要修改的原图',
+        (b.images || [])[0] && /^data:image/.test(b.images[0]));
+      t('不再有单数 image 字段（避免歧义）', !('image' in b));
+    }
+    // 关键回归：lastRefNote 曾经被声明在 prepareJob **之后**，
+    // 于是「加了参考图」时会在赋值处抛 ReferenceError（暂时性死区）——
+    // 不加参考图一切正常，一加就崩，极难发现。这里直接验证它被赋值了。
+    t('★ 参考图信息被记录（不会撞暂时性死区）',
+      /已带 2 张/.test(String(api.lastRefNote ? api.lastRefNote() : api.refNote ? api.refNote() : '')),
+      api.lastRefNote && api.lastRefNote());
+
+    if (S.pending) { doc.getElementById('cmp-discard').dispatchEvent(new window.Event('click')); await sleep(100); }
+
+    // 删掉一张
+    const delBtn = doc.querySelector('#ref-list .ref-del');
+    t('缩略图上有删除按钮', !!delBtn);
+    delBtn.dispatchEvent(new window.Event('click'));
+    await sleep(200);
+    t('★ 点叉能删掉一张', api.refImages().length === 1, api.refImages().length);
+
+    // 换成不支持参考图的模型：要能提示
+    S.cfg.model = 'black-forest-labs/FLUX.1-Kontext-pro';
+    api.renderRefImages();
+    await sleep(120);
+    t('不支持参考图的模型会提示',
+      (() => {
+        const n = doc.getElementById('ref-note');
+        return n && !n.hidden && /不支持参考图/.test(n.textContent);
+      })(),
+      doc.getElementById('ref-note') && doc.getElementById('ref-note').textContent);
+    t('不支持时「加参考图」按钮被禁用',
+      doc.getElementById('btn-add-ref').disabled === true);
+
+    // 换图必须清空参考图
+    S.cfg.model = 'Qwen/Qwen-Image-Edit-2509';
+    {
+      const c = napi.createCanvas(400, 300);
+      const cx0 = c.getContext('2d');
+      cx0.fillStyle = 'rgb(20, 20, 20)';
+      cx0.fillRect(0, 0, 400, 300);
+      const inp = doc.getElementById('file-input');
+      Object.defineProperty(inp, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'refnext.png', { type: 'image/png' })],
+        configurable: true
+      });
+      inp.dispatchEvent(new window.Event('change'));
+      await sleep(400);
+    }
+    t('★ 换图后参考图自动清空（不会带到下一张）',
+      api.refImages().length === 0, api.refImages().length);
+
+    S.cfg.provider = 'siliconflow';
+    S.cfg.model = 'Qwen/Qwen-Image-Edit';
     api.goHome();
     await sleep(150);
   }

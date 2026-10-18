@@ -428,6 +428,66 @@ ul.whatsnew li { margin-bottom: 5px; }
   display: block;
   padding: 2px 12px 8px;
 }
+/* =============================================================================
+ * 参考图（发给模型让它「照这个改」的额外图）
+ * ========================================================================== */
+.ref-row {
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+#btn-add-ref { flex: 0 0 auto; }
+.chip-ico {
+  width: 12px; height: 12px;
+  fill: none; stroke: currentColor; stroke-width: 2.4;
+  stroke-linecap: round; margin-right: 4px;
+  vertical-align: -1px;
+}
+.ref-list {
+  display: flex;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 1px 0;
+}
+.ref-list::-webkit-scrollbar { display: none; }
+/* 一张参考图的缩略图：右上角一个删除叉 */
+.ref-thumb {
+  position: relative;
+  flex: 0 0 auto;
+  width: 40px; height: 40px;
+  border-radius: 7px;
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  background: var(--panel-2);
+}
+.ref-thumb img {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.ref-del {
+  position: absolute;
+  top: 0; right: 0;
+  width: 16px; height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 0 0 0 6px;
+  background: rgba(0, 0, 0, .62);
+  color: #fff;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+}
+.ref-note {
+  flex: 1 1 100%;
+  font-size: 11px;
+  color: var(--text-faint);
+  line-height: 1.4;
+}
+
 #grade-sliders {
   display: grid;
   /* 单列通栏。

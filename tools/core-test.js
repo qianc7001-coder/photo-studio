@@ -4001,6 +4001,84 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
 })();
 // ===== 调色新参数结束 =====
 
+
+/* ===== 参考图：额外发给模型的图 =====
+ * 各家接口收参考图的方式完全不同，传错会**静默失效**：
+ * 出图看着正常，但模型根本没参考你给的图。所以这里把字段名钉死。
+ */
+(function () {
+  console.log('\n【参考图】');
+  const MAIN = 'data:image/jpeg;base64,MAIN';
+  const R1 = 'data:image/jpeg;base64,REF1';
+  const R2 = 'data:image/jpeg;base64,REF2';
+  const base = () => ({
+    baseUrl: 'https://api.siliconflow.cn/v1', apiKey: 'k',
+    prompt: 'x', imageDataUrl: MAIN, size: '1328x1328', kind: 'edit',
+    sizeMode: 'image_size', providerId: 'siliconflow'
+  });
+  const req = (extra) => C.buildImageRequest(Object.assign(base(), extra));
+
+  // 1) 能力表
+  t('OpenAI 系收多张（multipart 数组）', (() => {
+    const c = C.refCapability('gpt-image-1', 'openai');
+    return c.max >= 2 && c.mode === 'multipartArray';
+  })());
+  t('硅基的多图版收数组', (() => {
+    const c = C.refCapability('Qwen/Qwen-Image-Edit-2509', 'siliconflow');
+    return c.mode === 'jsonArray' && c.field === 'images';
+  })());
+  t('硅基的普通版只收 1 张', (() => {
+    const c = C.refCapability('Qwen/Qwen-Image-Edit', 'siliconflow');
+    return c.max === 1 && c.mode === 'jsonSingle';
+  })());
+  t('Kontext 一张都不收', (() => {
+    const c = C.refCapability('black-forest-labs/FLUX.1-Kontext-pro', 'siliconflow');
+    return c.max === 0 && c.mode === 'none';
+  })());
+  t('上限不超过全局 REF_MAX', (() => {
+    return C.PRESET_MAX > 0 && C.REF_MAX > 0 && C.REF_MAX <= 4;
+  })());
+
+  // 2) 多图版：主图 + 参考图一起进 images 数组
+  const r1 = req({ model: 'Qwen/Qwen-Image-Edit-2509', imageField: 'image', refDataUrls: [R1, R2] });
+  t('多图版把主图放进 images 第一位', r1.body.images[0] === MAIN, r1.body.images && r1.body.images[0]);
+  t('多图版参考图跟在后面', r1.body.images[1] === R1 && r1.body.images[2] === R2);
+  t('多图版不再保留单数 image 字段（避免歧义）', !('image' in r1.body));
+  t('多图版如实上报用了 2 张', r1.refUsed === 2 && r1.refCapped === 0, [r1.refUsed, r1.refCapped]);
+
+  // 3) 单图版：**绝不能覆盖主图**（这是最容易犯的错）
+  const r2 = req({ model: 'Qwen/Qwen-Image-Edit', imageField: 'image', refDataUrls: [R1, R2] });
+  t('★ 单图版主图不被覆盖', r2.body.image === MAIN, r2.body.image);
+  t('单图版参考图另放 ref_image', r2.body.ref_image === R1, r2.body.ref_image);
+  t('★ 单图版如实上报「只用了 1 张」', r2.refUsed === 1 && r2.refCapped === 1, [r2.refUsed, r2.refCapped]);
+
+  // 4) 不支持的模型：不动 body，也不假装成功
+  const r3 = req({ model: 'black-forest-labs/FLUX.1-Kontext-pro', imageField: 'input_image', providerId: 'siliconflow', refDataUrls: [R1] });
+  t('不支持时参考图不塞进 body', !('images' in r3.body) && !('ref_image' in r3.body));
+  t('不支持时如实上报（used=0）', r3.refUsed === 0 && r3.refCapped === 1, [r3.refUsed, r3.refCapped]);
+  t('不支持时主图仍在', r3.body.input_image === MAIN);
+
+  // 5) 没有参考图时行为完全不变（回归保护）
+  const r4 = req({ model: 'Qwen/Qwen-Image-Edit', imageField: 'image' });
+  t('不加参考图时不动 body', !('images' in r4.body) && !('ref_image' in r4.body));
+  t('不加参考图时 image 就是主图', r4.body.image === MAIN);
+  t('不加参考图时 refUsed=0', !r4.refUsed && !r4.refCapped);
+
+  // 6) 超出上限要截断而不是全发
+  const many = [R1, R2, R1, R2, R1, R2];
+  const r5 = req({ model: 'Qwen/Qwen-Image-Edit-2509', imageField: 'image', refDataUrls: many });
+  t('超出上限会截断', r5.body.images.length === 1 + C.REF_MAX, r5.body.images.length);
+  t('截断后如实上报被丢掉几张', r5.refCapped === many.length - C.REF_MAX, r5.refCapped);
+
+  // 7) multipart 里参考图用 image[] 字段
+  const fsR = require('fs');
+  const core = fsR.readFileSync(__dirname + '/../app/core.js', 'utf8');
+  const mpFn = core.slice(core.indexOf('function buildMultipartBody'), core.indexOf('function parseImageResponse'));
+  t('★ multipart 参考图用 image[] 字段', /file\('image\[\]'/.test(mpFn));
+  t('★ multipart 主图字段可配置（不写死 image）', /o\.imageField \|\| 'image'/.test(mpFn));
+})();
+// ===== 参考图结束 =====
+
 /* ---------- 检查更新 ---------- */
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

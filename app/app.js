@@ -826,6 +826,140 @@
     } catch (e) { /* 极老内核不支持 Event 构造，忽略即可 */ }
   }
 
+  /* ============================ 参考图 ============================
+   *
+   * 用户可以在「加参考图」里放几张贴图，请求时和原图一起发给模型，
+   * 让它「照这个改」（换衣服、换姿势、参考风格）。
+   *
+   * 三个必须处理好的点：
+   *   1) 体积：参考图可能是相机直出的大图，原样发会让请求变慢甚至被拒。
+   *      统一压到长边 1280、JPEG 0.85（对「照着改」这个用途完全够）。
+   *   2) 数量：不同模型能收的张数不同（Kontext 一张都收不了）。
+   *      超出的部分要**明确告诉用户**，不能静默丢掉。
+   *   3) 生命周期：参考图属于「这一次生成」，换图/回首页必须清掉 ——
+   *      否则下次修别的照片会莫名带上上一次的参考图。
+   */
+
+  /** 当前挂着的参考图：{ dataUrl, thumb, name } */
+  let refImages = [];
+
+  /**
+   * 本次请求带了几张参考图（供「请求自检」面板显示）。
+   * 声明必须在这里 —— prepareJob 里会写它，而 prepareJob 在文件更后面；
+   * 用 let 声明在下面会撞上暂时性死区（ReferenceError），
+   * 而且只在「确实加了参考图」时才触发，很难在开发时发现。
+   */
+  let lastRefNote = '';
+
+  /** 参考图压缩后的长边上限（对「照着改」够用，又能压住体积） */
+  const REF_MAX_SIDE = 1280;
+
+  /** 把一张 File 压成 base64 的小图 */
+  async function readRefImage(file) {
+    const blob = file;
+    let bmp;
+    try {
+      bmp = await decodeToWorkSize(blob, REF_MAX_SIDE);
+    } catch (e) {
+      return null;
+    }
+    const w = bmp.width, h = bmp.height;
+    const scale = Math.min(1, REF_MAX_SIDE / Math.max(w, h));
+    const cw = Math.max(1, Math.round(w * scale));
+    const ch = Math.max(1, Math.round(h * scale));
+    const c = makeCanvas(cw, ch);
+    const cx = c.getContext('2d');
+    cx.imageSmoothingQuality = 'high';
+    cx.drawImage(bmp, 0, 0, cw, ch);
+    return {
+      dataUrl: canvasToDataUrl(c, 'image/jpeg', 0.85),
+      thumb: canvasToDataUrl(c, 'image/jpeg', 0.6),
+      name: file.name || '参考图'
+    };
+  }
+
+  /** 当前模型能收几张参考图 */
+  function refLimit() {
+    const cap = C.refCapability(S.cfg.model, S.cfg.provider);
+    return cap;
+  }
+
+  /** 把参考图列表画到界面上 */
+  function renderRefImages() {
+    const list = $('ref-list');
+    const note = $('ref-note');
+    const cap = refLimit();
+    if (!list) return;
+    list.innerHTML = '';
+    refImages.forEach((r, i) => {
+      const box = document.createElement('div');
+      box.className = 'ref-thumb';
+      const img = document.createElement('img');
+      img.src = r.thumb || r.dataUrl;
+      img.alt = r.name || ('参考图 ' + (i + 1));
+      box.appendChild(img);
+      const del = document.createElement('button');
+      del.className = 'ref-del';
+      del.type = 'button';
+      del.textContent = '×';
+      del.setAttribute('aria-label', '移除这张参考图');
+      del.onclick = () => {
+        refImages.splice(i, 1);
+        renderRefImages();
+      };
+      box.appendChild(del);
+      list.appendChild(box);
+    });
+    // 说明：能不能加、能加几张，必须提前说清楚。
+    // 等用户加了 3 张才发现只发出去 1 张，等于骗他。
+    if (note) {
+      if (cap.max <= 0) {
+        note.hidden = false;
+        note.textContent = '当前模型不支持参考图' +
+          (/kontext/.test(String(S.cfg.model).toLowerCase()) ? '（FLUX Kontext 只能收一张原图）' : '') +
+          '，换一个模型才能用。';
+      } else if (refImages.length === 0) {
+        note.hidden = true;
+      } else if (refImages.length > cap.max) {
+        note.hidden = false;
+        note.textContent = '这个模型最多收 ' + cap.max + ' 张参考图，' +
+          '多出的 ' + (refImages.length - cap.max) + ' 张不会发出去。';
+      } else {
+        note.hidden = true;
+      }
+    }
+    if ($('btn-add-ref')) {
+      $('btn-add-ref').disabled = cap.max <= 0 || refImages.length >= C.REF_MAX;
+    }
+  }
+
+  /** 加一批参考图（多选） */
+  async function addRefImages(files) {
+    const cap = refLimit();
+    if (cap.max <= 0) {
+      toast('当前模型不支持参考图，先在设置里换一个模型', 3200);
+      return;
+    }
+    const arr = Array.prototype.slice.call(files || []);
+    if (!arr.length) return;
+    let added = 0;
+    for (const f of arr) {
+      if (refImages.length >= C.REF_MAX) break;
+      if (!/^image\//.test(f.type || '')) continue;
+      const r = await readRefImage(f);
+      if (r) { refImages.push(r); added++; }
+    }
+    renderRefImages();
+    if (added) toast('已加 ' + added + ' 张参考图（会一起发给模型）', 2600);
+  }
+
+  /** 清空参考图（换图/回首页时调用） */
+  function clearRefImages() {
+    if (!refImages.length) return;
+    refImages = [];
+    renderRefImages();
+  }
+
   function setBusy(on, title, sub) {
     S.busy = on;
     $('busy').hidden = !on;
@@ -1217,6 +1351,9 @@
     S.rect = null;
     S.strokes = [];
     S.guides = [];       // 引导线跟着选区走，换图必须清掉
+    // 参考图也属于「这一次生成」，换图必须清 ——
+    // 否则下次修另一张照片时会莫名带上上一次的参考图，而用户完全没发现。
+    clearRefImages();
     S.pending = null;
     updateGuideBadge();
     S.docVersion++;      // 旧文档的生成结果一律作废
@@ -2817,6 +2954,9 @@
     // 所以现在只有一条规则：画了引导线就画进请求图。
     const strokeOn = jobGuides.length > 0;
     let strokeNote = '';
+    // 每次组图都先把参考图记录清空，避免上一次的残留
+    // （比如上次带了 2 张、这次没带，自检面板不该还写着「已带 2 张」）
+    lastRefNote = '';
     if (strokeOn) {
       // 引导线的坐标是相对**整个选区**存的，换算时必须以选区为基准。
       // 基准由调用方传入（见函数注释：不能读模块级的 lastSelRect）
@@ -3059,11 +3199,52 @@
       badge.classList.toggle('ok', b.running === 0 && b.done > 0);
       // 点一下：有结果就回首页看（结果都在作品库里）
       badge.onclick = () => { if (!S.img) renderHome(); else toast(b.text, 2600); };
+      // 「已生成」这类**结果性**提示不要一直挂在画面上 ——
+      // 用户反馈它会一直悬浮着挡视线。几秒后自动收起。
+      // 「正在生成」属于进行中状态，必须保留（否则用户不知道后台还在跑）。
+      scheduleBadgeAutoHide(b);
     }
     // 首页与作品库的条目标记（「生成中…」/「已生成，点开看」）
     if (isHomeVisible()) renderHome();
     if ($('library') && !$('library').hidden) renderLibrary();
     updateUI();
+  }
+
+  /**
+   * 结果型状态条（已生成 / 生成失败）自动隐藏。
+   *
+   * 判据是「没有任务在跑」—— 那说明这条提示只是结果，不是进度。
+   * 进行中（running > 0）绝不能自动藏，否则用户以为后台停了。
+   */
+  let badgeHideTimer = null;
+  /** 这条提示是不是已经自动藏起来了（避免每次刷新又冒出来） */
+  let badgeDismissedText = '';
+
+  function scheduleBadgeAutoHide(b) {
+    const badge = $('job-badge');
+    if (!badge) return;
+    const isResult = b && b.running === 0 && (b.done > 0 || b.failed > 0);
+    if (!isResult) {
+      // 有任务在跑 / 没有任务：清掉计时器与「已隐藏」标记
+      if (badgeHideTimer) { clearTimeout(badgeHideTimer); badgeHideTimer = null; }
+      badgeDismissedText = '';
+      return;
+    }
+    // 同一条提示已经藏过且内容没变 → 别再把它显示出来
+    if (badgeDismissedText && badgeDismissedText === b.text) {
+      badge.hidden = true;
+      return;
+    }
+    if (badgeHideTimer) clearTimeout(badgeHideTimer);
+    badgeHideTimer = setTimeout(() => {
+      badgeHideTimer = null;
+      // 只有「还是这条结果提示」时才藏：期间如果又开始了新生成，不该藏
+      const nb = C.planJobBadge(S.jobs);
+      if (nb.running === 0 && nb.text === b.text) {
+        badge.hidden = true;
+        badgeDismissedText = b.text;
+      }
+    }, 4000);
   }
 
   /** 任务完成后清掉「已看过」的标记（用户回到那张照片了） */
@@ -3244,6 +3425,8 @@
       envFit: envFitOn,
       guideDesc                      // 用户画的构图引导线（位置精确，比文字描述准）
     });
+    // 参考图在这时**快照**进任务：之后用户增删参考图不影响这次请求
+    const refUrls = refImages.map((r) => r.dataUrl);
     const req = C.buildImageRequest({
       baseUrl: S.cfg.baseUrl,
       apiKey: S.cfg.apiKey,
@@ -3258,8 +3441,25 @@
       sizeMode: m ? m.sizeMode : 'image_size',
       providerId: S.cfg.provider,
       quality: 'high',
-      outputFormat: 'png'
+      outputFormat: 'png',
+      // 参考图（额外输入的图）。JSON 类接口在这里就被挂进 body 了；
+      // multipart 类接口下面单独处理，不会重复添加。
+      refDataUrls: refUrls
     });
+    // 如实记录参考图去向：发了几张、几张被模型能力截掉了。
+    // 用户加了 3 张却只发 1 张时，自检面板必须能看出来 ——
+    // 不然他会以为模型不听话，而其实是我们没发出去。
+    {
+      const used = req.refUsed || 0;
+      const capped = req.refCapped || 0;
+      if (refUrls.length && used) {
+        lastRefNote = '已带 ' + used + ' 张' + (capped ? '（' + capped + ' 张超出模型上限未发）' : '');
+      } else if (refUrls.length && !used) {
+        lastRefNote = '已加 ' + refUrls.length + ' 张，但当前模型不支持参考图（未发送）';
+      } else {
+        lastRefNote = '';
+      }
+    }
 
     // OpenAI 系的图像编辑接口是 multipart 表单（/v1/images/edits），
     // 必须把图片作为文件字段上传。若打成 JSON 发到 generations，
@@ -3267,8 +3467,13 @@
     if (C.needsMultipart(C.resolveEndpoint({
       providerId: S.cfg.provider, kind, imageDataUrl: dataUrl, model: S.cfg.model
     }))) {
+      // multipart 路径：参考图在这里以文件形式追加（image[]）。
+      // 注意要用**主图字段名**，别处（JSON 路径）已经把参考图挂进 body 了，
+      // 这边必须只走 multipart，避免同一张图发两遍、体积翻倍。
       const mp = C.buildMultipartBody({
         imageDataUrl: dataUrl,
+        imageField: m ? m.imageField : 'image',
+        refDataUrls: refUrls,
         maskDataUrl: null,     // 不额外传掩膜文件（体积会翻倍），范围用提示词文字描述
         model: req.body.model,
         prompt: req.body.prompt,
@@ -3279,15 +3484,26 @@
       });
       req.multipart = mp;
       req.endpoint = 'images/edits';
+      // multipart 已经把参考图作为文件带上，body 里就不该再有图的副本
+      if (req.body.images) delete req.body.images;
     }
 
     // 发送前自检：图片没准备好 / 编码异常，就地报清楚，别等接口回一句看不懂的错
+    // 自检要读「主图到底在哪」。
+    // 多图版模型（如 Qwen-Image-Edit-2509）会把主图并进 images 数组的第一位，
+    // 此时 body.image 是 undefined —— 直接读它会让自检误判成「没准备好图片」，
+    // 于是加了参考图就完全生成不了（而这是本功能最常见的用法）。
+    const mainImg = (() => {
+      if (Array.isArray(req.body.images) && req.body.images.length) return req.body.images[0];
+      if (req.multipart) return dataUrl;          // multipart 走文件字段，主图就是 dataUrl
+      return req.body[m ? m.imageField : 'image'];
+    })();
     const check = C.validateImageRequest({
       model: req.body.model,
       prompt: req.body.prompt,
       kind,
       imageField: m ? m.imageField : 'image',
-      imageDataUrl: req.body[m ? m.imageField : 'image']
+      imageDataUrl: mainImg
     });
     if (check) {
       const e = new Error(check.message);
@@ -7159,6 +7375,7 @@
       (lastUpscale ? '小图放大：是（' + lastUpscale.from + ' → ' + lastUpscale.to +
         '，' + lastUpscale.scale.toFixed(2) + ' 倍；生成后会按同比例缩回原分辨率）' : '小图放大：不需要'),
       (lastStrokeNote ? '引导线：' + lastStrokeNote : '引导线：无'),
+      (lastRefNote || '参考图：无'),
       '请求字段：' + r.keys.join(', ')
     ];
     if (!r.hasImage && r.model) {
@@ -7294,6 +7511,15 @@
     $('btn-demo').onclick = useDemoImage;
 
     // ---- 文生图 ----
+    // ---- 参考图 ----
+    $('btn-add-ref').onclick = () => { $('ref-input').click(); };
+    $('ref-input').addEventListener('change', async (e) => {
+      const files = e.target.files;
+      if (files && files.length) await addRefImages(files);
+      // 清掉选择，否则再选同一张图不会触发 change
+      try { e.target.value = ''; } catch (e2) { /* ignore */ }
+    });
+
     $('btn-home-t2i').onclick = openT2i;
     $('btn-empty-t2i').onclick = openT2i;
     document.querySelectorAll('#t2i [data-close]').forEach((el) => { el.onclick = closeT2i; });
@@ -7417,9 +7643,12 @@
       closeMoreMenu();
     }, true);
 
-    // 缩放
-    $('zoom-in').onclick = () => zoomCenter(1.35);
-    $('zoom-out').onclick = () => zoomCenter(1 / 1.35);
+    // 缩放：± 按钮已移除（双指缩放更好用，且左下角小按钮容易误触）。
+    // 这里做判空而不是直接删行 —— 万一以后又加回来，不至于忘接线；
+    // 也避免 $('zoom-in') 返回 null 时抛 TypeError 打断整个 bind()，
+    // 那会导致后面所有按钮全部失效，症状是「应用好像没反应」。
+    if ($('zoom-in')) $('zoom-in').onclick = () => zoomCenter(1.35);
+    if ($('zoom-out')) $('zoom-out').onclick = () => zoomCenter(1 / 1.35);
     $('zoom-label').onclick = fitToScreen;
 
     // 画笔
@@ -7547,6 +7776,8 @@
       // 换了模型就等于连接信息变了 —— 可能已经不再属于原来那一组，
       // 卡片上的「正在使用某组」必须跟着变，否则会误导用户。
       syncVendorPresets();
+      // 不同模型能收的参考图张数不同，换了模型要立刻重算提示
+      renderRefImages();
     });
     bindField('set-netmode', 'netMode', null, updateProviderTip);
     bindField('set-ctx', 'contextPct', (el) => Number(el.value));
@@ -8388,6 +8619,10 @@
     renameVendorPreset, deleteVendorPreset,
     vendorPresets: () => S.cfg.presets,
     lastSavedSession: () => lastSavedSession,
+    // 参考图
+    refImages: () => refImages,
+    lastRefNote: () => lastRefNote,
+    addRefImages, clearRefImages, renderRefImages, refLimit,
     activeVendorPreset: () => C.findActivePreset(S.cfg.presets || [], S.cfg),
     setToolbarVisible,
     syncToolbar,

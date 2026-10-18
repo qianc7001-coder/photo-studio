@@ -1252,6 +1252,76 @@
     return list;
   }
 
+  /* ====================== 参考图（额外输入的图） ======================
+   *
+   * 场景：想把一张衣服图/姿势图/风格图一起发给模型，说「照这个改」。
+   * 这和「要修改的原图」是两回事 —— 原图是必带的，参考图是可选的、可以多张。
+   *
+   * 各家接口收参考图的方式**完全不同**，传错会静默失效（出图正常但不参考）：
+   *   - OpenAI /images/edits（multipart）：多个文件都用 `image[]`
+   *   - 硅基流动 /images/generations（JSON）：
+   *       单图用 `image`，多图用 `images` 数组（字符串数组）
+   *   - FLUX Kontext：只有一个 `input_image`，**不支持多图**
+   * 所以这里按服务商/模型给一张「能力表」，而不是猜。
+   */
+
+  /** 一次最多带几张参考图。再多会明显变慢，也容易把提示词意图稀释 */
+  const REF_MAX = 4;
+
+  /**
+   * 一个模型能怎么收参考图。
+   * @returns {{max:number, mode:'multipartArray'|'jsonArray'|'jsonSingle'|'none', field:string}}
+   */
+  function refCapability(modelId, providerId) {
+    const s = String(modelId || '').toLowerCase();
+    const pid = providerId || 'custom';
+    // Kontext 只有一个 input_image 字段，加不了第二张
+    if (/kontext/.test(s)) {
+      return { max: 0, mode: 'none', field: 'input_image' };
+    }
+    // OpenAI 官方：multipart，多图用 image[]
+    if (pid === 'openai' || /gpt-image/.test(s)) {
+      return { max: REF_MAX, mode: 'multipartArray', field: 'image' };
+    }
+    // 硅基流动：JSON。多图版（2509）收 images 数组，其余只收单张 image
+    if (pid === 'siliconflow') {
+      const multi = /2509/.test(s);
+      return multi
+        ? { max: REF_MAX, mode: 'jsonArray', field: 'images' }
+        : { max: 1, mode: 'jsonSingle', field: 'image' };
+    }
+    // 自定义中转：按 OpenAI 兼容处理（最常见）
+    return { max: REF_MAX, mode: 'multipartArray', field: 'image' };
+  }
+
+  /**
+   * 把参考图塞进 JSON 请求体。
+   * 只处理 jsonArray / jsonSingle 两种模式；multipart 在 buildMultipartBody 里。
+   *
+   * 关键：jsonSingle 模式下**不能**覆盖主图。
+   * 曾经想当然地写 body.image = refs[0]，结果模型改的是参考图而不是用户的照片 ——
+   * 出图看着"成功"，内容却完全不对，这种错最难发现。
+   */
+  function attachJsonRefs(body, modelId, providerId, refDataUrls) {
+    const cap = refCapability(modelId, providerId);
+    const refs = (Array.isArray(refDataUrls) ? refDataUrls : []).filter(Boolean);
+    if (!refs.length || cap.max <= 0) return { body, used: 0, capped: refs.length };
+    const use = refs.slice(0, cap.max);
+    if (cap.mode === 'jsonArray') {
+      // 主图也要在数组里：硅基流动的多图编辑把「原图 + 参考图」一起收
+      const withMain = body.image ? [body.image].concat(use) : use.slice();
+      body[cap.field] = withMain;
+      delete body.image;
+      return { body, used: use.length, capped: refs.length - use.length };
+    }
+    if (cap.mode === 'jsonSingle') {
+      // 单图接口：参考图另放一个字段，绝不动主图
+      body.ref_image = use[0];
+      return { body, used: 1, capped: refs.length - 1 };
+    }
+    return { body, used: 0, capped: refs.length };
+  }
+
   function joinUrl(base, path) {
     const b = String(base || '').replace(/\/+$/, '');
     const p = String(path || '').replace(/^\/+/, '');
@@ -1291,7 +1361,17 @@
     if (o.seed != null && o.seed !== '' && isFinite(o.seed)) body.seed = Number(o.seed);
     if (o.batch && o.batch > 1) body.batch_size = Math.min(o.batch, 4);
     if (o.extra && typeof o.extra === 'object') Object.assign(body, o.extra);
-    return { url, headers, body };
+    // 参考图（JSON 类接口）。
+    // multipart 类接口不走这里 —— 它们由 buildMultipartBody 单独处理。
+    // 返回值里的 refUsed/refCapped 要如实带回给界面：
+    // 用户传了 3 张但接口只收 1 张时，必须明确告诉他而不是静默丢掉。
+    let refUsed = 0, refCapped = 0;
+    if (Array.isArray(o.refDataUrls) && o.refDataUrls.length) {
+      const r = attachJsonRefs(body, o.model, o.providerId, o.refDataUrls);
+      refUsed = r.used;
+      refCapped = r.capped;
+    }
+    return { url, headers, body, refUsed, refCapped };
   }
 
   /* ====================== 7.8 请求体编码（JSON / multipart） ====================== */
@@ -1518,7 +1598,17 @@
       push('\r\n');
     };
 
-    file('image', o.imageDataUrl, 'source.' + mimeToExt(dataUrlToBytes(o.imageDataUrl).mime));
+    // 主图（要修改的那张）
+    file(o.imageField || 'image', o.imageDataUrl, 'source.' + mimeToExt(dataUrlToBytes(o.imageDataUrl).mime));
+    // 参考图：OpenAI 的 /images/edits 用 image[] 才能收多张。
+    // 注意字段名必须带方括号 —— 写成 image 会把主图顶掉，
+    // 模型拿到的是最后上传的那张（很隐蔽：出图看着正常，但改错了对象）。
+    const refs = Array.isArray(o.refDataUrls) ? o.refDataUrls : [];
+    for (let ri = 0; ri < refs.length; ri++) {
+      const u = refs[ri];
+      if (!u) continue;
+      file('image[]', u, 'ref' + (ri + 1) + '.' + mimeToExt(dataUrlToBytes(u).mime));
+    }
     if (o.maskDataUrl) file('mask', o.maskDataUrl, 'mask.png');
     field('model', o.model);
     field('prompt', o.prompt);
@@ -6815,6 +6905,8 @@
     // 模型
     PROVIDERS, getProvider, findModel, joinUrl, buildImageRequest, parseImageResponse, extractError,
     dataUrlToBytes, resolveEndpoint, needsMultipart, buildMultipartBody,
+    // 参考图
+    REF_MAX, refCapability, attachJsonRefs,
     // 文生图
     T2I_RATIOS, getT2iRatio, planT2iSize, buildT2iRequest, checkT2i, buildT2iPrompt,
     classifyModel, pickImageModels, findKnownModel, modelParams,

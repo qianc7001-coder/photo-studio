@@ -120,10 +120,11 @@
 
     <!-- 悬浮控件 -->
     <div id="hud" hidden>
+      <!-- 只留百分比：± 按钮去掉了 —— 双手双指缩放比点按钮顺手得多，
+           而左下角这两颗小按钮在手机上很容易误触（还想留着一颗给「复位」用）。
+           百分比本身可点，点一下 = 回到「适应窗口」。 -->
       <div class="hud-group">
-        <button class="hud-btn" id="zoom-out" title="缩小">−</button>
         <button class="hud-btn wide" id="zoom-label" title="适应窗口">100%</button>
-        <button class="hud-btn" id="zoom-in" title="放大">＋</button>
       </div>
       <div class="hud-group" id="sel-info"></div>
     </div>
@@ -259,6 +260,17 @@
         <textarea id="prompt" rows="2" placeholder="描述要怎么改，例如：把这块背景换成傍晚的海边，光线自然"></textarea>
       </div>
       <div class="row wrap" id="quick-chips"></div>
+
+      <!-- 参考图：额外发给模型的图（「照这个改」）。可多张，按模型能力自动限制 -->
+      <div class="row ref-row" id="ref-row">
+        <button class="chip" id="btn-add-ref">
+          <svg viewBox="0 0 24 24" class="chip-ico"><path d="M12 5v14M5 12h14"/></svg>
+          <span>加参考图</span>
+        </button>
+        <div class="ref-list" id="ref-list"></div>
+        <span class="ref-note" id="ref-note" hidden></span>
+      </div>
+
       <div class="row">
         <button class="model-btn" id="btn-model">
           <span class="dot" id="model-dot"></span>
@@ -884,6 +896,8 @@
 </div>
 
 <input type="file" id="file-input" accept="image/*" hidden>
+<!-- 参考图：可多选（额外发给模型，告诉它「照这个改」） -->
+<input type="file" id="ref-input" accept="image/*" multiple hidden>
 
 <script src="version.js"></script>
 <script src="core.js"></script>
