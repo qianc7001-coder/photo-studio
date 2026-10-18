@@ -6732,6 +6732,90 @@ async function run() {
     await sleep(150);
   }
 
+  /* ---------- 设置分级：一级入口 → 二级页 → 返回退级 ---------- */
+  console.log('\n【58】设置分级：不再一屏铺开');
+  {
+    const api = window.__PS_API;
+    api.openSettings();
+    await sleep(200);
+
+    const pages = doc.querySelectorAll('#settings [data-stpage]');
+    t('有多个设置页（含一级）', pages.length >= 7, pages.length);
+    t('★ 打开设置时停在一级页', api.settingsAtHome() === true, api.settingsPage());
+
+    // 一级页只显示入口卡片，不显示具体设置
+    t('一级页有 6 个入口', doc.querySelectorAll('#settings [data-stopen]').length === 6,
+      doc.querySelectorAll('#settings [data-stopen]').length);
+    t('一级页能看到「接口与模型」', (() => {
+      const el = doc.querySelector('#settings [data-stopen="api"]');
+      return el && /接口与模型/.test(el.textContent);
+    })());
+    t('一级页能看到「外观与后台」', !!doc.querySelector('#settings [data-stopen="app"]'));
+    // 关键：具体设置（比如 API Key 输入框）在一级页应当是隐藏的
+    t('★ 一级页不显示具体设置（不会一屏铺开）', (() => {
+      const el = doc.getElementById('set-apikey');
+      if (!el) return false;
+      // 找到它所属的二级页，该页此时应为 hidden
+      const page = el.closest('[data-stpage]');
+      return !!page && page.hidden === true;
+    })());
+
+    // 点进「接口与模型」
+    doc.querySelector('#settings [data-stopen="api"]').dispatchEvent(new window.Event('click'));
+    await sleep(200);
+    t('★ 点入口后进入二级页', api.settingsAtHome() === false, api.settingsPage());
+    t('一级页被隐藏', (() => {
+      const home = doc.querySelector('#settings [data-stpage="home"]');
+      return home && home.hidden === true;
+    })());
+    t('★ 二级页里能看到具体设置', (() => {
+      const el = doc.getElementById('set-apikey');
+      if (!el) return false;
+      let n = el;
+      while (n && n !== doc.getElementById('settings')) {
+        if (n.hidden) return false;
+        n = n.parentElement;
+      }
+      return true;
+    })());
+    t('二级页有返回按钮', (() => {
+      const page = doc.querySelector('#settings [data-stpage="api"]');
+      return !!page && !!page.querySelector('[data-stback]');
+    })());
+
+    // 返回键：先退级，再关闭
+    t('★ 返回键退级而不是关掉设置', (() => {
+      const handled = window.__PS_API.handleBack();
+      return handled === true && api.settingsAtHome() === true;
+    })(), api.settingsPage());
+    t('退级后设置仍然开着', doc.getElementById('settings').hidden === false);
+
+    // 再按一次才关闭
+    window.__PS_API.handleBack();
+    await sleep(150);
+    t('★ 一级页再按返回才关闭设置', doc.getElementById('settings').hidden === true);
+
+    // 重新打开应该回到一级（不记住上次的子页）
+    api.openSettings();
+    await sleep(150);
+    t('重新打开回到一级页', api.settingsAtHome() === true, api.settingsPage());
+
+    // 每个二级页都能进去、也都有返回按钮
+    const ids = [];
+    doc.querySelectorAll('#settings [data-stopen]').forEach((el) => ids.push(el.dataset.stopen));
+    let allOk = true;
+    for (const id of ids) {
+      api.showSettingsPage(id);
+      const page = doc.querySelector('#settings [data-stpage="' + id + '"]');
+      if (!page || page.hidden || !page.querySelector('[data-stback]')) { allOk = false; break; }
+      api.showSettingsPage('home');
+    }
+    t('★ 每个二级页都能进且都有返回', allOk, ids);
+
+    api.closeSettings();
+    await sleep(120);
+  }
+
   /* ---------- 无 JS 错误 ---------- */
   console.log('\n【15】运行健康度');
   const errs = logs.filter((l) => /JSDOM_ERROR|Uncaught/.test(l));

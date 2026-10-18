@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-4126%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-4142%20passed-brightgreen.svg)](#测试)
 
 给摄影师用的**局部修图**工具：在照片上框选任意区域，交给生图模型修改，结果自动贴回原位置。
 
 **核心特点**：结果无缝融合，非破坏性可调，保留拍摄信息。
 
-> 最新版本 **v3.8.3** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
+> 最新版本 **v3.8.4** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
 
 ---
 
@@ -301,7 +301,7 @@ node tools/migrate-test.js     # 配置迁移（模拟老用户升级路径）
 node tools/e2e-test.js         # 端到端（jsdom + 真实 canvas，逐像素校验）
 ```
 
-当前规模：**4126 项**（1507 单元 + 1453 回归 + 17 配置迁移 + 1149 端到端）。
+当前规模：**4142 项**（1507 单元 + 1454 回归 + 17 配置迁移 + 1164 端到端）。
 
 端到端测试会：
 - 启动一个假生图模型服务器
@@ -427,7 +427,8 @@ WebView 里用 `file://` 打开页面时，跨域请求会被拦截，而且 `lo
 
 | 版本 | 主要变化 |
 |---|---|
-| **v3.8.3** | 修复浅色主题只换了一半（顶栏/工具栏/浮层仍是深色）；把顶栏、底栏、遮罩、错误面板等容器的底色全部改成跟随主题 |
+| **v3.8.4** | 设置改成分级（和手机设置一样）：一级只放 6 个入口，点进去才是具体设置，一级页缩短 88%；返回键先退级再关闭 |
+| [v3.8.3](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.8.3) | 修复浅色主题只换了一半（顶栏/工具栏/浮层仍是深色）；把顶栏、底栏、遮罩、错误面板等容器的底色全部改成跟随主题 |
 | [v3.8.2](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.8.2) | 新增画布背景：可导入自己的图垫在照片四周，支持调模糊与压暗、两种铺法；背景只影响界面，不会导出也不发给模型 |
 | [v3.8.1](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.8.1) | 新增主题：深色 / 浅色 / 跟随系统（默认跟随，实时响应系统切换）；两套都按 WCAG AA 校过对比度（原先深色那档提示字只有 3.76:1，已修正） |
 | [v3.8.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.8.0) | 新增「参考图」：额外加几张图让模型「照这个改」（换衣服/换姿势/参考风格），支持多张并按模型能力自动限流；去掉左下角 ± 缩放按钮（双指缩放更好用）；后台完成提示几秒后自动收起 |

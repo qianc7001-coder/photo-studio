@@ -1796,9 +1796,18 @@ console.log('\n【提示词】每次请求都要带上「测出来的」周围�
   const seg = html.slice(i, j);
 
   // 1) 结构：分组 + 卡片 + 行（系统设置的视觉语言）
-  const groups = (seg.match(/class="st-group"/g) || []).length;
+  //
+  // 注：设置已改成**分两级**（一级 6 个入口，具体分组收到二级页里）。
+  // 所以这里数的分组 / 卡片必须看整个设置区（seg），不能只看一级页 ——
+  // 一级页故意只留入口，分组都搬走了。
+  //
+  // 设置改成两级后，原来的「分组标题」被二级页自己的返回条标题取代了，
+  // 所以这里改数「有内容的分组」：一级入口 + 二级页 + 卡片。
   const cards = (seg.match(/class="st-card"/g) || []).length;
-  t('设置分为多个分组', groups >= 8, groups);
+  const subpages = (seg.match(/data-stpage="/g) || []).length;
+  const entries = (seg.match(/data-stopen="/g) || []).length;
+  t('设置分成多个二级页', subpages >= 6, subpages);
+  t('一级页有同样多的入口', entries === subpages - 1, [entries, subpages]);
   t('每组用卡片容器', cards >= 8, cards);
   t('有分组标题样式', /#settings \.st-group/.test(css));
   t('有卡片样式（圆角 + 边框）',

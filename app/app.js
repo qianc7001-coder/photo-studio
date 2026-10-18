@@ -5501,6 +5501,15 @@
    */
   function handleBack() {
     try {
+      // 设置二级页：返回键先退回设置列表，而不是把整个设置关掉。
+      // 这和手机系统一致 —— 用户在「外观与后台」里按返回，
+      // 期待回到设置列表继续找别的东西，而不是退出设置重来。
+      // 注意位置：必须在 planBackAction 之前拦截，否则它会直接关掉 settings。
+      if ($('settings') && !$('settings').hidden && !settingsAtHome()) {
+        showSettingsPage('home');
+        return true;
+      }
+
       const open = {
         // 更多菜单是最「临时」的一层：它一关就没了，所以排在返回链最前面
         moremenu: moreMenuOpen(),
@@ -6841,8 +6850,51 @@
     $('brush-restore').classList.toggle('on', !S.brushErase);
   }
 
+  /* ============================ 设置分级 ============================
+   *
+   * 一级（home）放 6 个入口，点进去才是具体设置。
+   *
+   * 为什么必须有「返回上一级」而不是直接关闭：用户从二级页按返回键，
+   * 期待的是回到设置列表继续找，而不是把整个设置关掉重开。
+   * 这和手机系统的行为一致，也是返回键逐级退的一部分。
+   */
+
+  /** 当前所在的设置子页（home 表示一级） */
+  let settingsPage = 'home';
+
+  /** 切到某个设置子页 */
+  function showSettingsPage(id) {
+    const page = id || 'home';
+    const all = document.querySelectorAll('#settings [data-stpage]');
+    if (!all.length) return;
+    let found = false;
+    all.forEach((el) => {
+      const on = el.dataset.stpage === page;
+      el.hidden = !on;
+      if (on) found = true;
+    });
+    // 目标页不存在就退回一级，别让用户面对白屏
+    if (!found) {
+      all.forEach((el) => { el.hidden = el.dataset.stpage !== 'home'; });
+      settingsPage = 'home';
+    } else {
+      settingsPage = page;
+    }
+    // 切页时滚回顶部：否则从长页返回会停在半截
+    const sc = document.querySelector('#settings .sheet-scroll');
+    if (sc) sc.scrollTop = 0;
+  }
+
+  /** 当前是否停在设置的一级页（返回键据此决定是退级还是关闭） */
+  function settingsAtHome() {
+    return settingsPage === 'home';
+  }
+
   function openSettings() {
     $('settings').hidden = false;
+    // 每次打开都从一级开始，不记住上次停在哪个子页 ——
+    // 否则用户下次进来会「跳过了首页」，一时找不到想改的东西。
+    showSettingsPage('home');
     syncSettingsUI();
   }
   function closeSettings() { $('settings').hidden = true; }
@@ -7828,6 +7880,14 @@
     }
     $('btn-more').onclick = (e) => { e.stopPropagation(); toggleMoreMenu(); };
     $('btn-settings').onclick = () => { closeMoreMenu(); openSettings(); };
+
+    // ---- 设置分级：一级入口 / 二级页返回 ----
+    document.querySelectorAll('#settings [data-stopen]').forEach((el) => {
+      el.onclick = () => showSettingsPage(el.dataset.stopen);
+    });
+    document.querySelectorAll('#settings [data-stback]').forEach((el) => {
+      el.onclick = () => showSettingsPage('home');
+    });
     $('btn-save').onclick = openExportPanel;
     $('btn-photoinfo').onclick = () => { closeMoreMenu(); openPhotoInfo(); };
     document.querySelectorAll('#photoinfo [data-close]').forEach((el) => { el.onclick = closePhotoInfo; });
@@ -8908,6 +8968,9 @@
     refImages: () => refImages,
     // 画布背景
     syncBgUI, loadBgImage, clearBg,
+    // 设置分级
+    showSettingsPage, settingsAtHome, settingsPage: () => settingsPage,
+    openSettings, closeSettings, handleBack,
     bgState: () => C.normalizeBg(S.cfg.bg),
     resetBgCache: () => { bgImage = null; bgImageKey = ''; },
     lastRefNote: () => lastRefNote,

@@ -575,10 +575,52 @@
       </button>
     </div>
     <div class="sheet-scroll">
+      <!-- ===== 一级：设置主页 ===== -->
+      <div class="st-page" data-stpage="home">
+        <div class="st-card">
+        <button class="st-row st-row-btn" data-stopen="api">
+          <span class="st-label">接口与模型 <i class="st-desc-inline">服务商 · API Key · 模型 · 网络</i></span>
+          <svg class="st-arrow" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
+        </button>
+        <button class="st-row st-row-btn" data-stopen="quality">
+          <span class="st-label">修图质量 <i class="st-desc-inline">贴回精度 · 无缝融合 · 分辨率</i></span>
+          <svg class="st-arrow" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
+        </button>
+        <button class="st-row st-row-btn" data-stopen="gen">
+          <span class="st-label">生成参数 <i class="st-desc-inline">提示词风格 · 引导线</i></span>
+          <svg class="st-arrow" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
+        </button>
+        <button class="st-row st-row-btn" data-stopen="app">
+          <span class="st-label">外观与后台 <i class="st-desc-inline">主题 · 画布背景 · 保活</i></span>
+          <svg class="st-arrow" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
+        </button>
+        <button class="st-row st-row-btn" data-stopen="log">
+          <span class="st-label">日志与成本 <i class="st-desc-inline">调用记录 · 单价</i></span>
+          <svg class="st-arrow" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
+        </button>
+        <button class="st-row st-row-btn" data-stopen="about">
+          <span class="st-label">帮助与关于 <i class="st-desc-inline">教程 · 更新 · 开源地址</i></span>
+          <svg class="st-arrow" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
+        </button>
+        </div>
+        <div class="st-card" style="margin-top:10px">
+          <button class="st-row st-row-btn st-danger" id="btn-clear">
+            <span class="st-label">清空所有本地数据</span>
+          </button>
+        </div>
+        <div class="tip" id="about"></div>
+      </div>
 
-      <!-- ============ 供应商配置（多组保存） ============ -->
-      <div class="st-group">供应商配置</div>
-      <div class="st-card">
+
+      <!-- ===== 二级页：接口与模型 ===== -->
+      <div class="st-page" data-stpage="api" hidden>
+        <div class="st-back">
+          <button class="st-back-btn" data-stback>
+            <svg viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></svg>
+            <span>接口与模型</span>
+          </button>
+        </div>
+<div class="st-card">
         <label class="st-row">
           <span class="st-label">当前使用</span>
           <select class="st-value" id="set-preset-select"></select>
@@ -598,7 +640,7 @@
       </div>
 
       <!-- ============ 生图模型 ============ -->
-      <div class="st-group">生图模型</div>
+
       <div class="st-card">
         <label class="st-row">
           <span class="st-label">服务商</span>
@@ -637,7 +679,7 @@
       </div>
 
       <!-- ============ 网络 ============ -->
-      <div class="st-group">网络</div>
+
       <div class="st-card">
         <label class="st-row">
           <span class="st-label">请求方式</span>
@@ -651,8 +693,17 @@
       <div class="tip" id="net-tip"></div>
 
       <!-- ============ 贴回质量 ============ -->
-      <div class="st-group">贴回质量</div>
-      <div class="st-card">
+      </div>
+
+      <!-- ===== 二级页：修图质量 ===== -->
+      <div class="st-page" data-stpage="quality" hidden>
+        <div class="st-back">
+          <button class="st-back-btn" data-stback>
+            <svg viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></svg>
+            <span>修图质量</span>
+          </button>
+        </div>
+<div class="st-card">
         <label class="st-row st-row-col">
           <span class="st-label">上下文外扩 <b class="st-badge" id="v-ctx">12%</b></span>
           <input type="range" class="st-range" id="set-ctx" min="0" max="60" value="12">
@@ -670,7 +721,6 @@
         </label>
       </div>
 
-      <div class="st-group">无缝融合</div>
       <div class="st-card">
         <label class="st-row st-row-col">
           <span class="st-label">融合强度 <b class="st-badge" id="v-fusion">70%</b></span>
@@ -700,7 +750,7 @@
         两者都不重新调用模型，<b>不花钱</b>。</div>
 
       <!-- ============ 画质与性能 ============ -->
-      <div class="st-group">画质与性能</div>
+
       <div class="st-card">
         <label class="st-row">
           <span class="st-label">工作分辨率上限</span>
@@ -727,65 +777,17 @@
       </div>
 
       <!-- ============ 后台保活 ============ -->
-      <div class="st-group">后台保活</div>
-      <div class="st-card">
-        <label class="st-row">
-          <span class="st-label">生成时自动保活 <i class="st-desc-inline">切走或锁屏也不会中断</i></span>
-          <input type="checkbox" class="st-switch" id="set-keepalive" checked>
-        </label>
-        <label class="st-row" id="ka-always-row">
-          <span class="st-label">一直保活 <i class="st-desc-inline">连续修图时不用每次等</i></span>
-          <input type="checkbox" class="st-switch" id="set-keepalive-always">
-        </label>
-        <div class="st-row st-row-plain">
-          <span class="ka-state ka-muted" id="ka-state">检测中…</span>
-        </div>
-        <!-- 通知状态：发不出去时必须说清楚是哪种原因，
-             否则用户只会觉得「这应用坏了」，根本想不到是系统权限 -->
-        <div class="st-row st-row-plain" id="notify-state-row">
-          <span class="ka-state" id="notify-state">检测通知…</span>
-          <button class="chip" id="btn-notify-settings" hidden>去打开</button>
-        </div>
-        <div class="st-row st-row-plain" id="ka-battery-row" hidden>
-          <button class="st-btn" id="ka-battery" style="width:100%">允许后台运行（系统电池优化）</button>
-        </div>
       </div>
-      <div class="tip">生图要 30~60 秒，切走时系统可能回收应用 —— 请求断了但模型已经出图、钱已经花了。
-        各家手机系统的后台限制不一样，如果仍会中断，点上面的按钮加入「不限制后台」名单。</div>
 
-      <!-- ============ 成本预估 ============ -->
-      <div class="st-group">成本预估</div>
-      <div class="st-card">
-        <label class="st-row">
-          <span class="st-label">单价（美元/张） <i class="st-desc-inline">留空用内置价格表</i></span>
-          <input class="st-input st-input-num" type="number" id="set-price" placeholder="自动" min="0" step="0.001">
-        </label>
-        <label class="st-row">
-          <span class="st-label">汇率（1 美元 = ? 元）</span>
-          <input class="st-input st-input-num" type="number" id="set-usdcny" placeholder="7.1" min="1" max="20" step="0.1">
-        </label>
-      </div>
-      <div class="st-actions">
-        <button class="st-btn" id="btn-reset-spend">重置已花统计</button>
-      </div>
-      <div class="status" id="spend-status"></div>
-      <div class="tip" id="price-tip"></div>
-
-      <!-- ============ 调用日志 ============ -->
-      <!-- 生图按次花钱，用户需要能自己核对「哪几次调用了、花了多少、为什么失败」 -->
-      <div class="st-group">调用日志</div>
-      <div class="st-card">
-        <button class="st-row st-row-btn" id="btn-calllog">
-          <span class="st-label">调用日志 <i class="st-desc-inline" id="calllog-brief">每次模型调用的记录</i></span>
-          <svg class="st-arrow" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
-        </button>
-      </div>
-      <div class="tip">记录每次调用模型的时间、模型、要求、发送尺寸、耗时、成败与花费。
-        只留最近 100 条，不会占多少空间。</div>
-
-      <!-- ============ 生成参数 ============ -->
-      <div class="st-group">生成参数</div>
-      <div class="st-card">
+      <!-- ===== 二级页：生成参数 ===== -->
+      <div class="st-page" data-stpage="gen" hidden>
+        <div class="st-back">
+          <button class="st-back-btn" data-stback>
+            <svg viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></svg>
+            <span>生成参数</span>
+          </button>
+        </div>
+<div class="st-card">
         <label class="st-row">
           <span class="st-label">提示词语言</span>
           <select class="st-value" id="set-lang">
@@ -822,7 +824,7 @@
       </div>
 
       <!-- ============ 引导线 ============ -->
-      <div class="st-group">引导线 · 手绘草图</div>
+
       <div class="st-card">
         <div class="st-desc">
           直线和自由绘制都会**强制画进发给模型的图片**，模型才能真正看到位置和走向。
@@ -834,8 +836,17 @@
 
       <!-- ============ 隐私 ============ -->
       <!-- ============ 外观 ============ -->
-      <div class="st-group">外观</div>
-      <div class="st-card">
+      </div>
+
+      <!-- ===== 二级页：外观与后台 ===== -->
+      <div class="st-page" data-stpage="app" hidden>
+        <div class="st-back">
+          <button class="st-back-btn" data-stback>
+            <svg viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></svg>
+            <span>外观与后台</span>
+          </button>
+        </div>
+<div class="st-card">
         <div class="st-row-col">
           <span class="st-label">主题</span>
           <div class="chips" id="theme-chips"></div>
@@ -867,7 +878,33 @@
       </div>
       <div class="tip">背景只影响修图界面，不会被导出，也不会发给模型。</div>
 
-      <div class="st-group">隐私</div>
+      <div class="st-card">
+        <label class="st-row">
+          <span class="st-label">生成时自动保活 <i class="st-desc-inline">切走或锁屏也不会中断</i></span>
+          <input type="checkbox" class="st-switch" id="set-keepalive" checked>
+        </label>
+        <label class="st-row" id="ka-always-row">
+          <span class="st-label">一直保活 <i class="st-desc-inline">连续修图时不用每次等</i></span>
+          <input type="checkbox" class="st-switch" id="set-keepalive-always">
+        </label>
+        <div class="st-row st-row-plain">
+          <span class="ka-state ka-muted" id="ka-state">检测中…</span>
+        </div>
+        <!-- 通知状态：发不出去时必须说清楚是哪种原因，
+             否则用户只会觉得「这应用坏了」，根本想不到是系统权限 -->
+        <div class="st-row st-row-plain" id="notify-state-row">
+          <span class="ka-state" id="notify-state">检测通知…</span>
+          <button class="chip" id="btn-notify-settings" hidden>去打开</button>
+        </div>
+        <div class="st-row st-row-plain" id="ka-battery-row" hidden>
+          <button class="st-btn" id="ka-battery" style="width:100%">允许后台运行（系统电池优化）</button>
+        </div>
+      </div>
+      <div class="tip">生图要 30~60 秒，切走时系统可能回收应用 —— 请求断了但模型已经出图、钱已经花了。
+        各家手机系统的后台限制不一样，如果仍会中断，点上面的按钮加入「不限制后台」名单。</div>
+
+      <!-- ============ 成本预估 ============ -->
+
       <div class="st-card">
         <label class="st-row">
           <span class="st-label">发送前对选区外打码 <i class="st-desc-inline">保护无关区域</i></span>
@@ -877,8 +914,56 @@
       <div class="tip">照片只会发送到你自己配置的接口地址，本应用不做任何上传。</div>
 
       <!-- ============ 帮助 ============ -->
-      <div class="st-group">帮助</div>
+      </div>
+
+      <!-- ===== 二级页：日志与成本 ===== -->
+      <div class="st-page" data-stpage="log" hidden>
+        <div class="st-back">
+          <button class="st-back-btn" data-stback>
+            <svg viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></svg>
+            <span>日志与成本</span>
+          </button>
+        </div>
+<div class="st-card">
+        <label class="st-row">
+          <span class="st-label">单价（美元/张） <i class="st-desc-inline">留空用内置价格表</i></span>
+          <input class="st-input st-input-num" type="number" id="set-price" placeholder="自动" min="0" step="0.001">
+        </label>
+        <label class="st-row">
+          <span class="st-label">汇率（1 美元 = ? 元）</span>
+          <input class="st-input st-input-num" type="number" id="set-usdcny" placeholder="7.1" min="1" max="20" step="0.1">
+        </label>
+      </div>
+      <div class="st-actions">
+        <button class="st-btn" id="btn-reset-spend">重置已花统计</button>
+      </div>
+      <div class="status" id="spend-status"></div>
+      <div class="tip" id="price-tip"></div>
+
+      <!-- ============ 调用日志 ============ -->
+      <!-- 生图按次花钱，用户需要能自己核对「哪几次调用了、花了多少、为什么失败」 -->
+
       <div class="st-card">
+        <button class="st-row st-row-btn" id="btn-calllog">
+          <span class="st-label">调用日志 <i class="st-desc-inline" id="calllog-brief">每次模型调用的记录</i></span>
+          <svg class="st-arrow" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
+        </button>
+      </div>
+      <div class="tip">记录每次调用模型的时间、模型、要求、发送尺寸、耗时、成败与花费。
+        只留最近 100 条，不会占多少空间。</div>
+
+      <!-- ============ 生成参数 ============ -->
+      </div>
+
+      <!-- ===== 二级页：帮助与关于 ===== -->
+      <div class="st-page" data-stpage="about" hidden>
+        <div class="st-back">
+          <button class="st-back-btn" data-stback>
+            <svg viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></svg>
+            <span>帮助与关于</span>
+          </button>
+        </div>
+<div class="st-card">
         <button class="st-row st-row-btn" id="btn-tutorial2">
           <span class="st-label">新手教程 <i class="st-desc-inline">重新看一遍</i></span>
           <svg class="st-arrow" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
@@ -886,7 +971,7 @@
       </div>
 
       <!-- ============ 关于 ============ -->
-      <div class="st-group">关于</div>
+
       <div class="st-card">
         <div class="st-row st-row-plain">
           <span class="st-label">版本</span>
@@ -923,6 +1008,7 @@
         <button class="st-row st-row-btn st-danger" id="btn-clear">
           <span class="st-label">清空所有本地数据</span>
         </button>
+      </div>
       </div>
 
     </div>

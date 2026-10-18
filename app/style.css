@@ -1784,6 +1784,39 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 /* 一行里排两个操作按钮（供应商配置用）。
    不能复用 .st-row-btn —— 那条是给「整行可点的 <button>」的，
    这里是 <div> 里放两个独立按钮，语义不同。 */
+/* =============================================================================
+ * 设置分级（像手机设置那样）
+ *
+ * 为什么改：19 个分组全铺开太长了 —— 要翻半天才找到想改的那项，
+ * 而且滚动时手指很容易碰到旁边的开关/滑块（用户反馈「容易误触」）。
+ * 现在一级只放 6 个入口，点进去才是具体设置。
+ * ========================================================================== */
+/* 二级页的返回条 */
+.st-back {
+  margin: 4px 0 10px;
+}
+.st-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 10px 6px 4px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+}
+.st-back-btn:active { background: var(--press); }
+.st-back-btn svg {
+  width: 18px; height: 18px;
+  fill: none; stroke: currentColor;
+  stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round;
+}
+/* 一级入口之间的距离：卡片之间留白，视觉上分得开 */
+#settings .st-page > .st-card + .st-card { margin-top: 10px; }
+
 #settings .st-row-actions {
   display: flex;
   gap: 9px;
