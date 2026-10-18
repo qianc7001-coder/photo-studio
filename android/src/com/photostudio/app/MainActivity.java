@@ -878,6 +878,122 @@ public class MainActivity extends Activity {
             });
         }
 
+        /**
+         * 大容量存储：把「历史记录」从 localStorage 搬到文件。
+         *
+         * 为什么必须这么做：
+         *   WebView 的 localStorage 只有约 5MB（同一源下所有键共享）。
+         *   而一张照片的「可继续编辑」数据就要 0.8MB 左右，
+         *   于是只存得下 3 张 —— 用户修到第 4 张，最早的就被降级成
+         *   「只能看预览，点进去变回原图」。
+         *
+         *   这不是手机的限制，是浏览器存储的限制。
+         *   写到应用私有目录可以有几 GB，几千张照片都放得下。
+         *
+         * 存到 filesDir 而不是外部存储：不需要任何权限，
+         * 卸载应用时自动清理，也不会被其它应用看到（里面是用户的照片数据）。
+         *
+         * @param name 文件名（只允许字母数字下划线点，防止路径穿越）
+         * @return 写入的字节数；失败返回 -1
+         */
+        @JavascriptInterface
+        public long kvWrite(String name, String content) {
+            if (!safeName(name) || content == null) return -1;
+            java.io.FileOutputStream fos = null;
+            try {
+                java.io.File f = new java.io.File(kvDir(), name);
+                // 先写临时文件再改名：中途被杀不会留下半截文件，
+                // 否则下次启动读到损坏的 JSON 会丢掉整份历史。
+                java.io.File tmp = new java.io.File(kvDir(), name + ".tmp");
+                fos = new java.io.FileOutputStream(tmp);
+                byte[] data = content.getBytes("UTF-8");
+                fos.write(data);
+                fos.flush();
+                fos.close();
+                fos = null;
+                if (!tmp.renameTo(f)) {
+                    // 某些文件系统 rename 到已存在的目标会失败，先删再试
+                    if (f.exists() && !f.delete()) return -1;
+                    if (!tmp.renameTo(f)) return -1;
+                }
+                return data.length;
+            } catch (Exception e) {
+                Log.w(TAG, "kvWrite 失败: " + e.getMessage());
+                return -1;
+            } finally {
+                if (fos != null) {
+                    try { fos.close(); } catch (Exception ignored) { }
+                }
+            }
+        }
+
+        /**
+         * 读回 kvWrite 写入的内容。
+         * @return 文件内容；不存在或读取失败返回空串（调用方据此判断"没有存档"）
+         */
+        @JavascriptInterface
+        public String kvRead(String name) {
+            if (!safeName(name)) return "";
+            java.io.FileInputStream fis = null;
+            try {
+                java.io.File f = new java.io.File(kvDir(), name);
+                if (!f.exists() || !f.isFile()) return "";
+                fis = new java.io.FileInputStream(f);
+                java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[65536];
+                int n;
+                while ((n = fis.read(buf)) > 0) bos.write(buf, 0, n);
+                return new String(bos.toByteArray(), "UTF-8");
+            } catch (Exception e) {
+                Log.w(TAG, "kvRead 失败: " + e.getMessage());
+                return "";
+            } finally {
+                if (fis != null) {
+                    try { fis.close(); } catch (Exception ignored) { }
+                }
+            }
+        }
+
+        /** 删除一个 kv 文件 */
+        @JavascriptInterface
+        public boolean kvDelete(String name) {
+            if (!safeName(name)) return false;
+            try {
+                java.io.File f = new java.io.File(kvDir(), name);
+                return !f.exists() || f.delete();
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        /** 当前用的存储空间（字节），用于界面显示 */
+        @JavascriptInterface
+        public long kvUsage() {
+            try {
+                long sum = 0;
+                java.io.File[] list = kvDir().listFiles();
+                if (list != null) for (java.io.File f : list) sum += f.length();
+                return sum;
+            } catch (Exception e) {
+                return 0;
+            }
+        }
+
+        /** 只允许安全文件名，挡住 "../" 这类路径穿越 */
+        private boolean safeName(String name) {
+            if (name == null) return false;
+            String n = name.trim();
+            if (n.isEmpty() || n.length() > 64) return false;
+            return n.matches("^[A-Za-z0-9._-]+$") && !n.startsWith(".");
+        }
+
+        /** 存放目录（应用私有，无需权限） */
+        private java.io.File kvDir() {
+            java.io.File d = new java.io.File(getFilesDir(), "kv");
+            if (!d.exists()) d.mkdirs();
+            return d;
+        }
+
         /** 保活服务当前是否真的在跑（用于界面显示真实状态） */
         @JavascriptInterface
         public boolean keepAliveRunning() {

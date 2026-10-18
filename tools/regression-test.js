@@ -1162,8 +1162,16 @@ console.log('\n【作品库】跨天修图记录：预算、落盘、恢复');
 
   // 7) 恢复作品时必须作废在途生成，否则结果会贴到刚恢复的照片上
   //    回归的 bug：restoreSession 换掉整份文档却没作废 in-flight 请求
-  const restoreFn = appSrc.slice(appSrc.indexOf('async function restoreSession'),
-    appSrc.indexOf('async function restoreSession') + 2600);
+  // 按**函数边界**截取，而不是写死字符数 ——
+  // 之前用 +2600，函数一改长（比如加了容错），后面的断言就会被截到范围外，
+  // 表现为「代码明明在却报缺失」，很容易误判成功能坏了。
+  const restoreFn = (() => {
+    const start = appSrc.indexOf('async function restoreSession');
+    if (start < 0) return '';
+    const rest = appSrc.slice(start + 10);
+    const nextFn = rest.search(/\n  (?:async )?function /);
+    return nextFn > 0 ? rest.slice(0, nextFn) : rest;
+  })();
   t('恢复作品会作废在途生成', /S\.genToken\+\+/.test(restoreFn), 'restoreSession 里缺 genToken++');
   t('恢复作品会关掉对比层', /hidden = true/.test(restoreFn));
   t('恢复作品会清掉待确认结果', /S\.pending = null/.test(restoreFn));
@@ -4213,8 +4221,14 @@ console.log('\n【作品库】历史记录必须存得住多张（用真实 JPEG
   t('app 用 core 的 patch 上限', /maxBytes: C\.SESSION_PATCH_MAX_CHARS/.test(appSrc));
   t('app 用 core 的缩略图质量', /C\.THUMB_QUALITY/.test(appSrc));
   // 兜底路径不能直接砍记录（用户会莫名丢历史），要先丢会话
-  const saveFn = appSrc.slice(appSrc.indexOf('function saveLibrary()'),
-    appSrc.indexOf('function saveLibrary()') + 2200);
+  // 按函数边界截取（写死长度会在函数改长后截断，导致断言误报缺失）
+  const saveFn = (() => {
+    const start = appSrc.indexOf('function saveLibrary()');
+    if (start < 0) return '';
+    const rest = appSrc.slice(start + 10);
+    const nextFn = rest.search(/\n  (?:async )?function /);
+    return nextFn > 0 ? rest.slice(0, nextFn) : rest;
+  })();
   t('配额兜底先丢会话而不是丢记录',
     /session: null/.test(saveFn) && !/slice\(0, 5\)/.test(saveFn), '兜底路径仍是直接砍记录');
   // 单条会话过大时必须**告诉用户**，不能静默不存

@@ -7116,12 +7116,15 @@ async function run() {
     }
     const dragMs = Date.now() - t0;
     // 阈值说明：jsdom 的 canvas 是**桥接**到原生 napi-canvas 的，
-    // 每次 putImageData 都要跨层重建 ImageData 对象，而真实浏览器里
-    // 是原生调用（实测整块 24.6ms → 脏区 2.1ms）。
-    // 所以这里放宽到 50ms/帧，重点守的是「别退回全量重算」——
-    // 那会是 139ms/帧（实测过），一眼就能看出来。
-    t('★ 连续 40 帧拖动不卡（<2000ms）', dragMs < 2000, dragMs + 'ms');
-    t('★ 单帧平均 <50ms（桥接环境，真机更快）', dragMs / 40 < 50, (dragMs / 40).toFixed(1) + 'ms');
+    // 每次 putImageData 都要跨层重建 ImageData 对象；真实浏览器里是原生调用
+    // （实测整块 24.6ms → 脏区 2.1ms）。而且整个 e2e 跑了几百个用例后，
+    // 进程内状态变重，同一段代码的耗时会在 25~60ms/帧之间波动。
+    //
+    // 所以阈值按「有没有退化成全量重算」来定：全量实测 139ms/帧，
+    // 定 90ms/帧能稳稳区分两者，又不会被正常波动误伤。
+    t('★ 连续 40 帧拖动不卡（<3600ms）', dragMs < 3600, dragMs + 'ms');
+    t('★ 单帧平均 <90ms（低于全量的 139ms，说明增量生效）',
+      dragMs / 40 < 90, (dragMs / 40).toFixed(1) + 'ms');
     // 没有退化成全量重算：靠单帧耗时间接守着（全量约 139ms/帧，一眼能看出）
 
     // 撤销后掩膜状态必须作废（否则画面与真实范围对不上）
@@ -7136,6 +7139,111 @@ async function run() {
     S.mode = 'select';
     S.rect = null;
     api.invalidateMask();
+    api.goHome();
+    await sleep(120);
+  }
+
+  /* ---------- 大容量存储：历史记录不再只存 3 张 ---------- */
+  console.log('\n【62】大容量存储：文件优先，历史不再被 5MB 卡住');
+  {
+    const api = window.__PS_API;
+    const savedBridge = window.PSBridge;
+
+    // 模拟安卓壳的原生 kv 接口（内存里模拟文件系统）
+    const fakeFs = Object.create(null);
+    window.PSBridge = Object.assign({}, savedBridge, {
+      kvWrite: (name, content) => {
+        if (!/^[A-Za-z0-9._-]+$/.test(name)) return -1;
+        fakeFs[name] = content;
+        return content.length;
+      },
+      kvRead: (name) => (fakeFs[name] === undefined ? '' : fakeFs[name]),
+      kvDelete: (name) => { delete fakeFs[name]; return true; },
+      kvUsage: () => Object.keys(fakeFs).reduce((n, k) => n + fakeFs[k].length, 0)
+    });
+
+    t('★ 探测到文件存储可用', api.kvStorageAvailable() === true);
+
+    // 从零开始
+    S.library = [];
+    delete fakeFs['library.json'];
+    try { window.localStorage.removeItem('photoStudio.library.v1'); } catch (e) { /* ignore */ }
+
+    // 造 8 条各带 0.4MB 会话的记录，走真实 saveLibrary
+    const big = 'B'.repeat(400000);
+    S.library = [];
+    for (let i = 0; i < 8; i++) {
+      S.library.push({
+        id: 'w' + i,
+        at: 1000 - i, createdAt: 1000 - i,
+        name: 'pic' + i + '.jpg',
+        imgW: 3072, imgH: 2048, docW: 3072, docH: 2048,
+        edits: 2,
+        thumb: 'data:image/jpeg;base64,' + 'T'.repeat(20000),
+        before: '',
+        session: {
+          v: 1, at: 1000 - i, imgW: 3072, imgH: 2048, docW: 3072, docH: 2048,
+          items: [], dropped: 0,
+          base: 'data:image/jpeg;base64,' + big
+        }
+      });
+    }
+    S.workId = 'w0';
+
+    const ok = api.saveLibrary();
+    await sleep(200);
+    t('★ 保存成功', ok === true);
+    t('★ 写进了文件而不是 localStorage', !!fakeFs['library.json'],
+      Object.keys(fakeFs));
+    t('★ localStorage 里那份被清掉了（释放 5MB）',
+      window.localStorage.getItem('photoStudio.library.v1') === null);
+
+    // 读回来
+    const loaded = api.loadLibrary();
+    t('★★ 8 条全部读回来', loaded.length === 8, loaded.length);
+    t('★★ 8 条**全部**带编辑数据（不再只剩 3 张）',
+      loaded.filter((e) => !!e.session).length === 8,
+      loaded.filter((e) => !!e.session).length);
+    t('★ 记录顺序正确（新的在前）', loaded[0].id === 'w0', loaded[0].id);
+
+    // 对比：同一批数据走 localStorage 预算会掉多少
+    const planLocal = window.PSCore.planLibrary(S.library, {
+      maxBytes: window.PSCore.LIBRARY_BUDGET_BYTES,
+      maxItems: 60,
+      sessionBudgetBytes: window.PSCore.SESSION_BUDGET_BYTES,
+      pinnedId: 'w0'
+    });
+    const localEditable = planLocal.keepIds.length - planLocal.downgradeIds.length;
+    t('★★ 对照：localStorage 预算下只有 ' + localEditable + ' 张能继续编辑（这就是老问题）',
+      localEditable < 8, localEditable);
+
+    // ---- 迁移：localStorage 里的老数据应搬到文件并清掉旧键 ----
+    delete fakeFs['library.json'];
+    window.localStorage.setItem('photoStudio.library.v1',
+      JSON.stringify({ v: 1, items: S.library.slice(0, 3) }));
+    const migrated = api.loadLibrary();
+    await sleep(150);
+    t('★ 老数据能读出来（迁移前）', migrated.length === 3, migrated.length);
+    t('★★ 迁移后写进了文件', !!fakeFs['library.json']);
+    t('★★ 迁移后清掉了 localStorage 旧键',
+      window.localStorage.getItem('photoStudio.library.v1') === null);
+
+    // ---- 文件不可用时退回 localStorage（不能崩、不能丢）----
+    window.PSBridge = Object.assign({}, savedBridge, {
+      kvWrite: () => -1,                      // 模拟磁盘满 / 写失败
+      kvRead: () => ''
+    });
+    const fallbackOk = api.saveLibrary();
+    await sleep(150);
+    t('★ 文件写失败时退回 localStorage', fallbackOk === true &&
+      !!window.localStorage.getItem('photoStudio.library.v1'),
+      fallbackOk);
+
+    // 恢复
+    window.PSBridge = savedBridge;
+    S.library = [];
+    S.workId = null;
+    try { window.localStorage.removeItem('photoStudio.library.v1'); } catch (e) { /* ignore */ }
     api.goHome();
     await sleep(120);
   }

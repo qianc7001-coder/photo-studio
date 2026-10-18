@@ -4417,6 +4417,95 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
     /function invalidateMask\(\)[\s\S]{0,400}maskBuf = null/.test(js));
 })();
 
+
+/* ===== 大容量存储：历史记录不再只存 3 张 =====
+ * 用户反馈「历史记录保存还是有问题：只有一张是好的」。
+ * 根因不是保存逻辑，而是 localStorage 只有 5MB：
+ * 一张图的「可继续编辑」数据约 0.8MB，于是只存得下 3 张。
+ * 现在安卓壳里改写文件（GB 级），localStorage 只做兜底。
+ */
+(function () {
+  console.log('\n【大容量存储】');
+
+  const mkWork = (id, at, baseLen) => ({
+    id, at, createdAt: at, name: id + '.jpg',
+    imgW: 3072, imgH: 2048, docW: 3072, docH: 2048, edits: 2,
+    thumb: 'data:image/jpeg;base64,' + 'T'.repeat(20000),
+    before: '',
+    session: {
+      v: 1, at, imgW: 3072, imgH: 2048, docW: 3072, docH: 2048, items: [], dropped: 0,
+      base: 'data:image/jpeg;base64,' + 'B'.repeat(baseLen)
+    }
+  });
+
+  // 1) 文件预算足够大
+  t('有文件存储预算常量', typeof C.FILE_LIBRARY_BUDGET_BYTES === 'number');
+  t('★ 文件预算远大于 localStorage（这才是能多存的根本）',
+    C.FILE_LIBRARY_BUDGET_BYTES >= 100 * 1024 * 1024,
+    (C.FILE_LIBRARY_BUDGET_BYTES / 1048576) + 'MB vs ' + (C.LIBRARY_BUDGET_BYTES / 1048576) + 'MB');
+
+  // 2) 同一批数据：localStorage 预算下大量降级，文件预算下几乎全保留
+  const lib = [];
+  for (let i = 0; i < 8; i++) lib.push(mkWork('w' + i, 100 - i, 380000));
+
+  const planLocal = C.planLibrary(lib, {
+    maxBytes: C.LIBRARY_BUDGET_BYTES, maxItems: 60,
+    sessionBudgetBytes: C.SESSION_BUDGET_BYTES, pinnedId: 'w0'
+  });
+  const planFile = C.planLibrary(lib, {
+    maxBytes: C.FILE_LIBRARY_BUDGET_BYTES, maxItems: 60,
+    sessionBudgetBytes: C.FILE_LIBRARY_BUDGET_BYTES, pinnedId: 'w0'
+  });
+
+  const localEditable = planLocal.keepIds.length - planLocal.downgradeIds.length;
+  const fileEditable = planFile.keepIds.length - planFile.downgradeIds.length;
+
+  t('★ 复现老问题：localStorage 下 8 张只留得住少数',
+    localEditable <= 4, localEditable);
+  t('★★ 文件存储下 8 张全部可继续编辑',
+    fileEditable === 8, fileEditable);
+  t('★ 文件存储下不淘汰任何记录', planFile.evictIds.length === 0, planFile.evictIds.length);
+
+  // 3) 文件预算也不是无限：超过上限仍要降级（否则磁盘会被写满）
+  const huge = [];
+  for (let i = 0; i < 60; i++) huge.push(mkWork('h' + i, 1000 - i, 4000000));  // 各约 8MB
+  const planHuge = C.planLibrary(huge, {
+    maxBytes: C.FILE_LIBRARY_BUDGET_BYTES, maxItems: 60,
+    sessionBudgetBytes: C.FILE_LIBRARY_BUDGET_BYTES, pinnedId: 'h0'
+  });
+  t('★ 超出文件预算仍会降级（不会无限增长）',
+    planHuge.downgradeIds.length > 0 || planHuge.evictIds.length > 0,
+    { 降级: planHuge.downgradeIds.length, 淘汰: planHuge.evictIds.length });
+  t('置顶的当前作品永远保住会话',
+    planHuge.downgradeIds.indexOf('h0') < 0 && planHuge.evictIds.indexOf('h0') < 0);
+
+  // 4) 接线：JS 侧必须真的用文件优先
+  const fsK = require('fs');
+  const js = fsK.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const java = fsK.readFileSync(__dirname + '/../android/src/com/photostudio/app/MainActivity.java', 'utf8');
+
+  t('有原生 kvWrite / kvRead / kvDelete', /@JavascriptInterface\s+public long kvWrite/.test(java) &&
+    /@JavascriptInterface\s+public String kvRead/.test(java));
+  t('★ 原生侧挡路径穿越（只放行安全文件名）',
+    /safeName\(name\)/.test(java) && /\^\[A-Za-z0-9\._-\]\+\$/.test(java));
+  t('★ 原生侧先写临时文件再改名（中途被杀不会留下半截 JSON）',
+    /name \+ "\.tmp"/.test(java) && /renameTo/.test(java));
+  t('kv 存在应用私有目录（免权限、卸载即清）',
+    /getFilesDir\(\), "kv"/.test(java));
+
+  t('JS 会探测文件存储是否可用', /function kvStorageAvailable\(/.test(js));
+  t('★★ 读作品库时文件优先', /const fromFile = kvLoadLibrary\(\);/.test(js));
+  t('★★ 写作品库时文件优先', /if \(kvStorageAvailable\(\)\) \{[\s\S]{0,600}C\.FILE_LIBRARY_BUDGET_BYTES/.test(js));
+  t('★ 从 localStorage 迁到文件后清掉旧键（释放 5MB）',
+    /kvSaveLibrary\(out\)[\s\S]{0,200}removeItem\(LS_KEY_LIBRARY\)/.test(js));
+  t('文件写失败会退回 localStorage（不能让历史凭空消失）',
+    /文件写失败[\s\S]{0,200}localStorage/.test(js) || /kvSaveLibrary\(S\.library\)[\s\S]{0,400}fallback/.test(js));
+  t('★ 文件存储下会话底图不再压到 2048（保住继续编辑的画质）',
+    /kvStorageAvailable\(\) \? 100000 : C\.SESSION_BASE_MAX_SIDE/.test(js));
+  t('★ 单条会话上限在文件存储下放宽',
+    /const singleLimit = kvStorageAvailable\(\)/.test(js));
+})();
+
 /* ---------- 检查更新 ---------- */
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

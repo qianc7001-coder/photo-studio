@@ -4748,14 +4748,87 @@
     return 'w' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   }
 
+  /* ====================== 大容量存储（作品库专用） ======================
+   *
+   * 背景：WebView 的 localStorage 只有约 5MB。一张照片的「可继续编辑」
+   * 数据约 0.8MB，于是一共只存得下 3 张 —— 第 4 张开始，最早的记录
+   * 会被降级成「只能看预览，点进去变回原图」。这是用户反复反馈的问题。
+   *
+   * 解决：安卓壳里通过原生桥把作品库写到应用私有目录（几 GB 可用），
+   * localStorage 只保留一份**极小的索引**（给旧版本/浏览器兜底）。
+   *
+   * 设计要点：
+   *   - 浏览器里没有桥 → 自动退回 localStorage，功能不缺失，只是张数少
+   *   - 文件读取是同步桥调用，启动时一次，可接受
+   *   - 写入失败（磁盘满）→ 退回 localStorage，绝不让历史凭空消失
+   */
+
+  /** 作品库文件名（原生侧会校验只允许安全字符） */
+  const KV_LIBRARY_FILE = 'library.json';
+
+  /** 原生大容量存储是否可用（有桥且接口存在） */
+  function kvStorageAvailable() {
+    const b = bridge();
+    return !!(b && typeof b.kvWrite === 'function' && typeof b.kvRead === 'function');
+  }
+
+  /** 把作品库写到文件。返回 true 表示已成功落盘 */
+  function kvSaveLibrary(list) {
+    if (!kvStorageAvailable()) return false;
+    const b = bridge();
+    try {
+      const payload = JSON.stringify({ v: 2, at: Date.now(), items: list });
+      const n = b.kvWrite(KV_LIBRARY_FILE, payload);
+      return typeof n === 'number' && n >= 0;
+    } catch (e) {
+      console.warn('[枫叶修图] 作品库写入文件失败', e);
+      return false;
+    }
+  }
+
+  /** 从文件读作品库。返回 null 表示「没有存档」（区别于「空库」） */
+  function kvLoadLibrary() {
+    if (!kvStorageAvailable()) return null;
+    const b = bridge();
+    try {
+      const raw = b.kvRead(KV_LIBRARY_FILE);
+      if (!raw) return null;
+      const j = JSON.parse(raw);
+      const items = (j && Array.isArray(j.items)) ? j.items : [];
+      return items.map(C.normalizeWork).filter((e) => e.id);
+    } catch (e) {
+      console.warn('[枫叶修图] 作品库文件读取失败', e);
+      return null;
+    }
+  }
+
   function loadLibrary() {
+    // 1) 优先读文件（大容量，能存几十上百张）
+    const fromFile = kvLoadLibrary();
+    if (fromFile && fromFile.length) {
+      S.libraryStore = 'file';
+      // 顺手把文件里的内容同步一份到 localStorage 作为索引备份？
+      // **不要**：那会把 5MB 配额又占满，回到老问题。
+      // 只在文件不可用时才需要 localStorage 兜底，见下面。
+      return fromFile;
+    }
+    // 2) 文件里没有（首次升级 / 浏览器环境）→ 读 localStorage
     try {
       const raw = localStorage.getItem(LS_KEY_LIBRARY);
-      if (!raw) return [];
+      if (!raw) { S.libraryStore = kvStorageAvailable() ? 'file' : 'local'; return []; }
       const j = JSON.parse(raw);
       const list = (j && Array.isArray(j.items)) ? j.items : [];
-      // 归一化并丢掉没有 id 的脏条目
-      return list.map(C.normalizeWork).filter((e) => e.id);
+      const out = list.map(C.normalizeWork).filter((e) => e.id);
+      // 老数据在 localStorage 里 → 迁移到文件，然后**清掉旧键**释放 5MB。
+      // 这是升级后"历史条数不变但突然能存更多"的关键一步。
+      if (out.length && kvStorageAvailable() && kvSaveLibrary(out)) {
+        try { localStorage.removeItem(LS_KEY_LIBRARY); } catch (e2) { /* ignore */ }
+        S.libraryStore = 'file';
+        console.info('[枫叶修图] 作品库已从 localStorage 迁移到文件（' + out.length + ' 条）');
+      } else {
+        S.libraryStore = 'local';
+      }
+      return out;
     } catch (e) {
       console.warn('[枫叶修图] 作品库读取失败，将从空开始', e);
       return [];
@@ -4764,6 +4837,38 @@
 
   /** 落盘。返回是否成功（超配额会失败，交给调用方决定怎么退让） */
   function saveLibrary() {
+    // 有大容量存储（安卓壳）→ 直接写文件，**不再受 5MB 限制**。
+    // 这里仍要跑一次 planLibrary，但预算换成文件预算（几十 MB），
+    // 于是几乎不会触发降级 —— 「点进去变回原图」的问题从根上消失。
+    if (kvStorageAvailable()) {
+      const plan = C.planLibrary(S.library, {
+        maxBytes: C.FILE_LIBRARY_BUDGET_BYTES,
+        maxItems: C.LIBRARY_MAX_ITEMS,
+        sessionBudgetBytes: C.FILE_LIBRARY_BUDGET_BYTES,
+        pinnedId: S.workId
+      });
+      if (plan.downgradeIds.length) {
+        for (const e of S.library) {
+          if (plan.downgradeIds.includes(e.id)) e.session = null;
+        }
+      }
+      if (plan.evictIds.length) {
+        S.library = S.library.filter((e) => !plan.evictIds.includes(e.id));
+      }
+      if (plan.note) S.libraryNote = plan.note;
+      if (kvSaveLibrary(S.library)) {
+        S.libraryStore = 'file';
+        // 文件写成功就把 localStorage 里那份清掉，把 5MB 让给别处
+        try {
+          if (localStorage.getItem(LS_KEY_LIBRARY)) localStorage.removeItem(LS_KEY_LIBRARY);
+        } catch (e3) { /* ignore */ }
+        return true;
+      }
+      // 文件写失败（磁盘满 / 权限异常）→ 落到下面的 localStorage 路径，
+      // 宁可少存几张，也不能让用户以为"保存成功"。
+      console.warn('[枫叶修图] 作品库写文件失败，退回 localStorage');
+    }
+
     try {
       const plan = C.planLibrary(S.library, {
         maxBytes: C.LIBRARY_BUDGET_BYTES,
@@ -4859,9 +4964,13 @@
     if (payload) {
       const probe = Object.assign({}, rec, { session: payload });
       const probeBytes = C.estimateWorkBytes(probe);
-      // 单条会话超过总预算的一半就不存了 —— 存下去会把整库挤空，
-      // 用户失去的是「所有照片的历史」，只换来这一张的「可继续编辑」，不划算
-      if (probeBytes <= C.LIBRARY_BUDGET_BYTES * 0.5) {
+      // 单条上限：localStorage 下是总预算的一半（存下去会把整库挤空），
+      // 文件存储下则宽松得多 —— 那边的预算本来就是 240MB，
+      // 一条 1MB 的会话完全不值得为它放弃「可继续编辑」。
+      const singleLimit = kvStorageAvailable()
+        ? C.FILE_LIBRARY_BUDGET_BYTES * 0.5
+        : C.LIBRARY_BUDGET_BYTES * 0.5;
+      if (probeBytes <= singleLimit) {
         rec.session = payload;
       } else {
         // 不静默：告诉用户为什么这张不能继续编辑
@@ -8825,7 +8934,11 @@
    */
   function encodeSessionBase(canvas) {
     if (!canvas) return null;
-    const plan = C.planSessionBase({ w: canvas.width, h: canvas.height });
+    // 文件存储下不缺空间 → 会话底图**不缩放**，等于把工作分辨率原样存下来。
+    // 这样「继续编辑」恢复出来的底图和你离开时一模一样，不会因为存档降质。
+    // localStorage 兜底时才压到 2048（那边一张就 0.8MB，压不住放不下几张）。
+    const maxSide = kvStorageAvailable() ? 100000 : C.SESSION_BASE_MAX_SIDE;
+    const plan = C.planSessionBase({ w: canvas.width, h: canvas.height, maxSide });
     if (!plan.scaled) {
       return canvas.toDataURL('image/jpeg', C.SESSION_BASE_QUALITY);
     }
@@ -8940,6 +9053,7 @@
 
       // 还原编辑记录
       S.edits = [];
+      let failedPatches = 0;   // 有几处 patch 没能恢复（要在提示里说清楚）
       for (const it of (j.items || [])) {
         // 调色图层：没有 patch，参数直接就能还原（不需要解码图片）
         if (it.grade && !it.patch) {
@@ -8958,21 +9072,37 @@
           continue;
         }
         if (!it.patch) continue;
-        const patch = await new Promise((res, rej) => {
-          const im = new Image();
-          im.onload = () => res(im);
-          im.onerror = rej;
-          im.src = it.patch;
-        });
-        const pc = makeCanvas(patch.width, patch.height);
-        pc.getContext('2d').drawImage(patch, 0, 0);
-        S.edits.push({
-          rect: it.rect,
-          patch: pc,
-          feather: it.feather,
-          colorMatch: it.colorMatch,
-          mask: it.mask ? C.unpackMask(it.mask, it.maskLen) : null
-        });
+        // 单张 patch 解码失败**不能中断整次恢复**。
+        //
+        // 这里原来没有 try/catch：任何一张 patch 加载失败（dataURL 被截断、
+        // 内存不足、格式坏掉），异常会一路抛到外层 catch，
+        // 结果 S.edits 停在「恢复了一半」的状态，用户看到的就是
+        // 「记录还在，点进去变回原图」—— 而且报错信息只有一句
+        // 「恢复会话失败」，完全指不到是哪张图的问题。
+        //
+        // 现在：失败的跳过并计数，其余照常恢复，最后如实告诉用户
+        // 「有几处没能恢复」，而不是让他面对一张莫名其妙的原图。
+        try {
+          const patch = await new Promise((res, rej) => {
+            const im = new Image();
+            im.onload = () => res(im);
+            im.onerror = () => rej(new Error('patch 解码失败'));
+            im.src = it.patch;
+          });
+          if (!patch || !patch.width || !patch.height) throw new Error('patch 尺寸非法');
+          const pc = makeCanvas(patch.width, patch.height);
+          pc.getContext('2d').drawImage(patch, 0, 0);
+          S.edits.push({
+            rect: it.rect,
+            patch: pc,
+            feather: it.feather,
+            colorMatch: it.colorMatch,
+            mask: it.mask ? C.unpackMask(it.mask, it.maskLen) : null
+          });
+        } catch (e2) {
+          failedPatches++;
+          console.warn('[枫叶修图] 有一处修改没能恢复', e2);
+        }
       }
       S.redo = [];
       S.docVersion++;              // 文档整体换掉了，旧的在途结果一律作废
@@ -8997,7 +9127,13 @@
       renderHome();
       syncToolbar();
       updateUI();
-      toast('已恢复上次未完成的编辑（' + S.edits.length + ' 处修改）', 3600);
+      // 如实报告：有没恢复成功的就说清楚，别让用户以为「全都回来了」
+      if (failedPatches > 0) {
+        toast('已恢复 ' + S.edits.length + ' 处修改，另有 ' + failedPatches +
+          ' 处没能恢复（数据可能已损坏）', 5000);
+      } else {
+        toast('已恢复上次未完成的编辑（' + S.edits.length + ' 处修改）', 3600);
+      }
     } catch (e) {
       toast('恢复会话失败：' + (e && e.message ? e.message : e), 3600);
     }
@@ -9249,7 +9385,7 @@
     previewGradeFast, previewGradeSoon, renderGradePreview,
     undoStack: () => undoStack,
     // 作品库（跨天修图记录，供测试与外部调用）
-    loadLibrary,
+    loadLibrary, kvStorageAvailable, kvSaveLibrary, kvLoadLibrary,
     saveLibrary,
     touchWork,
     renderLibrary,

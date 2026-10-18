@@ -2776,6 +2776,19 @@
   const LIBRARY_MAX_ITEMS = 60;
 
   /**
+   * 作品库预算（**文件存储**口径）。
+   *
+   * localStorage 只有 5MB，所以那边要精打细算（见 LIBRARY_BUDGET_BYTES）。
+   * 但安卓壳里作品库是写成文件的，应用私有目录可用空间是 GB 级 ——
+   * 再套 3.2MB 那个限制就毫无道理了，正是「只存得下 3 张」的根源。
+   *
+   * 取 240MB：按单张会话约 1MB（可用原始工作分辨率，不再压到 2048），
+   * 足够 60 条上限全部带完整编辑数据，同时给日志/导出留足余量。
+   * 超过时仍按 planLibrary 的规则降级/淘汰，不会无限制增长。
+   */
+  const FILE_LIBRARY_BUDGET_BYTES = 240 * 1024 * 1024;
+
+  /**
    * 缩略图长边（px）。
    *
    * 缩略图是「看得见历史」的全部依赖，但它也是条数上限下唯一会累积的东西。
@@ -7241,7 +7254,7 @@
     storageBytes, estimateWorkBytes, normalizeWork, sortWorksNewestFirst,
     planLibrary, dayStartTs, describeWorkAge, formatWorkClock,
     groupWorksByDay, workLibraryStats,
-    LIBRARY_BUDGET_BYTES, LIBRARY_MAX_ITEMS, THUMB_MAX_SIDE, THUMB_QUALITY,
+    LIBRARY_BUDGET_BYTES, LIBRARY_MAX_ITEMS, FILE_LIBRARY_BUDGET_BYTES, THUMB_MAX_SIDE, THUMB_QUALITY,
     SESSION_BUDGET_BYTES, SESSION_BASE_MAX_SIDE, SESSION_BASE_QUALITY,
     SESSION_PATCH_MAX_CHARS,
     // 会话基准图缩放（把整张工作图缩到 SESSION_BASE_MAX_SIDE 以内）
