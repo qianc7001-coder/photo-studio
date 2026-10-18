@@ -2,21 +2,45 @@
  * 枫叶修图 · 样式（移动优先，深色专业修图界面）
  * ========================================================================== */
 
+/* ---- 主题变量 ----
+ * 所有颜色都走变量，切换主题就是换这一组值（见 html[data-theme=...]）。
+ * 新增样式时**不要写死颜色** —— 写死的颜色在浅色主题下会变成
+ * 「黑底上的深灰字」这种看不清的组合，而且很难靠肉眼在深色模式下发现。
+ */
 :root {
-  --bg: #0e1014;
+  --bg: var(--thumb-ring);
   --bg-canvas: #101216;
   --panel: #171b22;
   --panel-2: #1e232c;
+  --panel-3: #222836;        /* 悬浮层/顶栏（比 panel-2 再亮一档） */
   --line: #2a3140;
   --line-soft: #232936;
   --text: #e8edf5;
   --text-dim: #98a3b5;
-  --text-faint: #6b7688;
+  /* 提示/说明文字。原来的 #6b7688 对面板底只有 3.76:1，
+     低于 WCAG AA 的 4.5:1。调亮到 #8590a4 后：面板 5.36:1、底 5.91:1。 */
+  --text-faint: #8590a4;
   --accent: #4da3ff;
   --accent-dim: #2b7fe0;
   --warn: #ffb020;
   --bad: #ff5a5a;
   --ok: #35d07f;
+  /* 按下态 / 次级背景：深色主题下是「更亮一点」 */
+  --press: #2b323f;
+  --press-2: #262d3a;
+  /* 渐变端色（顶栏、浮层头部） */
+  --grad-a: #1b2029;
+  --grad-b: #161a21;
+  --grad-c: #12151b;
+  /* 滑块头描边（要和背景区分开，所以不能直接用 --bg） */
+  --thumb-ring: #0e1014;
+  /* 引导线模式的高亮色 */
+  --guide: #3ddcc4;
+  --guide-ink: #06231e;
+  /* 危险操作文字 */
+  --danger-text: #ff8b8b;
+  /* 遮罩 */
+  --scrim: rgba(0, 0, 0, .55);
   --r: 12px;
   --r-sm: 8px;
   --sh: 0 8px 30px rgba(0, 0, 0, .5);
@@ -24,6 +48,94 @@
   --sab: env(safe-area-inset-bottom, 0px);
   --sal: env(safe-area-inset-left, 0px);
   --sar: env(safe-area-inset-right, 0px);
+}
+
+/* =============================================================================
+ * 主题
+ *
+ * 三套：
+ *   dark   深色（默认，修图时最不干扰判断色彩）
+ *   light  浅色（白天野外、强光下看得清）
+ *   auto   跟随系统（手机开了深色模式就深色）
+ *
+ * 用 html[data-theme] 选择器而不是给 body 加类：html 上的属性
+ * 在 CSS 加载时就能生效，不会出现「先白闪一下再变深色」。
+ *
+ * 换主题只换变量，不改任何具体规则 —— 这是唯一能保证
+ * 「所有界面一起变、不会漏掉某块硬编码颜色」的做法。
+ * ========================================================================== */
+
+/* 浅色：不是把深色调亮，而是重新定一套。
+   直接反相会让文字发灰、强调色刺眼；这里按浅色界面的惯例：
+   背景近白、卡片纯白、文字深灰、强调色加深一档（浅底上要更深才够对比）。 */
+html[data-theme="light"] {
+  --bg: #f2f4f8;
+  --bg-canvas: #e7eaf0;
+  --panel: #ffffff;
+  --panel-2: #f4f6fa;
+  --panel-3: #ffffff;
+  --line: #d6dbe4;
+  --line-soft: #e4e8ef;
+  --text: #1b2029;
+  --text-dim: #5a6474;
+  /* 提示/说明文字。实测：浅色主题下原来的 #8a93a3 对比度只有 3.1:1，
+     低于 WCAG AA 的 4.5:1 —— 在户外强光下基本看不清。
+     #646c7a 在白底 5.29:1、浅灰底 4.81:1，两处都达标。 */
+  --text-faint: #646c7a;
+  --accent: #1f6fd0;
+  --accent-dim: #1a5fb4;
+  --warn: #b26a00;
+  --bad: #c62828;
+  --ok: #1b7a45;
+  --press: #e6eaf2;
+  --press-2: #eceff5;
+  --grad-a: #ffffff;
+  --grad-b: #f4f6fa;
+  --grad-c: #eef1f6;
+  --thumb-ring: #ffffff;
+  --guide: #0b8a76;
+  --guide-ink: #ffffff;
+  --danger-text: #c62828;
+  --scrim: rgba(20, 26, 36, .32);
+  /* 阴影在浅色下要更淡，否则像脏污 */
+  --sh: 0 8px 24px rgba(24, 32, 46, .14);
+}
+
+/* 深色主题显式声明一遍：data-theme="dark" 与默认值一致，
+   这样即使 JS 写了 dark，也不会因为缺选择器而退回浅色。 */
+html[data-theme="dark"] {
+  --bg: #0e1014;
+  --bg-canvas: #101216;
+  --panel: #171b22;
+  --panel-2: #1e232c;
+  --panel-3: #222836;
+  --line: #2a3140;
+  --line-soft: #232936;
+  --text: #e8edf5;
+  --text-dim: #98a3b5;
+  --text-faint: #8590a4;
+  --accent: #4da3ff;
+  --accent-dim: #2b7fe0;
+  --warn: #ffb020;
+  --bad: #ff5a5a;
+  --ok: #35d07f;
+  --press: #2b323f;
+  --press-2: #262d3a;
+  --grad-a: #1b2029;
+  --grad-b: #161a21;
+  --grad-c: #12151b;
+  --thumb-ring: #0e1014;
+  --guide: #3ddcc4;
+  --guide-ink: #06231e;
+  --danger-text: #ff8b8b;
+  --scrim: rgba(0, 0, 0, .55);
+  --sh: 0 8px 30px rgba(0, 0, 0, .5);
+}
+
+/* 切换主题时给一个短过渡，避免整屏颜色「啪」一下跳过去。
+   注意只过渡颜色，不碰 transform/opacity —— 那些有动画的元素会被带乱。 */
+html, body {
+  transition: background-color .18s ease, color .18s ease;
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -82,7 +194,7 @@ button:disabled { opacity: .38; cursor: default; }
   transition: background .15s, color .15s;
 }
 .tb-btn span { font-size: 10px; letter-spacing: .3px; }
-.tb-btn:hover, .tb-btn:active { background: #262d3a; color: var(--text); }
+.tb-btn:hover, .tb-btn:active { background: var(--press-2); color: var(--text); }
 .tb-btn.icon { min-width: 40px; }
 .tb-btn.icon svg { width: 21px; height: 21px; }
 /* 「更多」的三个点是实心圆：全局 svg 规则是 fill:none + stroke，这里必须覆盖 */
@@ -196,7 +308,7 @@ button:disabled { opacity: .38; cursor: default; }
   backdrop-filter: blur(8px);
 }
 .hud-btn.wide { min-width: 58px; font-variant-numeric: tabular-nums; }
-.hud-btn:active { background: #2b323f; color: #fff; }
+.hud-btn:active { background: var(--press); color: #fff; }
 
 #sel-info { gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
 .hud-pill {
@@ -306,8 +418,8 @@ ul.whatsnew li { margin-bottom: 5px; }
   content: ''; position: absolute; top: 50%; width: 0; height: 0;
   border: 5px solid transparent; margin-top: -5px;
 }
-.cmp-handle span::before { left: 4px; border-right-color: #2b3038; }
-.cmp-handle span::after { right: 4px; border-left-color: #2b3038; }
+.cmp-handle span::before { left: 4px; border-right-color: var(--press); }
+.cmp-handle span::after { right: 4px; border-left-color: var(--press); }
 
 .cmp-tag {
   position: absolute; top: calc(12px + var(--sat));
@@ -411,9 +523,9 @@ ul.whatsnew li { margin-bottom: 5px; }
 .tool svg { width: 18px; height: 18px; }
 .tool.active { background: rgba(77, 163, 255, .14); color: var(--accent); }
 /* 引导线用青色，和「框选/画笔/平移」的蓝色区分开 —— 它是构图工具，不是选择工具 */
-#btn-guide.active { background: rgba(61, 220, 196, .14); color: #3ddcc4; }
-#btn-guide.active b { background: #3ddcc4; color: #06231e; }
-.tool:active { background: #262d3a; }
+#btn-guide.active { background: rgba(61, 220, 196, .14); color: var(--guide); }
+#btn-guide.active b { background: var(--guide); color: var(--guide-ink); }
+.tool:active { background: var(--press-2); }
 
 #brush-bar, #sel-bar, #guide-bar {
   display: flex; align-items: center; gap: 8px;
@@ -611,7 +723,7 @@ ul.whatsnew li { margin-bottom: 5px; }
   word-break: break-word;
 }
 #guide-tip, #guide-tip-free {
-  border-left: 2px solid #3ddcc4;
+  border-left: 2px solid var(--guide);
   margin-left: 12px; padding-left: 8px;
 }
 /* 自由笔迹提示用暖色边框：它会把笔迹画进图片，是「有副作用」的操作，需要更醒目的提示 */
@@ -635,10 +747,10 @@ input[type=range]::-webkit-slider-runnable-track { height: 4px; border-radius: 2
 input[type=range]::-webkit-slider-thumb {
   -webkit-appearance: none; width: var(--ps-thumb); height: var(--ps-thumb); margin-top: -6.5px;
   border-radius: 50%; background: var(--accent);
-  border: 2px solid #0e1014; box-shadow: 0 1px 5px rgba(0, 0, 0, .5);
+  border: 2px solid var(--thumb-ring); box-shadow: 0 1px 5px rgba(0, 0, 0, .5);
 }
 input[type=range]::-moz-range-track { height: 4px; border-radius: 2px; background: var(--line); }
-input[type=range]::-moz-range-thumb { width: var(--ps-thumb); height: var(--ps-thumb); border-radius: 50%; background: var(--accent); border: 2px solid #0e1014; }
+input[type=range]::-moz-range-thumb { width: var(--ps-thumb); height: var(--ps-thumb); border-radius: 50%; background: var(--accent); border: 2px solid var(--thumb-ring); }
 
 .chips { display: flex; gap: 6px; flex: 1 1 auto; overflow-x: auto; scrollbar-width: none; padding: 2px 0; }
 .chips::-webkit-scrollbar { display: none; }
@@ -649,7 +761,7 @@ input[type=range]::-moz-range-thumb { width: var(--ps-thumb); height: var(--ps-t
   color: var(--text-dim); font-size: 11.5px; white-space: nowrap;
 }
 .chip.on { background: rgba(77, 163, 255, .16); border-color: rgba(77, 163, 255, .45); color: var(--accent); }
-.chip:active { background: #2b323f; }
+.chip:active { background: var(--press); }
 
 #prompt-panel { padding: 0 10px 8px; }
 .row { display: flex; gap: 8px; align-items: center; margin-bottom: 7px; }
@@ -687,9 +799,9 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 .primary:active { filter: brightness(.9); }
 .primary.grow { flex: 1 1 auto; }
 .ghost { background: var(--panel-2); border: 1px solid var(--line); color: var(--text-dim); }
-.ghost:active { background: #2b323f; }
+.ghost:active { background: var(--press); }
 .ghost.small, .danger { padding: 7px 13px; font-size: 12.5px; }
-.danger { background: rgba(255, 90, 90, .12); border: 1px solid rgba(255, 90, 90, .35); color: #ff8b8b; width: 100%; }
+.danger { background: rgba(255, 90, 90, .12); border: 1px solid rgba(255, 90, 90, .35); color: var(--danger-text); width: 100%; }
 
 .model-btn {
   display: flex; align-items: center; gap: 7px;
@@ -852,7 +964,7 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
   color: var(--text-faint);
 }
 .layer-del svg { width: 15px; height: 15px; }
-.layer-del:active { color: #ff8b8b; }
+.layer-del:active { color: var(--danger-text); }
 
 .layer-param { margin-bottom: 8px; }
 .layer-param:last-child { margin-bottom: 0; }
@@ -951,7 +1063,7 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
   border: 1px solid var(--line-soft);
   box-shadow: none;
 }
-.home-new.ghost:active { background: #2b323f; color: var(--text); }
+.home-new.ghost:active { background: var(--press); color: var(--text); }
 
 #history .sheet-body { max-width: 600px; }
 
@@ -1124,7 +1236,7 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
   overflow: hidden;
   transition: border-color .15s, background .15s;
 }
-.lib-card:active { background: #2b323f; border-color: var(--accent-dim); }
+.lib-card:active { background: var(--press); border-color: var(--accent-dim); }
 
 .lib-thumb {
   display: block; width: 100%;
@@ -1399,7 +1511,7 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
   border: 1px solid var(--line);
   backdrop-filter: blur(6px);
 }
-.cmp-reset:active { background: #2b323f; }
+.cmp-reset:active { background: var(--press); }
 
 /* ======================= 接缝契合度评分 ======================= */
 .layer-score {
@@ -1431,7 +1543,7 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 .layer-score.fair { border-color: rgba(255, 176, 32, .35); }
 .layer-score.fair .ls-num { color: #ffd591; }
 .layer-score.poor { border-color: rgba(255, 90, 90, .35); }
-.layer-score.poor .ls-num { color: #ff8b8b; }
+.layer-score.poor .ls-num { color: var(--danger-text); }
 
 /* =============================================================================
  * 设置面板 · 手机系统设置风格
@@ -1622,7 +1734,7 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
   align-items: center;
   gap: 12px;
 }
-#settings .st-row-btn:active { background: #2b323f; }
+#settings .st-row-btn:active { background: var(--press); }
 #settings .st-row-btn .st-label { flex: 1 1 auto; }
 #settings .st-arrow {
   flex: 0 0 auto;
@@ -1634,7 +1746,7 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
   stroke-linejoin: round;
 }
 /* 破坏性操作：红色文字 */
-#settings .st-row-btn.st-danger .st-label { color: #ff8b8b; }
+#settings .st-row-btn.st-danger .st-label { color: var(--danger-text); }
 
 /* 一行里排两个操作按钮（供应商配置用）。
    不能复用 .st-row-btn —— 那条是给「整行可点的 <button>」的，
@@ -1647,7 +1759,7 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 }
 #settings .st-row-actions .st-btn { flex: 1 1 0; min-width: 0; }
 #settings .st-row-actions .st-btn.st-btn-danger {
-  color: #ff8b8b;
+  color: var(--danger-text);
   border-color: rgba(255, 139, 139, .28);
 }
 #settings .st-row-actions .st-btn.st-btn-danger:active { background: #33262b; }
@@ -1682,7 +1794,7 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
   font-weight: 600;
   transition: background .15s, color .15s;
 }
-#settings .st-btn:active { background: #2b323f; color: var(--text); }
+#settings .st-btn:active { background: var(--press); color: var(--text); }
 
 /* 卡片外的提示文字缩进一点，和卡片对齐 */
 #settings .tip { margin: 8px 4px 0; }
@@ -1782,7 +1894,7 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
   text-align: left;
   transition: background .15s, border-color .15s;
 }
-.home-item:active { background: #2b323f; border-color: var(--accent-dim); }
+.home-item:active { background: var(--press); border-color: var(--accent-dim); }
 .home-thumb {
   flex: 0 0 auto;
   width: 62px; height: 62px;

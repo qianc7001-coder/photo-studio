@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-4039%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-4077%20passed-brightgreen.svg)](#测试)
 
 给摄影师用的**局部修图**工具：在照片上框选任意区域，交给生图模型修改，结果自动贴回原位置。
 
 **核心特点**：结果无缝融合，非破坏性可调，保留拍摄信息。
 
-> 最新版本 **v3.8.0** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
+> 最新版本 **v3.8.1** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
 
 ---
 
@@ -301,7 +301,7 @@ node tools/migrate-test.js     # 配置迁移（模拟老用户升级路径）
 node tools/e2e-test.js         # 端到端（jsdom + 真实 canvas，逐像素校验）
 ```
 
-当前规模：**4039 项**（1466 单元 + 1421 回归 + 17 配置迁移 + 1135 端到端）。
+当前规模：**4077 项**（1477 单元 + 1448 回归 + 17 配置迁移 + 1135 端到端）。
 
 端到端测试会：
 - 启动一个假生图模型服务器
@@ -427,7 +427,8 @@ WebView 里用 `file://` 打开页面时，跨域请求会被拦截，而且 `lo
 
 | 版本 | 主要变化 |
 |---|---|
-| **v3.8.0** | 新增「参考图」：额外加几张图让模型「照这个改」（换衣服/换姿势/参考风格），支持多张并按模型能力自动限流；去掉左下角 ± 缩放按钮（双指缩放更好用）；后台完成提示几秒后自动收起 |
+| **v3.8.1** | 新增主题：深色 / 浅色 / 跟随系统（默认跟随，实时响应系统切换）；两套都按 WCAG AA 校过对比度（原先深色那档提示字只有 3.76:1，已修正） |
+| [v3.8.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.8.0) | 新增「参考图」：额外加几张图让模型「照这个改」（换衣服/换姿势/参考风格），支持多张并按模型能力自动限流；去掉左下角 ± 缩放按钮（双指缩放更好用）；后台完成提示几秒后自动收起 |
 | [v3.7.3](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.7.3) | 修复收不到生成通知：原来只在开「一直保活」时才申请通知权限，多数人从没被问过，而 Android 13+ 没授权就是静默丢弃；现在启动就申请、发前再检查，设置页还加了通知状态显示和「去打开」直达按钮 |
 | [v3.7.2](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.7.2) | 生成完成/失败都发系统通知（失败带具体原因）；调色滑块只能按住滑块头拖（放大到 28px 并加光晕），滑列表不再误触；首页不再显示工具栏 |
 | [v3.7.1](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.7.1) | 修复「先调过色就再也生成不了」（拼请求图时对调色图层无条件贴图，抛出一个看不懂的英文错误）与「从首页进旧照片变回原图」；调色滑块放大到 24px 并改单列通栏 —— 之前两列时滑块只有 60 多像素长，根本滑不到 |

@@ -4241,6 +4241,44 @@
     };
   }
 
+  /* ====================== 主题 ======================
+   *
+   * 三档：
+   *   auto  跟随系统（默认）—— 手机开深色就用深色
+   *   dark  始终深色
+   *   light 始终浅色
+   *
+   * 为什么默认 auto：这个应用主要在手机上用，而手机的深色模式通常是
+   * 按时间自动切换的（晚上开）。跟随系统 = 用户不用管。
+   *
+   * 为什么不做更多花哨主题（蓝色/粉色…）：修图时周围的颜色会影响
+   * 对画面色彩的判断 —— 一个偏蓝的界面会让你觉得照片不够暖。
+   * 所以只提供中性深浅两套，且不鼓励长时间用浅色修片。
+   */
+
+  const THEMES = [
+    { id: 'auto', zh: '跟随系统', hint: '手机开深色就用深色' },
+    { id: 'dark', zh: '深色', hint: '修图推荐：不影响判色' },
+    { id: 'light', zh: '浅色', hint: '强光下看得更清' }
+  ];
+
+  function getTheme(id) {
+    return THEMES.find((t) => t.id === id) || THEMES[0];
+  }
+
+  /**
+   * 「跟随系统」时实际该用哪一套。
+   * @param {string} id      用户选的主题
+   * @param {boolean} sysDark 系统是否深色
+   * @returns {'dark'|'light'}
+   */
+  function resolveTheme(id, sysDark) {
+    if (id === 'light') return 'light';
+    if (id === 'dark') return 'dark';
+    // auto（含任何非法值）：跟随系统，拿不到就深色（默认观感）
+    return sysDark === true ? 'dark' : (sysDark === false ? 'light' : 'dark');
+  }
+
   /* ====================== 7.01f 浏览器能力兼容 ====================== */
 
   /**
@@ -6847,6 +6885,8 @@
     createUndoStack, makeUndoCommand, commandDirection,
     buildTimeline, describeCommand, planHistoryJump,
     CFG_REV, migrateCfg,
+    // 主题
+    THEMES, getTheme, resolveTheme,
     // 多组供应商预设
     PRESET_KEYS, PRESET_MAX, normalizePreset, normalizePresets, defaultPresetName,
     genPresetId, presetFromCfg, presetMatchesCfg, findActivePreset, applyPreset,

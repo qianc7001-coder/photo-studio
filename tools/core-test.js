@@ -4079,6 +4079,32 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
 })();
 // ===== 参考图结束 =====
 
+
+/* ===== 主题 =====
+ * 三档：auto 跟随系统 / dark / light。
+ * 关键不变量：resolveTheme 必须真的听系统，且非法值要能安全回退。
+ */
+(function () {
+  console.log('\n【主题】');
+
+  t('有三档主题', C.THEMES.length === 3, C.THEMES.map((t) => t.id));
+  t('包含 auto / dark / light',
+    ['auto', 'dark', 'light'].every((id) => C.THEMES.some((t) => t.id === id)));
+  t('每档都有中文名与说明', C.THEMES.every((t) => t.zh && t.hint));
+
+  t('auto + 系统深色 → dark', C.resolveTheme('auto', true) === 'dark');
+  t('auto + 系统浅色 → light', C.resolveTheme('auto', false) === 'light');
+  t('dark 不受系统影响（系统浅色仍是 dark）', C.resolveTheme('dark', false) === 'dark');
+  t('light 不受系统影响（系统深色仍是 light）', C.resolveTheme('light', true) === 'light');
+  t('非法值退回 auto 行为（跟随系统）',
+    C.resolveTheme('nonsense', true) === 'dark' && C.resolveTheme('nonsense', false) === 'light');
+  t('空值也不崩', C.resolveTheme('', false) === 'light');
+  t('系统判断失败时用深色（应用默认观感）',
+    C.resolveTheme('auto', undefined) === 'dark');
+  t('getTheme 未知 id 回落到第一项', C.getTheme('zzz').id === C.THEMES[0].id);
+})();
+// ===== 主题结束 =====
+
 /* ---------- 检查更新 ---------- */
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

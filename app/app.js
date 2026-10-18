@@ -195,6 +195,8 @@
     // 设置页那张卡片只在存过配置后才显得有用。
     presets: [],
     activePreset: '',
+    // 主题：auto 跟随系统 / dark / light
+    theme: 'auto',
     guideStrokeOverlay: true,
     expPresetChosen: false,
     expFormat: 'jpeg',
@@ -248,6 +250,7 @@
     'historyBudgetMB', 'autoSaveSession',
     'keepAlive', 'keepAliveAlways',
     'fusion', 'fusionCenter', 'fusionGrain', 'envFit', 'autoCheckUpdate',
+    'theme',
     // 多组供应商：presets 是数组（每组含 provider/baseUrl/apiKey/model），
     // activePreset 记住当前用的是哪一组（手改连接信息后可能不再指向任何一组）
     'presets', 'activePreset'
@@ -958,6 +961,89 @@
     if (!refImages.length) return;
     refImages = [];
     renderRefImages();
+  }
+
+  /* ============================ 主题 ============================
+   *
+   * 只做一件事：把 html[data-theme] 设成真正要用的那套。
+   * 所有颜色都在 CSS 变量里（见 style.css 开头），所以这里不用碰任何样式。
+   *
+   * 「跟随系统」必须**实时**响应系统切换，不能只在启动时读一次 ——
+   * 很多人设了「日落到日出自动深色」，应用一直开着的话，
+   * 不监听就永远是白天那套。
+   */
+
+  /** 系统当前是不是深色 */
+  function systemPrefersDark() {
+    try {
+      return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    } catch (e) {
+      return true;   // 判断不了就按深色（应用默认观感）
+    }
+  }
+
+  /** 把主题应用到 DOM */
+  function applyTheme() {
+    const want = C.resolveTheme(S.cfg.theme, systemPrefersDark());
+    const el = document.documentElement;
+    if (el.getAttribute('data-theme') !== want) el.setAttribute('data-theme', want);
+    // 同步状态栏颜色（安卓 WebView 里由原生桥处理；浏览器里忽略）
+    const b = bridge();
+    if (b && b.setStatusBarTheme) {
+      try { b.setStatusBarTheme(want === 'light'); } catch (e) { /* ignore */ }
+    }
+    // 界面上的主题选择器要反映当前档位（不是「实际用的」那套，
+    // 而是用户选的那档：选了「跟随系统」就该显示「跟随系统」）
+    const cur = C.getTheme(S.cfg.theme).id;
+    document.querySelectorAll('#theme-chips [data-theme-id]').forEach((b2) => {
+      b2.classList.toggle('on', b2.dataset.themeId === cur);
+    });
+    S.themeResolved = want;
+    // 画布四周的背景色是从 CSS 变量读的，主题变了必须重新读一遍并重绘，
+    // 否则会出现「界面变浅了，但照片周围还是深色」这种割裂感。
+    try {
+      refreshBgColor();
+      if (ctx) draw();
+    } catch (e) { /* 画布还没就绪时忽略 */ }
+    return want;
+  }
+
+  /** 用户在设置里改主题 */
+  function setTheme(id) {
+    S.cfg.theme = C.getTheme(id).id;
+    saveCfg();
+    applyTheme();
+    toast('主题：' + C.getTheme(S.cfg.theme).zh, 1800);
+  }
+
+  /** 渲染主题选择器（只在设置页里，很小的一个 chips） */
+  function renderThemeChips() {
+    const box = $('theme-chips');
+    if (!box) return;
+    box.innerHTML = '';
+    for (const th of C.THEMES) {
+      const b = document.createElement('button');
+      b.className = 'chip' + (th.id === C.getTheme(S.cfg.theme).id ? ' on' : '');
+      b.dataset.themeId = th.id;
+      b.textContent = th.zh;
+      b.title = th.hint || '';
+      b.onclick = () => setTheme(th.id);
+      box.appendChild(b);
+    }
+  }
+
+  /** 监听系统深浅色变化（只在「跟随系统」时需要真的响应） */
+  function watchSystemTheme() {
+    try {
+      const mq = window.matchMedia('(prefers-color-scheme: dark)');
+      const onChange = () => {
+        // 用户选了明确的深/浅就不受系统影响，但还是要重算一次
+        // （切回 auto 时能立刻跟上，不用等下次启动）
+        applyTheme();
+      };
+      if (mq.addEventListener) mq.addEventListener('change', onChange);
+      else if (mq.addListener) mq.addListener(onChange);   // 老内核
+    } catch (e) { /* 不支持就算了，启动时读一次足够 */ }
   }
 
   function setBusy(on, title, sub) {
@@ -6959,6 +7045,7 @@
     fillPresetList();
     updatePresetUI();
     syncVendorPresets();
+    renderThemeChips();
     updateCallLogBrief();
     $('set-provider').value = S.cfg.provider;
     $('set-baseurl').value = S.cfg.baseUrl;
@@ -8511,6 +8598,12 @@
     // 后台保活：把当前状态同步给原生。
     // 无条件调用 —— 桥可能比 boot 晚就绪，syncKeepAlive 内部会实时探测并自行处理。
     // 常驻保活必须在这里补一次，否则用户上次开了常驻、这次重启就失效了。
+    // 主题：尽早应用，避免先闪一下深色再变浅色。
+    // 这里在 boot 里就调，而不是等用户打开设置页。
+    applyTheme();
+    watchSystemTheme();
+    renderThemeChips();
+
     syncKeepAlive();
     // 通知权限：**启动就申请**，不再挂在「常驻保活」这个开关上。
     // 以前只有开了常驻保活才申请，结果是绝大多数用户从来没被问过，

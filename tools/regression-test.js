@@ -1822,7 +1822,11 @@ console.log('\n【提示词】每次请求都要带上「测出来的」周围�
 
   // 5) 破坏性操作单独成卡 + 红色文字
   t('清空数据单独成卡', /st-card[\s\S]{0,200}id="btn-clear"/.test(seg));
-  t('清空数据用红色文字', /\.st-danger \.st-label \{ color: #ff8b8b/.test(css));
+  // 破坏性操作必须是红色。现在颜色走变量（--danger-text），
+  // 这样浅色主题下会换成深红（#ff8b8b 在白底上太淡看不清）。
+  t('清空数据用红色文字', /\.st-danger \.st-label \{ color: var\(--danger-text\)/.test(css));
+  t('危险色是变量（两套主题各有一份）',
+    /--danger-text:\s*#ff8b8b/.test(css) && /--danger-text:\s*#c62828/.test(css));
 
   // 6) 右侧值要右对齐（系统设置的关键观感）
   t('输入框值右对齐', /\.st-input \{[\s\S]{0,300}text-align: right/.test(css));
@@ -2295,6 +2299,116 @@ console.log('\n【发布】历史版本必须可下载（README 与归档一致�
   t('绑定处做了判空（元素不在也不崩）',
     /if \(\$\('zoom-in'\)\) \$\('zoom-in'\)\.onclick/.test(js));
   t('双指缩放实现仍在', /S\.pointers\.size === 2/.test(js) && /type: 'pinch'/.test(js));
+})();
+
+
+/* ===== 主题：切换必须真的换掉所有颜色 =====
+ * 最容易犯的错是「只换了背景，某块文字还是深色主题的灰」——
+ * 那在浅色下就是白底灰字，看不清。所以下面把关键规则钉住。
+ */
+(function () {
+  console.log('\n【主题接线】');
+  const fsT = require('fs');
+  const css = fsT.readFileSync(__dirname + '/../app/style.css', 'utf8');
+  const js = fsT.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html = fsT.readFileSync(__dirname + '/../app/index.html', 'utf8');
+
+  t('有浅色主题定义', /html\[data-theme="light"\]\s*\{/.test(css));
+  t('有深色主题定义（显式写，防止缺选择器时退回浅色）',
+    /html\[data-theme="dark"\]\s*\{/.test(css));
+  t('两套都覆盖了关键变量', (() => {
+    const pick = (sel) => {
+      const m = new RegExp(sel + '\\s*\\{([\\s\\S]*?)\\}').exec(css);
+      return m ? m[1] : '';
+    };
+    const light = pick('html\\[data-theme="light"\\]');
+    const dark = pick('html\\[data-theme="dark"\\]');
+    const need = ['--bg', '--panel', '--text', '--text-dim', '--text-faint', '--accent', '--line', '--press'];
+    return need.every((v) => light.indexOf(v + ':') >= 0) &&
+      need.every((v) => dark.indexOf(v + ':') >= 0);
+  })());
+
+  // 硬编码颜色会让浅色主题出问题
+  t('按下态用了变量而不是写死颜色', !/background:\s*#2b323f/.test(css));
+  t('导航手柄三角用了变量', !/border-right-color:\s*#2b3038/.test(css));
+  t('滑块描边用变量（浅色下不能是黑圈）', !/border:\s*2px solid #0e1014/.test(css));
+  t('引导线高亮用变量', !/color:\s*#3ddcc4/.test(css));
+
+  // 设置页与 JS 接线
+  t('设置里有主题选择器', /id="theme-chips"/.test(html));
+  t('有应用主题的函数', /function applyTheme\(/.test(js));
+  t('有切换主题的函数', /function setTheme\(/.test(js));
+  t('启动时就应用（不等用户打开设置）', /applyTheme\(\);\s*\n\s*watchSystemTheme\(\);/.test(js));
+  t('★ 监听系统深浅色变化（否则「跟随系统」不会实时生效）',
+    /matchMedia\('\(prefers-color-scheme: dark\)'\)/.test(js) && /addEventListener\('change'/.test(js));
+  t('老内核用 addListener 兜底', /mq\.addListener\(onChange\)/.test(js));
+  t('主题写进配置持久化', /'theme'/.test(js.slice(js.indexOf('const PERSIST_KEYS'), js.indexOf('const PERSIST_KEYS') + 900)));
+  t('切换主题后画布背景也跟着刷新', /refreshBgColor\(\);[\s\S]{0,80}draw\(\);/.test(js));
+  t('设置页刷新时会渲染主题选择器', /renderThemeChips\(\);/.test(js));
+})();
+
+
+/* ===== 主题对比度：不能有「看不清」的组合 =====
+ * 换主题最容易翻车的地方不是没生效，而是**生效了但看不清**：
+ * 深色主题的灰字放到浅色底上，白底浅灰字 —— 在户外强光下等于没写。
+ * 这里按 WCAG AA（正文 4.5:1）实测两套主题的关键组合。
+ */
+(function () {
+  console.log('\n【主题对比度】');
+  const fsC = require('fs');
+  const css = fsC.readFileSync(__dirname + '/../app/style.css', 'utf8');
+
+  const lum = (hex) => {
+    const n = parseInt(hex.slice(1), 16);
+    const c = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => {
+      v /= 255;
+      return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+    });
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  };
+  const ratio = (a, b) => {
+    const l1 = lum(a), l2 = lum(b);
+    const hi = Math.max(l1, l2), lo = Math.min(l1, l2);
+    return (hi + 0.05) / (lo + 0.05);
+  };
+  const varOf = (block, name) => {
+    const m = new RegExp(name + ':\\s*(#[0-9a-fA-F]{6})').exec(block);
+    return m ? m[1] : null;
+  };
+  const pick = (sel) => {
+    const m = new RegExp(sel + '\\s*\\{([\\s\\S]*?)\\}').exec(css);
+    return m ? m[1] : '';
+  };
+
+  const light = pick('html\\[data-theme="light"\\]');
+  const dark = pick('html\\[data-theme="dark"\\]');
+
+  const check = (label, block, pairs) => {
+    for (const [name, fgKey, bgKey] of pairs) {
+      const fg = varOf(block, fgKey);
+      const bg = varOf(block, bgKey);
+      if (!fg || !bg) { t(label + ' ' + name + ' 取色成功', false, [fg, bg]); continue; }
+      const r = ratio(fg, bg);
+      t(label + ' ' + name + ' ≥4.5:1', r >= 4.5, Number(r.toFixed(2)));
+    }
+  };
+
+  // 浅色：正文/次要/弱化 都要在纯白卡片和白底上看清
+  check('浅色', light, [
+    ['正文/白', '--text', '--panel'],
+    ['次要/白', '--text-dim', '--panel'],
+    ['弱化/白', '--text-faint', '--panel'],
+    ['弱化/浅底', '--text-faint', '--bg'],
+    ['强调/白', '--accent', '--panel'],
+    ['危险/白', '--danger-text', '--panel']
+  ]);
+  // 深色：同理（深色下本来就是亮字暗底）
+  check('深色', dark, [
+    ['正文/面板', '--text', '--panel'],
+    ['次要/面板', '--text-dim', '--panel'],
+    ['弱化/面板', '--text-faint', '--panel'],
+    ['弱化/底', '--text-faint', '--bg']
+  ]);
 })();
 
 /* ---------- 检查更新 ---------- */
