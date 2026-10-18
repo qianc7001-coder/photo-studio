@@ -4312,6 +4312,111 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('详情默认收起（不淹掉列表）', /box\.hidden = true/.test(js));
 })();
 
+
+/* ===== 增量栅格化：必须与全量逐像素一致，且快得下来 ===== */
+(function () {
+  console.log('\n【画笔增量栅格化】');
+
+  // 1) 与全量逐像素一致（这是最硬的要求：
+  //    增量一旦和全量有偏差，用户看到的掩膜和真正发出去的范围就对不上）
+  const W = 500, H = 360;
+  const mkStrokes = () => {
+    const out = [];
+    for (let i = 0; i < 8; i++) {
+      const pts = [];
+      for (let k = 0; k < 22; k++) pts.push({ x: 40 + i * 55 + k * 4, y: 70 + Math.sin(k / 3 + i) * 45 });
+      out.push({ mode: i % 2 ? 'restore' : 'erase', radius: 15, points: pts });
+    }
+    return out;
+  };
+  const strokes = mkStrokes();
+  const full = C.strokesToMask(strokes, W, H);
+  let inc = new Float32Array(W * H);
+  inc.fill(1);
+  for (const st of strokes) C.applyStrokeToMask(inc, st, W, H);
+  let diff = 0, maxD = 0;
+  for (let i = 0; i < full.length; i++) {
+    const d = Math.abs(full[i] - inc[i]);
+    if (d > 1e-6) { diff++; if (d > maxD) maxD = d; }
+  }
+  t('★★ 增量结果与全量逐像素一致', diff === 0, [diff, maxD]);
+
+  // 2) 缓冲区复用后重复调用不能串味
+  let inc2 = new Float32Array(W * H); inc2.fill(1);
+  for (const st of strokes) C.applyStrokeToMask(inc2, st, W, H);
+  let diff2 = 0;
+  for (let i = 0; i < full.length; i++) if (Math.abs(full[i] - inc2[i]) > 1e-6) diff2++;
+  t('★ 缓冲复用后结果不变（不串味）', diff2 === 0, diff2);
+
+  // 3) 擦/恢复语义
+  let m1 = new Float32Array(100 * 100); m1.fill(1);
+  C.applyStrokeToMask(m1, { mode: 'erase', radius: 20, points: [{ x: 50, y: 50 }, { x: 60, y: 50 }] }, 100, 100);
+  t('擦除会把保护区降下来', m1[(50 * 100) + 55] < 0.5, m1[(50 * 100) + 55]);
+  C.applyStrokeToMask(m1, { mode: 'restore', radius: 20, points: [{ x: 50, y: 50 }, { x: 60, y: 50 }] }, 100, 100);
+  t('恢复会把可改区加回去', m1[(50 * 100) + 55] > 0.5, m1[(50 * 100) + 55]);
+
+  // 4) 边界与非法输入
+  t('空笔迹返回 false', C.applyStrokeToMask(new Float32Array(100), { points: [] }, 10, 10) === false);
+  t('掩膜长度不对返回 false',
+    C.applyStrokeToMask(new Float32Array(50), { points: [{ x: 1, y: 1 }] }, 10, 10) === false);
+  t('null 不崩', C.applyStrokeToMask(null, { points: [{ x: 1, y: 1 }] }, 10, 10) === false);
+  // 笔迹完全在画布外：不能崩，也不能写到界外
+  const outside = new Float32Array(100); outside.fill(1);
+  C.applyStrokeToMask(outside, { mode: 'erase', radius: 5, points: [{ x: -500, y: -500 }] }, 10, 10);
+  t('界外笔迹不会越界写', outside[0] === 1);
+
+  // 5) 性能：增量必须比全量快一个数量级
+  const BW = 1600, BH = 1200;
+  const many = [];
+  for (let i = 0; i < 12; i++) {
+    const pts = [];
+    for (let k = 0; k < 40; k++) pts.push({ x: 100 + i * 100 + k * 6, y: 400 + Math.sin(k / 4) * 60 });
+    many.push({ mode: 'erase', radius: 30, points: pts });
+  }
+  const t0 = process.hrtime.bigint();
+  C.strokesToMask(many, BW, BH);
+  const fullMs = Number(process.hrtime.bigint() - t0) / 1e6;
+
+  const big = C.strokesToMask(many, BW, BH);
+  const seg = { mode: 'erase', radius: 30, points: [{ x: 900, y: 500 }, { x: 908, y: 503 }] };
+  C.applyStrokeToMask(big, seg, BW, BH);   // 预热（首次要分配缓冲）
+  const t1 = process.hrtime.bigint();
+  for (let i = 0; i < 10; i++) C.applyStrokeToMask(big, seg, BW, BH);
+  const incMs = Number(process.hrtime.bigint() - t1) / 1e6 / 10;
+
+  t('★★ 增量比全量快 10 倍以上', fullMs / incMs >= 10,
+    { full: fullMs.toFixed(1) + 'ms', inc: incMs.toFixed(1) + 'ms', 倍数: (fullMs / incMs).toFixed(0) });
+  t('★ 增量单帧在 20ms 以内（够 60fps）', incMs < 20, incMs.toFixed(1) + 'ms');
+})();
+
+/* ===== 调色拖动：跳过重参数 + 更小预览 ===== */
+(function () {
+  console.log('\n【调色预览优化】');
+  const fsP = require('fs');
+  const js = fsP.readFileSync(__dirname + '/../app/app.js', 'utf8');
+
+  t('预览尺寸已降到 480', /const PREVIEW_MAX = 480/.test(js),
+    (/const PREVIEW_MAX = (\d+)/.exec(js) || [])[1]);
+  t('★ 拖动中跳过清晰度与暗角',
+    /k === 'clarity' \|\| k === 'vignette'/.test(js));
+  t('松手后仍补全质量（不丢效果）', /previewGradeSoon\(\)/.test(js));
+  t('缩略图路径用的是过滤后的参数', /C\.gradePixels\(id, grade, \{ mask: null \}\)/.test(js));
+  t('有掩膜时强制走全质量（坐标对不上宁可不快）',
+    /if \(!fast \|\| hasMask\)/.test(js));
+
+  // 掩膜缓存复用：不能每帧新建 25MB
+  t('★ 掩膜 RGBA 结果有缓存', /maskRgbaCache/.test(js));
+  // 现在比「复用 ImageData」更进一步：只把**变化的那一块**写进去，
+  // 不再整块 copy（3072×2048 是 25MB，整块拷一次就够呛）。
+  t('★ ImageData 复用（同尺寸不重建）', /maskCache\.width !== rect\.w/.test(js));
+  t('★ 只同步变化区域，不做整块 copy',
+    /maskCache\.data\.set\(maskRgbaCache\.subarray\(off, off \+ rowBytes\), off\)/.test(js));
+  t('★★ putImageData 用脏矩形（整块每帧 24.6ms → 2.1ms）',
+    /putImageData\(maskCache, 0, 0, bb\.x0, bb\.y0/.test(js));
+  t('★ 撤销/清空会作废增量状态（否则画面与真实范围对不上）',
+    /function invalidateMask\(\)[\s\S]{0,400}maskBuf = null/.test(js));
+})();
+
 /* ---------- 检查更新 ---------- */
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

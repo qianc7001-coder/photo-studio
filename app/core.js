@@ -6226,6 +6226,161 @@
   }
 
   /**
+   * 增量栅格化：把**新加的一小段笔迹**画进已有掩膜（就地修改）。
+   *
+   * 为什么需要：
+   *   原来的 strokesToMask 每次都把所有笔迹重画一遍。用户涂到第 20 笔时，
+   *   第 21 笔也要重算前 20 笔 —— 3072×2048 上实测单帧 1070ms，
+   *   表现为「涂一笔卡一下」，而且越涂越卡。
+   *
+   * 做法：只在该笔迹的**包围盒**内计算，其余像素不碰。
+   *   包围盒 = 这一个笔段的端点 ± 半径，通常只有几十×几十像素，
+   *   相比整块 6.3M 像素，代价可以忽略。
+   *
+   * 语义必须与 strokesToMask 完全一致（否则增量累积会和全量重算结果对不上）：
+   *   erase  → mask = mask * (1 - v)      （擦掉保护区）
+   *   restore→ mask = max(mask, v)        （加回可改区）
+   *
+   * @param {Float32Array} mask 就地修改，长度必须 = w*h
+   * @param {{mode:string, radius:number, points:Array}} stroke 只含**新增**的笔段
+   * @returns {boolean} 是否真的改动过（便于调用方决定要不要重绘）
+   */
+  function applyStrokeToMask(mask, stroke, w, h) {
+    if (!mask || !stroke || !stroke.points || !stroke.points.length) return false;
+    const W = Math.max(1, Math.round(num(w, 0)));
+    const H = Math.max(1, Math.round(num(h, 0)));
+    if (mask.length !== W * H) return false;
+    const r = Math.max(1, stroke.radius || 20);
+    const isErase = stroke.mode === 'erase';
+
+    const pts = stroke.points;
+    // 先把这一笔的每个「落点」算出来（沿线段插值，间隔 r/4 保证连续）
+    const stamps = [];
+    if (pts.length === 1) stamps.push([pts[0].x, pts[0].y]);
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1], b = pts[i];
+      const dist = Math.hypot(b.x - a.x, b.y - a.y);
+      const steps = Math.max(1, Math.ceil(dist / Math.max(1, r * 0.25)));
+      for (let k = 0; k <= steps; k++) {
+        stamps.push([lerp(a.x, b.x, k / steps), lerp(a.y, b.y, k / steps)]);
+      }
+    }
+    if (!stamps.length) return false;
+
+    // 整个笔段的包围盒（比逐点遍历省得多）
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const st of stamps) {
+      if (st[0] < minX) minX = st[0];
+      if (st[0] > maxX) maxX = st[0];
+      if (st[1] < minY) minY = st[1];
+      if (st[1] > maxY) maxY = st[1];
+    }
+    const bx0 = Math.max(0, Math.floor(minX - r));
+    const bx1 = Math.min(W - 1, Math.ceil(maxX + r));
+    const by0 = Math.max(0, Math.floor(minY - r));
+    const by1 = Math.min(H - 1, Math.ceil(maxY + r));
+    if (bx1 < bx0 || by1 < by0) return false;
+
+    // 只在这个窗口里维护临时峰值。
+    // 缓冲区**复用**：每帧新建一个 Float32Array 会让 GC 频繁介入，
+    // 实测分配+清零占了单帧一半以上时间（36ms 里约 20ms）。
+    // 复用后只需要把上次用到的区域清掉，窗口通常只有几百×几百。
+    const bw = bx1 - bx0 + 1;
+    const bh = by1 - by0 + 1;
+    const need = bw * bh;
+    if (!applyStrokeToMask._buf || applyStrokeToMask._buf.length < need) {
+      // 只增不减：Buffer 一旦长大就留着，避免反复分配
+      applyStrokeToMask._buf = new Float32Array(Math.max(need, 65536));
+    }
+    const buf = applyStrokeToMask._buf;
+    // 只清要用到的那一段（fill 整块会白白多算）
+    buf.fill(0, 0, need);
+    const tmp = buf;   // 下面用 ti = (y-by0)*bw + (x-bx0) 索引，天然落在 [0, need)
+
+    for (const st of stamps) {
+      const px = st[0], py = st[1];
+      const x0 = Math.max(bx0, Math.floor(px - r)), x1 = Math.min(bx1, Math.ceil(px + r));
+      const y0 = Math.max(by0, Math.floor(py - r)), y1 = Math.min(by1, Math.ceil(py + r));
+      for (let y = y0; y <= y1; y++) {
+        const dy = y + 0.5 - py;
+        const rowT = (y - by0) * bw;
+        for (let x = x0; x <= x1; x++) {
+          const dx = x + 0.5 - px;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          const v = 1 - smoothstep(r * 0.55, r, dist);
+          const ti = rowT + (x - bx0);
+          if (v > tmp[ti]) tmp[ti] = v;
+        }
+      }
+    }
+
+    // 合并进主掩膜（同样只在窗口内）
+    // 把影响范围回传，调用方可据此只重绘这一块（省掉全量重算）
+    applyStrokeToMask.lastBox = { x0: bx0, y0: by0, x1: bx1, y1: by1 };
+    let touched = false;
+    for (let y = by0; y <= by1; y++) {
+      const maskRow = y * W;
+      const tmpRow = (y - by0) * bw;
+      for (let x = bx0; x <= bx1; x++) {
+        const v = tmp[tmpRow + (x - bx0)];
+        if (v <= 0) continue;
+        const i = maskRow + x;
+        if (isErase) mask[i] = mask[i] * (1 - v);
+        else if (v > mask[i]) mask[i] = v;
+        touched = true;
+      }
+    }
+    return touched;
+  }
+
+  /**
+   * 增量版掩膜着色：只把**指定矩形区域**写进已存在的 RGBA 缓冲。
+   *
+   * 为什么需要：maskToRGBA 是全量的，1600×1200 要 84ms、3072×2048 要 70ms。
+   * 拖动时每帧都全量重算，光这一项就超出 60fps 预算好几倍。
+   * 而增量涂一笔实际只影响一个小窗口，其余像素根本没变。
+   *
+   * @param {Uint8ClampedArray} out  已有的 RGBA 缓冲（就地修改）
+   * @param {Float32Array} mask      最新掩膜
+   * @param {number} w @param {number} h
+   * @param {{x0:number,y0:number,x1:number,y1:number}} box 要刷新的像素范围（闭区间）
+   * @param {number[]} rgb 颜色
+   * @param {number} alpha 0~255
+   */
+  function paintMaskRGBA(out, mask, w, h, box, rgb, alpha) {
+    if (!out || !mask) return false;
+    const W = Math.max(1, Math.round(num(w, 0)));
+    const H = Math.max(1, Math.round(num(h, 0)));
+    if (out.length !== W * H * 4 || mask.length !== W * H) return false;
+    const b = box || {};
+    const x0 = Math.max(0, Math.floor(num(b.x0, 0)));
+    const y0 = Math.max(0, Math.floor(num(b.y0, 0)));
+    const x1 = Math.min(W - 1, Math.floor(num(b.x1, W - 1)));
+    const y1 = Math.min(H - 1, Math.floor(num(b.y1, H - 1)));
+    if (x1 < x0 || y1 < y0) return false;
+    const r = (rgb && rgb[0]) || 120;
+    const g2 = (rgb && rgb[1]) || 128;
+    const b2 = (rgb && rgb[2]) || 140;
+    const a255 = Math.max(0, Math.min(255, Math.round(num(alpha, 96))));
+    for (let y = y0; y <= y1; y++) {
+      const mRow = y * W;
+      const oRow = mRow * 4;
+      for (let x = x0; x <= x1; x++) {
+        const i = mRow + x;
+        const o = oRow + x * 4;
+        // 预览标的是「保护区」= 1 - mask
+        const v = 1 - mask[i];
+        const a = v * a255;
+        out[o] = r;
+        out[o + 1] = g2;
+        out[o + 2] = b2;
+        out[o + 3] = a < 0 ? 0 : (a > 255 ? 255 : a);
+      }
+    }
+    return true;
+  }
+
+  /**
    * 掩膜压缩：掩膜是 0~1 的浮点数组，直接 JSON 存会膨胀。
    * 量化成 0~255 的字节并做 Base64，体积约降到 1/8。
    */
@@ -7057,7 +7212,7 @@
     // 像素
     makePixels, edgeDistance, featherMask, ringStats, compositeFeathered, mosaicRegion,
     // 掩膜
-    strokesToMask, maskToRGBA, maskCoverage,
+    strokesToMask, applyStrokeToMask, paintMaskRGBA, maskToRGBA, maskCoverage,
     // 色彩
     srgbToLinear, linearToSrgb, rgbToOklab, oklabToRgb, colorDistance,
     relativeLuminance, bestTextColor, rgbToHex, hexToRgb,

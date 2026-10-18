@@ -758,7 +758,10 @@ console.log('\n【偏色】发给模型的图片不得带任何标记色（蓝�
   // 预览函数必须只标注保护区，且无笔迹时不显示
   const prev = appSrc.slice(appSrc.indexOf('function drawMaskOverlay'), appSrc.indexOf('function drawSelection'));
   t('预览无笔迹时不显示任何蒙层', /if \(!S\.strokes\.length\) return;/.test(prev));
-  t('预览标注的是保护区（1-mask）', /1 - mask\[i\]/.test(prev));
+  // 只标注「保护区」= 1 - mask。变量名可能变（现在叫 maskBuf），
+  // 所以按语义匹配，不绑死具体标识符。
+  t('预览标注的是保护区（1-mask）', /1 - mask\w*\[i\]/.test(prev), 
+    (prev.match(/1 - mask\w*\[i\]/) || ['未找到'])[0]);
 })();
 
 console.log('\n【上游回文字】必须识别为「配错模型」，不能误判成「缺图」');
