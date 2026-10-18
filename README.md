@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-4276%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-4315%20passed-brightgreen.svg)](#测试)
 
 给摄影师用的**局部修图**工具：在照片上框选任意区域，交给生图模型修改，结果自动贴回原位置。
 
 **核心特点**：结果无缝融合，非破坏性可调，保留拍摄信息。
 
-> 最新版本 **v3.9.0** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
+> 最新版本 **v3.9.1** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
 
 ---
 
@@ -301,7 +301,7 @@ node tools/migrate-test.js     # 配置迁移（模拟老用户升级路径）
 node tools/e2e-test.js         # 端到端（jsdom + 真实 canvas，逐像素校验）
 ```
 
-当前规模：**4276 项**（1587 单元 + 1454 回归 + 17 配置迁移 + 1218 端到端）。
+当前规模：**4315 项**（1615 单元 + 1454 回归 + 17 配置迁移 + 1229 端到端）。
 
 端到端测试会：
 - 启动一个假生图模型服务器
@@ -427,7 +427,8 @@ WebView 里用 `file://` 打开页面时，跨域请求会被拦截，而且 `lo
 
 | 版本 | 主要变化 |
 |---|---|
-| **v3.9.0** | 历史记录改为写入文件（不再受浏览器 5MB 限制）：同一批数据从「8 张只剩 3 张可继续编辑」变成 8 张全保留；旧的浏览器记录自动迁移并释放空间；单条数据损坏不再中断整次恢复 |
+| **v3.9.1** | 画笔涂抹改红色（灰色在多数照片上看不清）；新增「智能框选」——在物体上点一下自动圈住，本地算法不联网不花钱；修复工具提示重置无效 |
+| [v3.9.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.9.0) | 历史记录改为写入文件（不再受浏览器 5MB 限制）：同一批数据从「8 张只剩 3 张可继续编辑」变成 8 张全保留；旧的浏览器记录自动迁移并释放空间；单条数据损坏不再中断整次恢复 |
 | [v3.8.6](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.8.6) | 画笔与调色性能大改：画笔增量栅格化（单帧 615→4.2ms，148 倍）、调色拖动预览降到 480px 并跳过重参数（42→14ms）、掩膜只处理变化区域 |
 | [v3.8.5](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.8.5) | 修复参考图没真正发出去（主图 `image` 与参考图 `image[]` 字段混用，服务端只认一种）；日志可展开查看请求详情；新增导出诊断包（含环境与脱敏配置） |
 | [v3.8.4](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.8.4) | 设置改成分级（和手机设置一样）：一级只放 6 个入口，点进去才是具体设置，一级页缩短 88%；返回键先退级再关闭 |

@@ -2201,9 +2201,15 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('引导线提示只显示一次', /tipDecision\('guide'\)/.test(appSrc7));
   t('自由笔迹提示只显示一次', /tipDecision\('guide-free'\)/.test(appSrc7));
   t('进入工具时决定一次并缓存', /function tipDecision/.test(appSrc7));
-  t('决定显示的那一刻才记录已读', /if \(S\.tips\[key\]\) markHintSeen\(key\)/.test(appSrc7));
+  // 决定显示的那一刻才记录已读（现在是「且不在重置过程中」）
+  t('决定显示的那一刻才记录已读',
+    /if \(S\.tips\[key\] && !resettingHints\) markHintSeen\(key\)/.test(appSrc7));
+  // 重置时必须屏蔽这条记录，否则刚清空就被 updateUI 写回一条
+  t('★ 重置过程中不记提示（否则重置等于没用）',
+    /resettingHints = true;[\s\S]{0,120}updateUI\(\)[\s\S]{0,60}resettingHints = false/.test(appSrc7));
   t('切换工具时清掉决定（新工具重新判断）', /resetTipDecision\(\)/.test(appSrc7));
-  t('重置提示时内存缓存也要清', /resetTipDecision\(\);[\s\S]{0,120}toast\('工具提示已重置/.test(appSrc7));
+  t('重置提示时内存缓存也要清',
+    /resetTipDecision\(\);[\s\S]{0,400}toast\('工具提示已重置/.test(appSrc7));
   t('生成中提醒只显示一次', /shouldShowHint|hintSeen\('gen-keepalive'\)/.test(appSrc7));
   t('提示记录按工具名分别记（加新工具仍会显示一次）', /hintSeen\('guide-free'\)|indexOf\(name\) >= 0/.test(appSrc7));
   t('提示状态可重置（便于换人用/调试）', /resetHints:/.test(appSrc7));
@@ -4504,6 +4510,100 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
     /kvStorageAvailable\(\) \? 100000 : C\.SESSION_BASE_MAX_SIDE/.test(js));
   t('★ 单条会话上限在文件存储下放宽',
     /const singleLimit = kvStorageAvailable\(\)/.test(js));
+})();
+
+
+/* ===== 画笔颜色 + 智能框选 ===== */
+(function () {
+  console.log('\n【画笔颜色与智能框选】');
+
+  // 1) 画笔颜色：必须是红（灰色在多数照片上看不清）
+  t('画笔颜色是红色系', C.BRUSH_COLOR[0] > 180 && C.BRUSH_COLOR[1] < 100 && C.BRUSH_COLOR[2] < 100,
+    C.BRUSH_COLOR);
+  t('画笔不透明度够看清', C.BRUSH_ALPHA >= 90 && C.BRUSH_ALPHA <= 180, C.BRUSH_ALPHA);
+  const fsB = require('fs');
+  const appSrc = fsB.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  t('★ 界面用的是 core 的颜色常量（不是写死灰色）',
+    /C\.maskToRGBA\(protectedAlpha, rect\.w, rect\.h, C\.BRUSH_COLOR, C\.BRUSH_ALPHA\)/.test(appSrc));
+  t('★ 增量着色也用同一套颜色',
+    /C\.paintMaskRGBA\(maskRgbaCache, maskBuf, rect\.w, rect\.h,\s*\n?\s*maskDirtyBox, C\.BRUSH_COLOR, C\.BRUSH_ALPHA\)/.test(appSrc));
+  t('没有残留旧的灰色', !/\[120, 128, 140\]/.test(appSrc));
+
+  // 2) 智能框选：合成图验证
+  const mkImg = (W, H, fn) => {
+    const d = new Uint8ClampedArray(W * H * 4);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      const c = fn(x, y);
+      d[i] = c[0]; d[i + 1] = c[1]; d[i + 2] = c[2]; d[i + 3] = 255;
+    }
+    return { width: W, height: H, data: d };
+  };
+
+  // 灰底红圆
+  const W = 400, H = 300;
+  const img = mkImg(W, H, (x, y) =>
+    ((x - 200) ** 2 + (y - 150) ** 2 <= 60 ** 2) ? [220, 40, 40] : [180, 180, 180]);
+  const r = C.autoSelectRegion(img, 200, 150);
+  t('★ 点物体能圈出物体', !!r, r);
+  t('★ 圈的范围和真实物体吻合（含少量余量）', (() => {
+    if (!r) return false;
+    // 真实圆 x∈[140,260] y∈[90,210]
+    return Math.abs(r.x - 140) <= 8 && Math.abs(r.y - 90) <= 8 &&
+      Math.abs((r.x + r.w) - 261) <= 8 && Math.abs((r.y + r.h) - 211) <= 8;
+  })(), r);
+  t('框的宽高比接近 1（圆）', (() => {
+    if (!r) return false;
+    return Math.abs(r.w / r.h - 1) < 0.15;
+  })());
+
+  // 点背景：整片同色 → 应该拒绝（框了也没意义）
+  t('★ 点纯色背景不返回整图框（否则等于没框）',
+    C.autoSelectRegion(img, 10, 10) === null);
+  // 界外
+  t('界外点击返回 null', C.autoSelectRegion(img, -5, 10) === null);
+  t('右下界外返回 null', C.autoSelectRegion(img, 9999, 9999) === null);
+  // 非法输入
+  t('null 不崩', C.autoSelectRegion(null, 1, 1) === null);
+  t('空 data 不崩', C.autoSelectRegion({ width: 10, height: 10, data: null }, 1, 1) === null);
+  t('data 长度不够不崩',
+    C.autoSelectRegion({ width: 10, height: 10, data: new Uint8ClampedArray(10) }, 1, 1) === null);
+
+  // 3) 容差：调大能把相近颜色吞进来
+  const img2 = mkImg(200, 200, (x) => x < 100 ? [100, 100, 100] : [130, 130, 130]);
+  const strict = C.autoSelectRegion(img2, 50, 100, { tolerance: 5 });
+  const loose = C.autoSelectRegion(img2, 50, 100, { tolerance: 70 });
+  t('容差小时只圈自己的颜色块', strict && strict.w < 120, strict && strict.w);
+  // 容差调大到「把两块都吞并」时，程序选择**返回 null 而不是整图**：
+  // 返回整图等于没框（用户还得自己再框一次），不如直接告诉他"没圈出来"。
+  // 这是刻意的设计，不是缺陷 —— 断言按这个语义写。
+  t('★ 容差过大导致整图被吞并时返回 null（而不是返回整图）',
+    loose === null, { strict: strict && strict.w, loose: loose });
+  t('极端容差也不会给出无意义的整图框',
+    C.autoSelectRegion(img2, 50, 100, { tolerance: 100 }) === null);
+
+  // 4) 两区域图像：分别点能圈对
+  const img3 = mkImg(600, 400, (x, y) =>
+    y > 200 ? [60, 140, 70] : [120, 180, 230]);
+  const tree = C.autoSelectRegion(img3, 300, 320);
+  const sky = C.autoSelectRegion(img3, 300, 100);
+  t('点下半部圈到树（不串到天空）', tree && tree.y > 180 && tree.h < 260, tree);
+  t('点上半部圈到天空（不串到树）', sky && sky.y < 20 && sky.h < 260, sky);
+
+  // 5) 界面接线
+  const html = fsB.readFileSync(__dirname + '/../app/index.html', 'utf8');
+  t('有「智能框选」工具按钮', /data-mode="auto"/.test(html));
+  t('有容差滑块', /id="auto-tol"/.test(html));
+  t('有提示条（说明适用场景）', /id="auto-tip"/.test(html));
+  t('提示里写明了局限（背景干净才行）', /背景干净/.test(html));
+  t('★ 画笔提示改成红色（不再是灰色）', /标成红色/.test(html));
+  t('点击分派到 autoSelectAt', /S\.mode === 'auto'[\s\S]{0,80}autoSelectAt\(ip\)/.test(appSrc));
+  t('圈成功后清掉旧笔迹与引导线（坐标已失效）', (() => {
+    const fn = appSrc.slice(appSrc.indexOf('function autoSelectAt'),
+      appSrc.indexOf('function autoSelectAt') + 2000);
+    return /S\.strokes = \[\]/.test(fn) && /S\.guides = \[\]/.test(fn);
+  })());
+  t('圈不出物体时给提示而不是静默', /没圈出物体/.test(appSrc));
 })();
 
 /* ---------- 检查更新 ---------- */

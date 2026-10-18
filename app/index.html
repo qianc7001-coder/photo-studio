@@ -172,6 +172,11 @@
         <svg viewBox="0 0 24 24"><path d="M9.5 14.5 3 21"/><path d="m14 3 7 7-8.5 8.5a2 2 0 0 1-2.8 0l-3.2-3.2a2 2 0 0 1 0-2.8z"/></svg>
         <span>画笔</span>
       </button>
+      <!-- 点一下就圈住物体：本地算法，不联网不花钱 -->
+      <button class="tool" data-mode="auto">
+        <svg viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="4.5"/></svg>
+        <span>智能框选</span>
+      </button>
       <button class="tool" data-mode="pan">
         <svg viewBox="0 0 24 24"><path d="M18 11V6a2 2 0 0 0-4 0v5"/><path d="M14 10V4a2 2 0 0 0-4 0v6"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2a8 8 0 0 1-8-8"/></svg>
         <span>平移</span>
@@ -217,7 +222,16 @@
       <button class="chip" id="brush-restore">改这里</button>
       <button class="chip" id="brush-clear">全部重来</button>
     </div>
-    <div id="brush-tip" hidden>默认整块选区都会修改。涂抹过的地方会标成灰色，表示「这里不要动」。</div>
+    <div id="brush-tip" hidden>默认整块选区都会修改。涂抹过的地方会标成红色，表示「这里不要动」。</div>
+
+    <!-- 智能框选：点一下自动圈住物体 -->
+    <div id="auto-bar" hidden>
+      <span class="lbl">容差</span>
+      <input type="range" id="auto-tol" min="10" max="70" value="32">
+      <span class="val" id="auto-tol-val">32</span>
+      <button class="chip" id="auto-again">重新框</button>
+    </div>
+    <div id="auto-tip" hidden>在物体上点一下，自动圈住它。<b>适合背景干净、主体颜色分明</b>的物体；圈不准就拖动滑块调容差，或者换回普通框选。</div>
 
     <!-- 调色参数：五个滑块 + 应用/重置。滑块由 app.js 按 GRADE_PARAMS 渲染，
          这样「加一个调色参数」只要改 core 里的定义，不用动界面结构 -->

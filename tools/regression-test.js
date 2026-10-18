@@ -2914,7 +2914,7 @@ console.log('\n【笔迹】手绘走向必须真的送到模型，且不能被�
     /tg\.hidden = !\(inGuide && !free && tipDecision\('guide'\)\)/.test(appSrc));
   t('提示显示过就记下（第二次不再弹）',
     /function tipDecision/.test(appSrc) &&
-    /if \(S\.tips\[key\]\) markHintSeen\(key\)/.test(appSrc));
+    /if \(S\.tips\[key\] && !resettingHints\) markHintSeen\(key\)/.test(appSrc));
   // 函数体里不能再出现 shouldShowHint —— 否则同一帧内第二次调用会把它隐藏掉。
   // 只截到函数体结束（下一个 function 声明），别越界到别的函数里去误判。
   t('同一帧内不会自己把自己隐藏掉', (() => {

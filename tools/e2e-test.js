@@ -7248,6 +7248,103 @@ async function run() {
     await sleep(120);
   }
 
+  /* ---------- 画笔红色 + 智能框选 ---------- */
+  console.log('\n【63】画笔标红 + 点一下圈住物体');
+  {
+    const api = window.__PS_API;
+    S.jobs = [];
+    api.goHome();
+    await sleep(120);
+
+    // 造一张有明显物体的图：蓝底 + 白色方块
+    {
+      const c = napi.createCanvas(600, 400);
+      const cx0 = c.getContext('2d');
+      cx0.fillStyle = 'rgb(40, 70, 130)';
+      cx0.fillRect(0, 0, 600, 400);
+      cx0.fillStyle = 'rgb(240, 240, 240)';
+      cx0.fillRect(200, 120, 180, 150);
+      const inp = doc.getElementById('file-input');
+      Object.defineProperty(inp, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'auto.png', { type: 'image/png' })],
+        configurable: true
+      });
+      inp.dispatchEvent(new window.Event('change'));
+      await sleep(500);
+    }
+    t('照片已载入', S.docW === 600, [S.docW, S.docH]);
+
+    // ---- 1) 智能框选：点白方块 ----
+    doc.querySelector('.tool[data-mode="auto"]').dispatchEvent(new window.Event('click'));
+    await sleep(150);
+    t('★ 切到智能框选模式', S.mode === 'auto', S.mode);
+    t('★ 工具条出现', doc.getElementById('auto-bar').hidden === false);
+    t('有容差滑块', !!doc.getElementById('auto-tol'));
+
+    // 直接调内部函数（等价于点在那个图内坐标）
+    const picked = api.autoSelectAt({ x: 290, y: 195 });
+    await sleep(250);
+    t('★ 点物体后有选区', !!S.rect, S.rect);
+    if (S.rect) {
+      // 白方块真实范围：x∈[200,380] y∈[120,270]
+      t('★★ 圈的范围和物体吻合',
+        Math.abs(S.rect.x - 200) <= 25 && Math.abs(S.rect.y - 120) <= 25 &&
+        Math.abs((S.rect.x + S.rect.w) - 381) <= 25 &&
+        Math.abs((S.rect.y + S.rect.h) - 271) <= 25,
+        S.rect);
+      t('★ 没有圈成整张图（整图等于没框）',
+        S.rect.w < S.docW * 0.9 || S.rect.h < S.docH * 0.9, S.rect);
+    }
+    t('圈完能正常绘制', (() => { api.draw(); return true; })());
+    await sleep(150);
+
+    // 点纯色背景：不该给出整图框
+    S.rect = null;
+    api.autoSelectAt({ x: 30, y: 30 });
+    await sleep(200);
+    t('★ 点纯色背景不给出整图框（宁可不框）',
+      S.rect === null || (S.rect.w < S.docW * 0.9 && S.rect.h < S.docH * 0.9),
+      S.rect);
+
+    // ---- 2) 画笔标红 ----
+    S.rect = { x: 0, y: 0, w: S.docW, h: S.docH };
+    doc.querySelector('.tool[data-mode="brush"]').dispatchEvent(new window.Event('click'));
+    await sleep(150);
+    t('切到画笔模式', S.mode === 'brush', S.mode);
+
+    // 涂一笔，读画布像素确认是红色
+    S.brushSize = 120;
+    S.brushErase = true;
+    S.strokes = [];
+    api.invalidateMask();
+    const st = { mode: 'erase', radius: 60, points: [] };
+    for (let k = 0; k < 6; k++) st.points.push({ x: 100 + k * 20, y: 100 });
+    S.strokes.push(st);
+    api.invalidateMask();
+    api.draw();
+    await sleep(400);
+
+    // 采样：涂过的地方应该出现红色（掩膜把保护区标红）
+    const px = (function () {
+      const d = window.devicePixelRatio || 1;
+      const r = api.imageToScreen({ x: 110, y: 100 });
+      const sx = Math.round(r.x * d);
+      const sy = Math.round(r.y * d);
+      const im = cv.getContext('2d').getImageData(sx, sy, 1, 1).data;
+      return [im[0], im[1], im[2]];
+    })();
+    t('★★ 涂过的地方呈现红色（不再是不易看清的灰）',
+      px[0] > px[1] + 15 && px[0] > px[2] + 15, px);
+
+    // ---- 3) 收回 ----
+    S.strokes = [];
+    S.rect = null;
+    S.mode = 'select';
+    api.invalidateMask();
+    api.goHome();
+    await sleep(120);
+  }
+
   /* ---------- 无 JS 错误 ---------- */
   console.log('\n【15】运行健康度');
   const errs = logs.filter((l) => /JSDOM_ERROR|Uncaught/.test(l));

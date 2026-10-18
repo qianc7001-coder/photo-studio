@@ -1939,6 +1939,49 @@
   let maskRaf = 0;
 
   /** 笔迹按文档坐标保存，这里转换成矩形局部坐标后栅格化 */
+  /**
+   * 在图片坐标处点一下 → 自动圈住那里的物体。
+   *
+   * 取的是 **docCanvas（不含已应用的编辑）** 而不是 viewCanvas：
+   * 用户想圈的是"照片里那个东西"，已应用的贴回结果不应该影响形状判断。
+   * 代价很小（只在点击时读一次），不必为此纠结。
+   */
+  function autoSelectAt(ip) {
+    if (!S.docCanvas) { toast('先打开一张照片'); return; }
+    const x = Math.round(ip.x), y = Math.round(ip.y);
+    if (x < 0 || y < 0 || x >= S.docW || y >= S.docH) return;
+
+    // 只在点击附近取一小块来跑算法？不行 —— 物体可能比附近大。
+    // 但整张读一次在 3072×2048 上是 25MB，每次点击都读太贵。
+    // 折中：读整张（点一下而已，用户不会连点几十次）；
+    // 若将来觉得卡，可改成"以点击为中心的 2× 视野"。
+    const data = (function () {
+      try {
+        const ctx2 = S.docCanvas.getContext('2d', { willReadFrequently: true });
+        return ctx2.getImageData(0, 0, S.docW, S.docH);
+      } catch (e) {
+        return null;
+      }
+    })();
+    if (!data) { toast('读不到画面像素，换普通框选试试'); return; }
+
+    const tol = Number($('auto-tol') ? $('auto-tol').value : C.AUTO_SELECT_TOLERANCE) || C.AUTO_SELECT_TOLERANCE;
+    const r = C.autoSelectRegion(data, x, y, { tolerance: tol });
+    if (!r) {
+      toast('这里没圈出物体，换个位置点，或把容差调大一点', 3600);
+      return;
+    }
+    S.rect = r;
+    // 换了选区 → 笔迹和引导线都失效（它们存的是相对选区的坐标）
+    S.strokes = [];
+    S.guides = [];
+    invalidateMask();
+    updateGuideBadge();
+    updateUI();
+    draw();
+    toast('已圈住（' + r.w + '×' + r.h + '），可以用生成或调色', 2600);
+  }
+
   function maskFromStrokes(rect) {
     const local = S.strokes.map((s) => ({
       mode: s.mode,
@@ -2521,10 +2564,21 @@
   function tipDecision(key) {
     if (S.tips[key] === undefined) {
       S.tips[key] = shouldShowHint(key);
-      if (S.tips[key]) markHintSeen(key);   // 决定显示的那一刻就记下
+      // 重置过程中不记 —— 否则刚清空就又被写回一条
+      if (S.tips[key] && !resettingHints) markHintSeen(key);
     }
     return S.tips[key];
   }
+
+  /**
+   * 重置提示记录期间为真。
+   *
+   * 为什么要这个标志：resetHints 清完记录后会调 updateUI() 刷新界面，
+   * 而 updateUI 里会为当前工具重新判定"要不要显示提示" ——
+   * 于是刚清空的记录立刻又被写回一条（表现是"重置点了没反应"）。
+   * 判定本身是必要的（否则界面状态过期），只是这个瞬间不该记。
+   */
+  let resettingHints = false;
 
   /** 离开工具时清掉决定，下次进来重新判断 */
   function resetTipDecision(key) {
@@ -2631,13 +2685,13 @@
     if (sizeChanged || maskNeedFull) {
       const protectedAlpha = new Float32Array(maskBuf.length);
       for (let i = 0; i < maskBuf.length; i++) protectedAlpha[i] = 1 - maskBuf[i];
-      maskRgbaCache = C.maskToRGBA(protectedAlpha, rect.w, rect.h, [120, 128, 140], 96);
+      maskRgbaCache = C.maskToRGBA(protectedAlpha, rect.w, rect.h, C.BRUSH_COLOR, C.BRUSH_ALPHA);
       maskRgbaW = rect.w; maskRgbaH = rect.h;
       maskNeedFull = false;
       maskDirtyBox = { x0: 0, y0: 0, x1: rect.w - 1, y1: rect.h - 1 };
     } else if (maskDirtyBox) {
       C.paintMaskRGBA(maskRgbaCache, maskBuf, rect.w, rect.h,
-        maskDirtyBox, [120, 128, 140], 96);
+        maskDirtyBox, C.BRUSH_COLOR, C.BRUSH_ALPHA);
     }
 
     // ImageData 与 RGBA 缓冲同尺寸时复用，只把「这次变化的那块」写进去
@@ -2805,6 +2859,12 @@
       S.guides.push(draft);
       S.gesture = { type: 'guide', draft, rect, free };
       draw();
+      return;
+    }
+
+    // 智能框选：点一下把选区收紧到那个物体
+    if (S.mode === 'auto') {
+      autoSelectAt(ip);
       return;
     }
 
@@ -7132,6 +7192,16 @@
     updateGuideBarVisibility();
     updateGuideBadge();
     // 调色工具：参数栏只在调色模式下露出（平时不占底栏空间）
+    // 智能框选的工具条
+    const inAuto = S.mode === 'auto';
+    if ($('auto-bar')) $('auto-bar').hidden = !inAuto;
+    if ($('auto-tip')) {
+      const t = tipDecision('auto');
+      $('auto-tip').hidden = !(inAuto && t);
+    }
+    const abtn = document.querySelector('.tool[data-mode="auto"]');
+    if (abtn) abtn.classList.toggle('active', inAuto);
+
     const inGrade = S.mode === 'grade';
     $('grade-bar').hidden = !inGrade;
     const gtip = $('grade-tip');
@@ -8444,6 +8514,23 @@
     // 画笔
     const bs = $('brush-size');
     bs.oninput = () => { S.brushSize = Number(bs.value); $('brush-size-val').textContent = bs.value; };
+    // 智能框选：容差滑块 + 重新框
+    if ($('auto-tol')) {
+      $('auto-tol').value = String(C.AUTO_SELECT_TOLERANCE);
+      if ($('auto-tol-val')) $('auto-tol-val').textContent = String(C.AUTO_SELECT_TOLERANCE);
+      $('auto-tol').oninput = () => {
+        if ($('auto-tol-val')) $('auto-tol-val').textContent = $('auto-tol').value;
+      };
+    }
+    if ($('auto-again')) {
+      $('auto-again').onclick = () => {
+        // 清掉当前选区，让用户重新点
+        S.rect = null; S.strokes = []; S.guides = [];
+        invalidateMask(); updateGuideBadge(); updateUI(); draw();
+        toast('在物体上点一下', 2000);
+      };
+    }
+
     $('brush-erase').onclick = () => { S.brushErase = true; updateUI(); };
     $('brush-restore').onclick = () => { S.brushErase = false; updateUI(); };
     $('brush-clear').onclick = () => {
@@ -9452,7 +9539,8 @@
     syncBgUI, loadBgImage, clearBg,
     // 设置分级
     showSettingsPage, settingsAtHome, settingsPage: () => settingsPage,
-    invalidateMask, draw,
+    invalidateMask, draw, autoSelectAt,
+    imageToScreen: (p) => C.imageRectToScreen({ x: p.x, y: p.y, w: 1, h: 1 }, S.view),
     openSettings, closeSettings, handleBack,
     bgState: () => C.normalizeBg(S.cfg.bg),
     resetBgCache: () => { bgImage = null; bgImageKey = ''; },
@@ -9500,7 +9588,10 @@
       // 内存里的「本次是否显示」缓存也必须清掉：
       // 只清 localStorage 的话，重置后提示依然不出现 —— 与承诺的行为不符
       resetTipDecision();
-      updateUI();
+      // 刷新界面时必须屏蔽"顺带记录提示"：updateUI 会为当前工具
+      // 重新判定并写回一条，导致刚清空就又有记录了。
+      resettingHints = true;
+      try { updateUI(); } finally { resettingHints = false; }
       toast('工具提示已重置，下次进入会再显示一次');
     },
     hintSeen,

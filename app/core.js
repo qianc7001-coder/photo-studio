@@ -4442,6 +4442,132 @@
     return d * 0.85;
   }
 
+  /* ====================== 自动框选（点一下圈住物体） ======================
+   *
+   * 用户在物体上点一下，程序把选区自动收紧到那个物体。
+   *
+   * 为什么是「本地算法」而不是调模型：
+   *   这个应用接的全是生图模型，没有一个做物体识别的；
+   *   为了一个框选去接第三方抠图服务，既要多配一个 Key、每次还要花钱。
+   *   而「背景干净、主体和背景颜色差得开」这类常见需求，
+   *   纯本地算法就能做得不错，且零成本、零延迟。
+   *
+   * 算法（区域生长 + 边界收紧）：
+   *   1. 以点击处为种子，取它的颜色
+   *   2. 向四周扩散，把「颜色接近种子」的相邻像素吞并（容差可调）
+   *   3. 得到一片连通区域 → 取它的外接矩形
+   *   4. 太小的区域当作误触，返回 null（宁可不动，也不要乱框）
+   *
+   * 局限（必须让用户知道）：
+   *   - 主体和背景颜色接近时会「漏」到背景上
+   *   - 主体内部颜色变化大时会「只圈住一部分」
+   *   所以界面上要提示「点物体中心，效果不好就用普通框选」。
+   */
+
+  /** 自动框选的默认容差（0~100）。越大越容易连同相近颜色一起吞并 */
+  const AUTO_SELECT_TOLERANCE = 32;
+
+  /**
+   * 在给定区域内做区域生长，返回物体外接矩形。
+   *
+   * @param {object} imgData  { width, height, data } —— 整个文档的像素
+   * @param {number} seedX @param {number} seedY  点击位置（图内坐标）
+   * @param {object} opts { tolerance, maxSide, minArea }
+   * @returns {null|{x,y,w,h}} 图内坐标的矩形；判定失败返回 null
+   */
+  function autoSelectRegion(imgData, seedX, seedY, opts) {
+    const o = opts || {};
+    const W = Math.max(0, Math.round(num(imgData && imgData.width, 0)));
+    const H = Math.max(0, Math.round(num(imgData && imgData.height, 0)));
+    const d = imgData && imgData.data;
+    if (!W || !H || !d || d.length < W * H * 4) return null;
+
+    const sx = Math.round(num(seedX, -1));
+    const sy = Math.round(num(seedY, -1));
+    if (sx < 0 || sy < 0 || sx >= W || sy >= H) return null;
+
+    const tol = clamp(num(o.tolerance, AUTO_SELECT_TOLERANCE), 1, 100);
+    // 容差换算成 RGB 空间里的距离阈值（0~100 → 0~140）
+    const maxDist = (tol / 100) * 140;
+    const minArea = Math.max(1, num(o.minArea, Math.round(W * H * 0.0004)));
+
+    // 种子颜色
+    const si = (sy * W + sx) * 4;
+    const sr = d[si], sg = d[si + 1], sb = d[si + 2];
+
+    // BFS（用 Int32Array 当队列，比数组 push/shift 快得多）
+    const total = W * H;
+    const seen = new Uint8Array(total);
+    const queue = new Int32Array(total);
+    let qHead = 0, qTail = 0;
+    queue[qTail++] = sy * W + sx;
+    seen[sy * W + sx] = 1;
+
+    let minX = sx, maxX = sx, minY = sy, maxY = sy;
+    let area = 0;
+
+    while (qHead < qTail) {
+      const idx = queue[qHead++];
+      const x = idx % W;
+      const y = (idx - x) / W;
+      area++;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+
+      // 四邻域扩散
+      for (let k = 0; k < 4; k++) {
+        const nx = x + (k === 0 ? -1 : k === 1 ? 1 : 0);
+        const ny = y + (k === 2 ? -1 : k === 3 ? 1 : 0);
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        const ni = ny * W + nx;
+        if (seen[ni]) continue;
+        const pi = ni * 4;
+        // 用「各通道最大差」而不是欧氏距离：更接近人眼对色块的判断，
+        // 也不会因为某一个通道跳变就把整片断开
+        const dr = Math.abs(d[pi] - sr);
+        const dg = Math.abs(d[pi + 1] - sg);
+        const db = Math.abs(d[pi + 2] - sb);
+        const dist = Math.max(dr, dg, db);
+        if (dist <= maxDist) {
+          seen[ni] = 1;
+          queue[qTail++] = ni;
+        }
+      }
+    }
+
+    // 太小 → 大概率是点到了噪点/误触，宁可不框
+    if (area < minArea) return null;
+
+    const w = maxX - minX + 1;
+    const h = maxY - minY + 1;
+    // 几乎铺满整张图 → 说明容差太大、整片都被吞并了，框了也没意义
+    if (w >= W * 0.98 && h >= H * 0.98) return null;
+
+    // 留一点余量（区域生长会啃掉物体边缘的抗锯齿像素）
+    const padX = Math.max(2, Math.round(w * 0.03));
+    const padY = Math.max(2, Math.round(h * 0.03));
+    const rx = Math.max(0, minX - padX);
+    const ry = Math.max(0, minY - padY);
+    const rw = Math.min(W - rx, w + padX * 2);
+    const rh = Math.min(H - ry, h + padY * 2);
+
+    return { x: rx, y: ry, w: rw, h: rh };
+  }
+
+  /* ====================== 画笔外观 ======================
+   *
+   * 画笔盖住的区域是「不会改动」的部分（掩膜=0 即保护区）。
+   * 原来用灰色 [120,128,140] + 96/255 透明度 —— 在深色照片、
+   * 或者本来就偏灰的画面上几乎看不出来，用户不知道哪里被保护了。
+   *
+   * 换成红色：红色在绝大多数照片里都很跳（蓝天、绿树、肤色、灰墙
+   * 都不冲突），而且「红=排除」符合直觉。
+   */
+  const BRUSH_COLOR = [235, 60, 60];
+  const BRUSH_ALPHA = 110;
+
   /* ====================== 主题 ======================
    *
    * 三档：
@@ -7225,7 +7351,9 @@
     // 像素
     makePixels, edgeDistance, featherMask, ringStats, compositeFeathered, mosaicRegion,
     // 掩膜
-    strokesToMask, applyStrokeToMask, paintMaskRGBA, maskToRGBA, maskCoverage,
+    strokesToMask, applyStrokeToMask, paintMaskRGBA,
+    BRUSH_COLOR, BRUSH_ALPHA,
+    AUTO_SELECT_TOLERANCE, autoSelectRegion, maskToRGBA, maskCoverage,
     // 色彩
     srgbToLinear, linearToSrgb, rgbToOklab, oklabToRgb, colorDistance,
     relativeLuminance, bestTextColor, rgbToHex, hexToRgb,
