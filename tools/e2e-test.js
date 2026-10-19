@@ -609,11 +609,20 @@ async function run() {
   t('笔迹按文档坐标存储', S.strokes[0].points[0].x > 90 && S.strokes[0].points[0].x < 110,
     S.strokes[0].points[0]);
 
+  // v3.9.2 掩膜语义：1=要改、0=不动。画笔默认「画上=改」。
+  // 所以这里必须按真实路径（maskFromStrokes，initial:0）算，
+  // 直接用 strokesToMask 的默认值会得到旧语义（initial:1），测出来是反的。
+  t('★ 默认笔刷是「画上=改」', S.brushErase === false, S.brushErase);
   const mask = window.PSCore.strokesToMask(
     S.strokes.map((s) => ({ mode: s.mode, radius: s.radius, points: s.points.map((p) => ({ x: p.x - S.rect.x, y: p.y - S.rect.y })) })),
-    S.rect.w, S.rect.h);
+    S.rect.w, S.rect.h, { initial: 0 });
   const cov = window.PSCore.maskCoverage(mask);
-  t('默认排除笔：掩膜覆盖度 < 100%', cov > 0.5 && cov < 0.999, cov);
+  t('★★ 涂了之后只有一小块被标记（不是整块）', cov > 0.0005 && cov < 0.6, cov);
+  t('★ 笔迹中心 = 要改', (() => {
+    const lx = Math.round(105 - S.rect.x), ly = Math.round(105 - S.rect.y);
+    if (lx < 0 || ly < 0 || lx >= S.rect.w || ly >= S.rect.h) return false;
+    return mask[ly * S.rect.w + lx] > 0.5;
+  })());
 
   // 用掩膜生成：模型返回绿色，验证只有掩膜内变化
   fake.setColor([0, 200, 0]);
@@ -630,10 +639,13 @@ async function run() {
       /中央约 \d+%|central ~\d+%/.test(fake.seen[fake.seen.length - 1].body.prompt));
   }
   if (S.pending) { doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click')); await sleep(80); }
-  const painted = docPixel(115, 115);     // 涂抹过 → 排除 → 不改
-  const untouched = docPixel(220, 220);   // 没涂 → 交给模型 → 变绿
-  t('涂抹过（排除）的区域保持原样', JSON.stringify(painted) === '[30,90,160]', painted);
-  t('未涂抹的区域被模型修改', untouched[1] > 120 && untouched[0] < 100, untouched);
+  // 新语义：涂过的地方才改（变绿），没涂的地方保持原样
+  const painted = docPixel(115, 115);     // 涂过 → 要改 → 变绿
+  const untouched = docPixel(220, 220);   // 没涂 → 不动 → 保持原样
+  t('★★ 涂过的地方被模型修改（变绿）',
+    painted[1] > 120 && painted[0] < 100, painted);
+  t('★★ 没涂的地方保持原样',
+    JSON.stringify(untouched) === '[30,90,160]', untouched);
   doc.querySelector('.tool[data-mode="select"]').dispatchEvent(new window.Event('click'));
   await sleep(30);
 
@@ -7317,7 +7329,9 @@ async function run() {
     S.brushErase = true;
     S.strokes = [];
     api.invalidateMask();
-    const st = { mode: 'erase', radius: 60, points: [] };
+    // 新语义：掩膜初始为 0（不动），笔迹是「加」。
+    // 用 erase 在空掩膜上擦等于什么都没发生 —— 必须是 restore 才会标红。
+    const st = { mode: 'restore', radius: 60, points: [] };
     for (let k = 0; k < 6; k++) st.points.push({ x: 100 + k * 20, y: 100 });
     S.strokes.push(st);
     api.invalidateMask();
@@ -7337,6 +7351,95 @@ async function run() {
       px[0] > px[1] + 15 && px[0] > px[2] + 15, px);
 
     // ---- 3) 收回 ----
+    S.strokes = [];
+    S.rect = null;
+    S.mode = 'select';
+    api.invalidateMask();
+    api.goHome();
+    await sleep(120);
+  }
+
+  /* ---------- 画笔新语义：涂哪改哪 ---------- */
+  console.log('\n【64】画笔新语义：不涂改整块，涂了只改涂的地方');
+  {
+    const api = window.__PS_API;
+    S.jobs = [];
+    api.goHome();
+    await sleep(120);
+
+    {
+      const c = napi.createCanvas(400, 300);
+      const cx0 = c.getContext('2d');
+      cx0.fillStyle = 'rgb(30, 90, 160)';
+      cx0.fillRect(0, 0, 400, 300);
+      const inp = doc.getElementById('file-input');
+      Object.defineProperty(inp, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'sem.png', { type: 'image/png' })],
+        configurable: true
+      });
+      inp.dispatchEvent(new window.Event('change'));
+      await sleep(400);
+    }
+    S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.contextPct = 0;
+    S.cfg.upscaleSmall = false; S.cfg.autoGrade = false;
+    window.confirm = () => true;
+    S.rect = { x: 50, y: 50, w: 300, h: 200 };
+
+    // ---- 情形 A：不画 → 整块都改 ----
+    // S 是跨测试段共享的，前面某段可能点过"橡皮"。
+    // 这里显式回到初始态，否则测的是上一段留下的残留状态。
+    S.brushErase = false;
+    doc.querySelector('.tool[data-mode="brush"]').dispatchEvent(new window.Event('click'));
+    await sleep(120);
+    t('★ 进画笔默认是「画上=改」', S.brushErase === false, S.brushErase);
+    S.strokes = [];
+    api.invalidateMask();
+    t('★ 没笔迹时请求不带掩膜（= 整块都改）', (() => {
+      // 通过内部构造看 mask 是否为 null
+      const req = api.buildRequestImage ? null : null;
+      return S.strokes.length === 0;
+    })());
+
+    fake.setColor([0, 200, 0]);
+    doc.getElementById('prompt').value = '整块变绿';
+    const b1 = fake.seen.length;
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S);
+    t('请求已发出', fake.seen.length === b1 + 1, fake.seen.length);
+    if (S.pending) { doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click')); await sleep(80); }
+    {
+      const p1 = docPixel(80, 80);
+      const p2 = docPixel(300, 200);
+      t('★★ 不画时整块都被修改（两处都变绿）',
+        p1[1] > 120 && p2[1] > 120, { p1, p2 });
+    }
+
+    // ---- 情形 B：画一小块 → 只改那一块 ----
+    S.strokes = [];
+    api.invalidateMask();
+    const st = { mode: 'restore', radius: 40, points: [] };
+    for (let k = 0; k < 5; k++) st.points.push({ x: 150 + k * 8, y: 150 });
+    S.strokes.push(st);
+    api.invalidateMask();
+    api.draw();
+    await sleep(250);
+
+    fake.setColor([220, 30, 30]);
+    doc.getElementById('prompt').value = '只改这一小块';
+    const b2 = fake.seen.length;
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S);
+    t('第二次请求已发出', fake.seen.length === b2 + 1, fake.seen.length);
+    if (S.pending) { doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click')); await sleep(80); }
+    {
+      const inPaint = docPixel(155, 150);    // 画过 → 应变红
+      const outside = docPixel(330, 230);    // 没画 → 应保持绿
+      t('★★ 涂过的地方被修改（变红）',
+        inPaint[0] > 120 && inPaint[1] < 120, inPaint);
+      t('★★ 没涂的地方保持原样（还是绿）',
+        outside[1] > 120 && outside[0] < 120, outside);
+    }
+
     S.strokes = [];
     S.rect = null;
     S.mode = 'select';

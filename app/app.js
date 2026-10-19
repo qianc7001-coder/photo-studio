@@ -78,7 +78,10 @@
     // 画笔
     brushSize: 80,
     // 掩膜初始为「整块都改」，画笔默认从掩膜里「排除」区域，最安全
-    brushErase: true,
+    // 画笔默认「画上就是要改」（restore 语义）。
+    // v3.9.2 起掩膜语义反转：没画过的地方不动，画到的地方才改。
+    // 所以默认必须是"加"而不是"减"，否则一进画笔用户涂半天什么都没发生。
+    brushErase: false,
     strokes: [],          // 文档坐标
 
     // 编辑历史
@@ -1983,12 +1986,22 @@
   }
 
   function maskFromStrokes(rect) {
+    // 掩膜语义（v3.9.2 起）：**1 = 要改，0 = 不动**。
+    //
+    // 和以前正好相反。以前是「默认整块都改，涂过的地方保护起来」，
+    // 用户反馈那样反直觉：他想「只改我画的地方」。
+    // 现在 initial=0 —— 没画过的地方一律 0（不动），
+    // 画到的地方才被抬起来（要改）。
+    //
+    // 注意：没有笔迹时 maskFromStrokes 根本不会被调用
+    // （调用处是 S.strokes.length ? maskFromStrokes(rect) : null），
+    // 传 null 表示「整块都改」。所以「不画 = 改整块」依然成立。
     const local = S.strokes.map((s) => ({
       mode: s.mode,
       radius: s.radius,
       points: s.points.map((p) => ({ x: p.x - rect.x, y: p.y - rect.y }))
     }));
-    return C.strokesToMask(local, rect.w, rect.h);
+    return C.strokesToMask(local, rect.w, rect.h, { initial: 0 });
   }
 
   /** 请求重绘掩膜：合并同一帧内的多次调用 */
@@ -2607,8 +2620,8 @@
     const rect = effectiveRect();
     if (!rect) return;
 
-    // 没有任何笔迹时，整块选区都会被修改 —— 此时不该在画面上蒙任何颜色，
-    // 否则用户会以为「图片变蓝了」（以前正是这个 bug）。
+    // 没有任何笔迹时，整块选区都会被修改 —— 此时不该在画面上蒙任何颜色。
+    // 新语义下这一点更自然：没画 = 全改，全改就没必要标红"哪里要改"。
     if (!S.strokes.length) return;
 
     // ---- 掩膜：优先增量，避免「涂一笔就把所有笔迹重算一遍」 ----
@@ -2683,9 +2696,9 @@
     //   缓冲刚建 / 尺寸变了 / 调用了 invalidateMask（撤销、清空、换选区）
     const sizeChanged = !maskRgbaCache || maskRgbaW !== rect.w || maskRgbaH !== rect.h;
     if (sizeChanged || maskNeedFull) {
-      const protectedAlpha = new Float32Array(maskBuf.length);
-      for (let i = 0; i < maskBuf.length; i++) protectedAlpha[i] = 1 - maskBuf[i];
-      maskRgbaCache = C.maskToRGBA(protectedAlpha, rect.w, rect.h, C.BRUSH_COLOR, C.BRUSH_ALPHA);
+      // 直接把 mask 交给着色：mask=1 现在表示「要改」，
+      // 正好就是要标红的地方。以前要取 1-mask（标保护区），语义反转后不用了。
+      maskRgbaCache = C.maskToRGBA(maskBuf, rect.w, rect.h, C.BRUSH_COLOR, C.BRUSH_ALPHA);
       maskRgbaW = rect.w; maskRgbaH = rect.h;
       maskNeedFull = false;
       maskDirtyBox = { x0: 0, y0: 0, x1: rect.w - 1, y1: rect.h - 1 };

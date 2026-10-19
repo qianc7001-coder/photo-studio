@@ -218,11 +218,11 @@
       <span class="lbl">笔刷</span>
       <input type="range" id="brush-size" min="8" max="400" value="80">
       <span class="val" id="brush-size-val">80</span>
-      <button class="chip on" id="brush-erase" aria-pressed="true">不改这里</button>
-      <button class="chip" id="brush-restore">改这里</button>
+      <button class="chip" id="brush-erase" aria-pressed="false">橡皮（擦掉）</button>
+      <button class="chip on" id="brush-restore" aria-pressed="true">画笔（画上=改）</button>
       <button class="chip" id="brush-clear">全部重来</button>
     </div>
-    <div id="brush-tip" hidden>默认整块选区都会修改。涂抹过的地方会标成红色，表示「这里不要动」。</div>
+    <div id="brush-tip" hidden><b>不涂 = 改整块选区；涂了 = 只改涂成红色的地方。</b>想精准改某个东西，就用画笔把它涂红。</div>
 
     <!-- 智能框选：点一下自动圈住物体 -->
     <div id="auto-bar" hidden>

@@ -4523,8 +4523,9 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('画笔不透明度够看清', C.BRUSH_ALPHA >= 90 && C.BRUSH_ALPHA <= 180, C.BRUSH_ALPHA);
   const fsB = require('fs');
   const appSrc = fsB.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  // v3.9.2 掩膜语义反转后，全量着色直接传 maskBuf（不再先取反成 protectedAlpha）
   t('★ 界面用的是 core 的颜色常量（不是写死灰色）',
-    /C\.maskToRGBA\(protectedAlpha, rect\.w, rect\.h, C\.BRUSH_COLOR, C\.BRUSH_ALPHA\)/.test(appSrc));
+    /C\.maskToRGBA\(maskBuf, rect\.w, rect\.h, C\.BRUSH_COLOR, C\.BRUSH_ALPHA\)/.test(appSrc));
   t('★ 增量着色也用同一套颜色',
     /C\.paintMaskRGBA\(maskRgbaCache, maskBuf, rect\.w, rect\.h,\s*\n?\s*maskDirtyBox, C\.BRUSH_COLOR, C\.BRUSH_ALPHA\)/.test(appSrc));
   t('没有残留旧的灰色', !/\[120, 128, 140\]/.test(appSrc));
@@ -4596,7 +4597,8 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('有容差滑块', /id="auto-tol"/.test(html));
   t('有提示条（说明适用场景）', /id="auto-tip"/.test(html));
   t('提示里写明了局限（背景干净才行）', /背景干净/.test(html));
-  t('★ 画笔提示改成红色（不再是灰色）', /标成红色/.test(html));
+  t('★ 画笔提示说明了新语义（涂了才只改涂的地方）',
+    /不涂 = 改整块选区/.test(html) && /涂成红色/.test(html));
   t('点击分派到 autoSelectAt', /S\.mode === 'auto'[\s\S]{0,80}autoSelectAt\(ip\)/.test(appSrc));
   t('圈成功后清掉旧笔迹与引导线（坐标已失效）', (() => {
     const fn = appSrc.slice(appSrc.indexOf('function autoSelectAt'),
@@ -4604,6 +4606,64 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
     return /S\.strokes = \[\]/.test(fn) && /S\.guides = \[\]/.test(fn);
   })());
   t('圈不出物体时给提示而不是静默', /没圈出物体/.test(appSrc));
+})();
+
+
+/* ===== 画笔语义反转：红色=要改，没画到=不动 ===== */
+(function () {
+  console.log('\n【画笔语义：涂哪改哪】');
+  const fsM = require('fs');
+  const js = fsM.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html = fsM.readFileSync(__dirname + '/../app/index.html', 'utf8');
+
+  // 1) 核心：initial=0（没画到的一律不动）
+  const W = 200, H = 200;
+  const strokes = [{ mode: 'restore', radius: 20, points: [{ x: 100, y: 100 }] }];
+  const m = C.strokesToMask(strokes, W, H, { initial: 0 });
+
+  t('★★ 画过的地方 mask=1（要改）', m[100 * W + 100] > 0.9, m[100 * W + 100]);
+  t('★★ 没画到的地方 mask=0（不动）', m[5 * W + 5] === 0, m[5 * W + 5]);
+  t('★ 只有笔刷附近是 1，不是整块', (() => {
+    let on = 0;
+    for (let i = 0; i < m.length; i++) if (m[i] > 0.5) on++;
+    // 半径 20 的圆理论上约 1256 像素，但 smoothstep 让外圈渐弱，
+    // 实测 mask>0.5 约 740、mask>0 约 1264。只要远小于整块(40000)即可。
+    return on > 400 && on < 2500;
+  })());
+
+  // 2) 对比旧语义（initial=1）确实是反的
+  const oldMask = C.strokesToMask(strokes, W, H);   // 默认 initial=1
+  t('旧语义（initial=1）没画到的地方仍是 1', oldMask[5 * W + 5] === 1);
+  t('★ 新旧语义在"没画到的地方"结论相反',
+    oldMask[5 * W + 5] === 1 && m[5 * W + 5] === 0);
+
+  // 3) 端到端：图层 alpha 只覆盖画过的区域
+  const alpha = C.layerAlphaMap({
+    rect: { x: 0, y: 0, w: W, h: H }, mask: m,
+    feather: 0, colorMatch: 0, opacity: 1, enabled: true
+  }, W, H);
+  t('★★ 只有画过的像素会被改', alpha[100 * W + 100] > 0.9, alpha[100 * W + 100]);
+  t('★★ 没画过的像素完全不动', alpha[5 * W + 5] === 0, alpha[5 * W + 5]);
+
+  // 4) 擦除（橡皮）能把已标记的地方擦回去
+  const m2 = C.strokesToMask([
+    { mode: 'restore', radius: 20, points: [{ x: 100, y: 100 }] },
+    { mode: 'erase', radius: 20, points: [{ x: 100, y: 100 }] }
+  ], W, H, { initial: 0 });
+  t('★ 橡皮能把标记擦掉（恢复成不动）', m2[100 * W + 100] < 0.01, m2[100 * W + 100]);
+
+  // 5) 接线检查
+  t('★★ maskFromStrokes 用 initial:0（这是语义反转的关键）',
+    /C\.strokesToMask\(local, rect\.w, rect\.h, \{ initial: 0 \}\)/.test(js));
+  t('★★ 没有笔迹时仍传 null（= 整块都改）',
+    /S\.strokes\.length \? maskFromStrokes\(rect\) : null/.test(js));
+  t('★ 默认笔刷是"画上=改"（不是擦除）', /brushErase: false/.test(js));
+  t('★ 预览红色标在"要改"的地方（不再取 1-mask）',
+    /C\.maskToRGBA\(maskBuf, rect\.w, rect\.h, C\.BRUSH_COLOR/.test(js));
+  t('增量着色也用 mask 本身',
+    /const v = mask\[i\];/.test(fsM.readFileSync(__dirname + '/../app/core.js', 'utf8')));
+  t('界面按钮文案已更新', /画笔（画上=改）/.test(html) && /橡皮（擦掉）/.test(html));
+  t('提示条写清两种情形', /不涂 = 改整块选区/.test(html));
 })();
 
 /* ---------- 检查更新 ---------- */

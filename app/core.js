@@ -6507,8 +6507,12 @@
       for (let x = x0; x <= x1; x++) {
         const i = mRow + x;
         const o = oRow + x * 4;
-        // 预览标的是「保护区」= 1 - mask
-        const v = 1 - mask[i];
+        // 预览标的是「要改的地方」= mask 本身。
+        //
+        // v3.9.2 起掩膜语义是 1=要改、0=不动，所以这里直接用 mask，
+        // 不再取反。取反的话红色会标在"没画到"的地方 —— 正好标反，
+        // 用户会以为自己在改空白区域。
+        const v = mask[i];
         const a = v * a255;
         out[o] = r;
         out[o + 1] = g2;

@@ -758,10 +758,15 @@ console.log('\n【偏色】发给模型的图片不得带任何标记色（蓝�
   // 预览函数必须只标注保护区，且无笔迹时不显示
   const prev = appSrc.slice(appSrc.indexOf('function drawMaskOverlay'), appSrc.indexOf('function drawSelection'));
   t('预览无笔迹时不显示任何蒙层', /if \(!S\.strokes\.length\) return;/.test(prev));
-  // 只标注「保护区」= 1 - mask。变量名可能变（现在叫 maskBuf），
-  // 所以按语义匹配，不绑死具体标识符。
-  t('预览标注的是保护区（1-mask）', /1 - mask\w*\[i\]/.test(prev), 
-    (prev.match(/1 - mask\w*\[i\]/) || ['未找到'])[0]);
+  // 预览要把「要改的地方」标出来。
+  //
+  // 注意这里历史上是反的：v3.9.2 之前掩膜 1=保护区，所以预览取 1-mask。
+  // 用户反馈「只改我画的地方」之后语义反转成 1=要改，预览直接传 mask，
+  // 再取反就会把红色标在没画到的地方（正好标反）。所以断言跟着改。
+  t('★ 预览标注的是「要改的地方」（直接传 mask，不取反）',
+    /maskToRGBA\(maskBuf, rect\.w, rect\.h, C\.BRUSH_COLOR/.test(prev),
+    (prev.match(/maskToRGBA\([^)]*\)/) || ['未找到'])[0]);
+  t('★ 预览不能再用 1-mask（会标反）', !/1 - mask\w*\[i\]/.test(prev));
 })();
 
 console.log('\n【上游回文字】必须识别为「配错模型」，不能误判成「缺图」');
