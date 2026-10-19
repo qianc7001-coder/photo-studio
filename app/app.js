@@ -1893,6 +1893,16 @@
     const r = C.imageRectToScreen({ x: 0, y: 0, w: S.docW, h: S.docH }, S.view);
     ctx.imageSmoothingEnabled = S.view.scale < 1;
     ctx.imageSmoothingQuality = 'high';
+
+    // 长按对比：画原图（docCanvas = 导入时那张，不含任何编辑），
+    // 并且**跳过**下面的选区/笔迹/引导线 —— 对比时要看的是干净的原始画面，
+    // 叠一堆辅助线反而看不清。
+    if (longPressActive && S.docCanvas) {
+      ctx.drawImage(S.docCanvas, r.x, r.y, r.w, r.h);
+      drawOriginalBadge(r);
+      return;
+    }
+
     ctx.drawImage(S.viewCanvas, r.x, r.y, r.w, r.h);
 
     // 画笔掩膜预览
@@ -1919,6 +1929,31 @@
       ctx.restore();
       requestAnimationFrame(() => { if (S.pending) draw(); });
     }
+  }
+
+  /** 长按对比时右上角的小标签，让用户知道"现在看的是原图" */
+  function drawOriginalBadge(r) {
+    const label = '原图';
+    ctx.save();
+    ctx.font = '600 13px system-ui, -apple-system, sans-serif';
+    const tw = ctx.measureText(label).width;
+    const padX = 10, padY = 6;
+    const bw = tw + padX * 2;
+    const bh = 13 + padY * 2;
+    const bx = Math.min(r.x + r.w - bw - 8, viewSize().w - bw - 8);
+    const by = Math.max(8, r.y + 8);
+    ctx.fillStyle = 'rgba(12,14,18,.82)';
+    if (ctx.roundRect) {
+      ctx.beginPath();
+      ctx.roundRect(bx, by, bw, bh, 7);
+      ctx.fill();
+    } else {
+      ctx.fillRect(bx, by, bw, bh);
+    }
+    ctx.fillStyle = '#fff';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, bx + padX, by + bh / 2);
+    ctx.restore();
   }
 
   let maskCache = null, maskCacheKey = '';
@@ -2829,10 +2864,14 @@
     S.pointers.set(ev.pointerId, p);
 
     if (S.pointers.size === 2) {
+      cancelLongPress();     // 双指 = 缩放，不是长按
       startPinch();
       return;
     }
-    if (S.pointers.size > 2) return;
+    if (S.pointers.size > 2) { cancelLongPress(); return; }
+
+    // 单指按下 → 开始长按计时（按住不放就显示原图）
+    armLongPress(p, ev.pointerId);
 
     const ip = C.screenToImage(p, S.view);
 
@@ -2929,6 +2968,22 @@
     const p = localPoint(ev);
     if (S.pointers.has(ev.pointerId)) S.pointers.set(ev.pointerId, p);
 
+    // 长按判定：动得太多说明是在拖，不是要对比
+    if (longPressStart && ev.pointerId === longPressPointerId) {
+      const dx = p.x - longPressStart.x;
+      const dy = p.y - longPressStart.y;
+      if (Math.hypot(dx, dy) > LONG_PRESS_MOVE_TOL) {
+        if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = 0; }
+        longPressStart = null;
+        longPressPointerId = null;
+        // 取消长按后，如果这次按下只留下一个退化选区（0×0），也要清掉。
+        // 否则它会一直留着，把画面压暗 —— 用户看到的是"点了空白处画面变灰"。
+        if (S.rect && (S.rect.w < 1 || S.rect.h < 1)) S.rect = null;
+      }
+    }
+    // 长按生效期间不处理任何手势
+    if (longPressActive) return;
+
     if (S.pointers.size === 2 && S.gesture && S.gesture.type === 'pinch') {
       updatePinch();
       return;
@@ -2986,6 +3041,18 @@
   });
 
   function endPointer(ev) {
+    // 长按对比：松手就恢复（先取消再走后续清理）
+    if (longPressActive) {
+      cancelLongPress();
+      S.pointers.delete(ev.pointerId);
+      draw();
+      return;
+    }
+    // 还没到 450ms 就抬手 → 不是长按，取消计时
+    if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = 0; }
+    longPressStart = null;
+    longPressPointerId = null;
+
     const g = S.gesture;
     S.pointers.delete(ev.pointerId);
     if (S.pointers.size < 2 && g && g.type === 'pinch') {
@@ -6499,6 +6566,65 @@
   let cmpPointers = new Map();
   let cmpPinch = null;      // { dist0, view0, cx, cy }
   let cmpLastTap = 0, cmpLastTapX = 0, cmpLastTapY = 0;
+  /** 上一次布局用的视口尺寸（用来发现"布局变了但还没重算"） */
+  let cmpLayoutSize = { w: 0, h: 0 };
+
+  /* ---------------- 长按对比原图 ----------------
+   *
+   * 按住画面就显示「原图」（S.docCanvas = 导入时那张，不含任何编辑），
+   * 松手恢复。用来随时确认"改了这么多，原始是什么样"。
+   *
+   * 为什么不复用生成后的对比页（#compare）：
+   *   那套是「修改前 / 修改后」的左右分割，还带应用/放弃按钮，
+   *   属于一次性的确认流程。长按是随时看一眼，不该弹出任何东西。
+   *
+   * 交互细节（都是踩过的坑）：
+   *   - 450ms 才算长按：太短会在正常拖动时误触发
+   *   - 移动超过 8px 就取消：说明用户是在拖，不是要对比
+   *   - 长按期间**不能**让原手势继续（否则会画出笔迹）
+   */
+  const LONG_PRESS_MS = 450;
+  const LONG_PRESS_MOVE_TOL = 8;
+  let longPressTimer = 0;
+  let longPressActive = false;
+  let longPressStart = null;
+  let longPressPointerId = null;
+
+  /** 当前该显示原图吗（绘制时用） */
+  function showingOriginal() { return longPressActive; }
+
+  /** 开始长按计时（在 pointerdown 里调） */
+  function armLongPress(p, pointerId) {
+    cancelLongPress();
+    longPressStart = { x: p.x, y: p.y };
+    longPressPointerId = pointerId;
+    longPressTimer = setTimeout(() => {
+      longPressTimer = 0;
+      // 长按生效：把当前手势整个丢掉，避免松手时留下一笔。
+      //
+      // 还要清掉「点一下就会建出来的退化选区」：pointerdown 里如果是空白处
+      // 按下，会立刻 S.rect = {x,y,w:0,h:0} 并开始拉框。长按触发时这个
+      // 0×0 选区已经存在了 —— 它会让 drawSelection() 把整个画面压暗，
+      // 表现就是"长按后画面变白/看不清"，而用户完全不知道原因。
+      const degenerate = S.rect && (S.rect.w < 1 || S.rect.h < 1);
+      if (degenerate) S.rect = null;
+      S.gesture = null;
+      S.pointers.clear();
+      longPressActive = true;
+      draw();
+    }, LONG_PRESS_MS);
+  }
+
+  /** 取消长按（移动超限 / 抬起 / 多指） */
+  function cancelLongPress() {
+    if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = 0; }
+    longPressStart = null;
+    longPressPointerId = null;
+    if (longPressActive) {
+      longPressActive = false;
+      draw();
+    }
+  }
 
   /** 当前视口尺寸（对比层是全屏的） */
   function cmpSize() {
@@ -6537,29 +6663,74 @@
     cmpView = null;              // 每次进入都从「适应窗口」开始
     cmpLastTap = 0;
     $('compare').hidden = false;
+    // 先画一次（用当前能拿到的尺寸），再等一帧重画。
+    // 原因：刚把 hidden 改成 false 时，浏览器还没完成布局，
+    // getBoundingClientRect() 可能返回 0 或上一帧的旧尺寸。
+    // 第一帧先兜住"立刻可见"，第二帧布局一定完成了，尺寸才准。
     layoutCompare();
     drawCompare();
+    requestAnimationFrame(() => {
+      if (!S.pending) return;      // 用户可能已经放弃/应用了
+      layoutCompare();
+      drawCompare();
+    });
   }
 
+  /**
+   * 把对比画布的内部分辨率对齐到当前视口。
+   *
+   * 这里踩过一个坑，症状是「生成后的确认页比原图大一点，而且只显示左上角」：
+   *   原来除了设 width/height（内部分辨率），还写死了
+   *   style.width/height 为 getBoundingClientRect() 的像素值。
+   *   而 CSS 里 #cmp-cv 本来就是 width:100%;height:100% ——
+   *   两套尺寸互相打架。更要紧的是 showCompare() 里
+   *   `hidden=false` 之后**立刻**调这里，此时布局往往还没完成，
+   *   getBoundingClientRect() 可能拿到 0 或上一帧的旧值；
+   *   画布一旦被设成错误的尺寸，绘制时按 CSS 拉伸到满屏，
+   *   看起来就是「放大了一点、只看到左上角」。
+   *
+   * 现在：
+   *   - 只设内部分辨率（width/height），显示尺寸完全交给 CSS
+   *   - 尺寸没变就什么都不做（避免每帧重建画布、丢内容）
+   *   - 每次绘制前调一次，布局迟到也能自动纠正
+   */
   function layoutCompare() {
     const r = $('compare').getBoundingClientRect();
     const d = DPR();
-    cmpCv.width = Math.max(1, Math.round(r.width * d));
-    cmpCv.height = Math.max(1, Math.round(r.height * d));
-    cmpCv.style.width = r.width + 'px';
-    cmpCv.style.height = r.height + 'px';
-    cmpCtx = cmpCv.getContext('2d');
+    const cssW = Math.max(1, r.width);
+    const cssH = Math.max(1, r.height);
+    const bw = Math.max(1, Math.round(cssW * d));
+    const bh = Math.max(1, Math.round(cssH * d));
+
+    if (cmpCv.width !== bw || cmpCv.height !== bh) {
+      cmpCv.width = bw;
+      cmpCv.height = bh;
+    }
+    // 不再写 style.width/height：CSS 的 100% 才是唯一权威，
+    // 手写像素值只会在布局变化后留下过期尺寸。
+    if (!cmpCtx) cmpCtx = cmpCv.getContext('2d');
     cmpCtx.setTransform(d, 0, 0, d, 0, 0);
+
     // 视口尺寸变了：把缩放状态夹回可视范围，避免露出空白
     if (cmpView) {
-      cmpView = C.clampView(cmpView, S.docW, S.docH, r.width, r.height);
+      cmpView = C.clampView(cmpView, S.docW, S.docH, cssW, cssH);
     }
+    cmpLayoutSize = { w: cssW, h: cssH };
+    return { w: cssW, h: cssH };
   }
 
   function drawCompare() {
     if (!cmpCtx || !cmpBefore) return;
-    const r = $('compare').getBoundingClientRect();
-    const W = r.width, H = r.height;
+    // 每次绘制前对齐一次尺寸：showCompare 里刚把 hidden 改 false 时
+    // 布局可能还没完成，那一刻拿到的尺寸是错的。这里兜住，
+    // 保证画布内部分辨率永远等于真实视口 —— 否则画面会被拉伸
+    // （表现为"放大了一点、只看到左上角"）。
+    const now = $('compare').getBoundingClientRect();
+    if (Math.abs(now.width - cmpLayoutSize.w) > 0.5 ||
+        Math.abs(now.height - cmpLayoutSize.h) > 0.5) {
+      layoutCompare();
+    }
+    const W = Math.max(1, now.width), H = Math.max(1, now.height);
     const fit = C.fitView(S.docW, S.docH, W, H, 10);
     // 没有缩放状态时用适应窗口（首次进入）
     const v = cmpView || fit;
@@ -9553,6 +9724,9 @@
     // 设置分级
     showSettingsPage, settingsAtHome, settingsPage: () => settingsPage,
     invalidateMask, draw, autoSelectAt,
+    layoutCompare,
+    resetView: () => { const v = viewSize(); S.view = C.fitView(S.docW, S.docH, v.w, v.h, 14); draw(); },
+    longPressState: () => ({ active: longPressActive, timer: !!longPressTimer }),
     imageToScreen: (p) => C.imageRectToScreen({ x: p.x, y: p.y, w: 1, h: 1 }, S.view),
     openSettings, closeSettings, handleBack,
     bgState: () => C.normalizeBg(S.cfg.bg),

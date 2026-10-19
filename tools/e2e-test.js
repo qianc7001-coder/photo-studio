@@ -7448,6 +7448,135 @@ async function run() {
     await sleep(120);
   }
 
+  /* ---------- 长按对比原图 ---------- */
+  console.log('\n【65】长按看原图 + 对比页尺寸');
+  {
+    const api = window.__PS_API;
+    S.jobs = [];
+    api.goHome();
+    await sleep(120);
+
+    // 载入一张蓝底图，然后把它改绿（这样原图/当前能区分开）
+    {
+      const c = napi.createCanvas(300, 200);
+      const cx0 = c.getContext('2d');
+      cx0.fillStyle = 'rgb(30, 90, 160)';
+      cx0.fillRect(0, 0, 300, 200);
+      const inp = doc.getElementById('file-input');
+      Object.defineProperty(inp, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'lp.png', { type: 'image/png' })],
+        configurable: true
+      });
+      inp.dispatchEvent(new window.Event('change'));
+      await sleep(400);
+    }
+    t('照片已载入', S.docW === 300, [S.docW, S.docH]);
+
+    // 直接往 viewCanvas 上涂绿，模拟"已经改过"
+    {
+      const vc = S.viewCanvas.getContext('2d');
+      vc.fillStyle = 'rgb(20, 200, 60)';
+      vc.fillRect(0, 0, S.docW, S.docH);
+    }
+    // 视图复位到"适应窗口"：前面的测试段可能把画面放大过，
+    // 那样图像只覆盖画布一部分，采样点会落到背景上（读到白色），
+    // 测出来像是"没画"，其实是采样位置不对。
+    api.resetView();
+    api.draw();
+    // 同步读一次（不 await），排除"桥接层异步"的可能
+    await sleep(200);
+
+    // 采样：先让画面处于确定状态，再**同步**读像素。
+    //
+    // 为什么要同步读：这个测试环境里还有别的 rAF 在重绘（闪烁边框之类），
+    // await 之后画布可能已经被别人改过，读到的是无关内容（表现为白色）。
+    // 同步读紧跟 draw() 之后，读到的才是 draw() 真正画出来的东西。
+    const sample = (skipDraw) => {
+      if (!skipDraw) api.draw();
+      const d = window.devicePixelRatio || 1;
+      const r = api.imageToScreen({ x: 150, y: 100 });
+      const sx = Math.max(0, Math.min(cv.width - 1, Math.round(r.x * d)));
+      const sy = Math.max(0, Math.min(cv.height - 1, Math.round(r.y * d)));
+      const im = cv.getContext('2d').getImageData(sx, sy, 1, 1).data;
+      return [im[0], im[1], im[2]];
+    };
+
+    const normal = sample();
+    t('★ 平时显示的是改过的画面（绿）', normal[1] > 120 && normal[0] < 120, normal);
+
+    // ---- 长按：应该显示原图（蓝）----
+    const p0 = { x: 150, y: 100 };
+    const scr = api.imageToScreen(p0);
+    const ptr = (type, x, y) => {
+      const e = new window.MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button: 0, buttons: 1 });
+      Object.defineProperty(e, 'pointerId', { value: 1 });
+      Object.defineProperty(e, 'pointerType', { value: 'mouse' });
+      cv.dispatchEvent(e);
+    };
+    ptr('pointerdown', scr.x, scr.y);
+    // 等过长按阈值
+    await sleep(700);
+    const held = sample();
+    t('★★ 长按后显示原图（蓝，不是改过的绿）',
+      held[2] > 120 && held[1] < 130, held);
+
+    ptr('pointerup', scr.x, scr.y);
+    await sleep(250);
+    const after = sample();
+    api.draw();
+    await sleep(100);
+    t('★★ 松手恢复成改过的画面（绿）',
+      after[1] > 120 && after[0] < 120, after);
+
+    // ---- 短按不该触发 ----
+    ptr('pointerdown', scr.x, scr.y);
+    await sleep(120);
+    ptr('pointerup', scr.x, scr.y);
+    await sleep(150);
+    const shortTap = sample();
+    t('★ 短按（120ms）不触发对比', shortTap[1] > 120 && shortTap[0] < 120, shortTap);
+
+    // ---- 长按后拖动：应取消对比（不会切到原图）----
+    //
+    // 注意：这里移动之后松手会留下一个正常选区（拉框行为），
+    // 而选区会把画面压暗，所以不能靠"采样绿色"判断。
+    // 正确判据是「没有进入原图状态」，以及「画面不是原图的蓝」。
+    ptr('pointerdown', scr.x, scr.y);
+    await sleep(150);
+    ptr('pointermove', scr.x + 60, scr.y + 40);
+    await sleep(600);
+    t('★★ 拖动后没有进入原图状态', api.longPressState().active === false,
+      api.longPressState());
+    const dragNotHeld = sample();
+    t('★ 拖动后显示的仍不是原图（蓝）',
+      !(dragNotHeld[2] > 120 && dragNotHeld[1] < 130), dragNotHeld);
+    ptr('pointerup', scr.x + 60, scr.y + 40);
+    await sleep(150);
+    // 清掉这次拖动产生的选区，免得影响后面的采样
+    S.rect = null;
+    api.draw();
+    await sleep(80);
+
+    // ---- 对比页尺寸：画布内部分辨率要等于视口 ----
+    {
+      const cmpEl = doc.getElementById('compare');
+      // jsdom 里没有真实布局，给个确定尺寸
+      cmpEl.getBoundingClientRect = () => ({ width: 360, height: 640, left: 0, top: 0, right: 360, bottom: 640 });
+      api.layoutCompare();
+      const cvEl = doc.getElementById('cmp-cv');
+      const d = Math.min(window.devicePixelRatio || 1, 2.5);
+      t('★★ 对比画布内部宽度 = 视口宽 × DPR',
+        Math.abs(cvEl.width - Math.round(360 * d)) <= 1, [cvEl.width, 360 * d]);
+      t('★★ 对比画布内部高度 = 视口高 × DPR',
+        Math.abs(cvEl.height - Math.round(640 * d)) <= 1, [cvEl.height, 640 * d]);
+      t('★ 没有手写 style 像素尺寸（交给 CSS 的 100%）',
+        !cvEl.style.width || cvEl.style.width === '', cvEl.style.width);
+    }
+
+    api.goHome();
+    await sleep(120);
+  }
+
   /* ---------- 无 JS 错误 ---------- */
   console.log('\n【15】运行健康度');
   const errs = logs.filter((l) => /JSDOM_ERROR|Uncaught/.test(l));

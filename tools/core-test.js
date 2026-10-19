@@ -4666,6 +4666,63 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('提示条写清两种情形', /不涂 = 改整块选区/.test(html));
 })();
 
+
+/* ===== 对比页尺寸 + 长按看原图 ===== */
+(function () {
+  console.log('\n【对比页尺寸与长按对比】');
+  const fsC = require('fs');
+  const js = fsC.readFileSync(__dirname + '/../app/app.js', 'utf8');
+
+  // 1) 对比画布尺寸：不能手写 style 像素值（会和 CSS 的 100% 打架）
+  const layoutFn = (() => {
+    const i = js.indexOf('function layoutCompare()');
+    if (i < 0) return '';
+    const rest = js.slice(i + 10);
+    const n = rest.search(/\n  (?:async )?function /);
+    return n > 0 ? rest.slice(0, n) : rest;
+  })();
+  t('★★ 对比画布不再手写 style.width（CSS 的 100% 才是权威）',
+    !/cmpCv\.style\.width\s*=/.test(layoutFn));
+  t('★★ 对比画布不再手写 style.height',
+    !/cmpCv\.style\.height\s*=/.test(layoutFn));
+  t('★ 尺寸没变就不重建画布（避免丢内容/闪一下）',
+    /cmpCv\.width !== bw \|\| cmpCv\.height !== bh/.test(layoutFn));
+  t('★ 只设内部分辨率', /cmpCv\.width = bw/.test(layoutFn) && /cmpCv\.height = bh/.test(layoutFn));
+
+  // 2) drawCompare 要能发现"布局变了但还没重算"
+  const drawFn = (() => {
+    const i = js.indexOf('function drawCompare()');
+    if (i < 0) return '';
+    const rest = js.slice(i + 10);
+    const n = rest.search(/\n  (?:async )?function /);
+    return n > 0 ? rest.slice(0, n) : rest;
+  })();
+  t('★★ 绘制前会检查尺寸变化并重算（兜住布局迟到）',
+    /cmpLayoutSize\.w/.test(drawFn) && /layoutCompare\(\)/.test(drawFn));
+  t('showCompare 里等一帧再重算（刚显示时布局未完成）',
+    /requestAnimationFrame\(\(\) => \{[\s\S]{0,200}layoutCompare\(\)/.test(js));
+
+  // 3) 长按对比原图
+  t('★ 有长按计时器与阈值', /LONG_PRESS_MS = \d+/.test(js));
+  t('★ 长按阈值不短于 400ms（太短会误触发）', (() => {
+    const m = /LONG_PRESS_MS = (\d+)/.exec(js);
+    return m && Number(m[1]) >= 400;
+  })());
+  t('★ 移动超过容差就取消长按（拖动时不该触发）',
+    /LONG_PRESS_MOVE_TOL/.test(js) && /Math\.hypot\(dx, dy\) > LONG_PRESS_MOVE_TOL/.test(js));
+  t('★ 双指时取消长按（缩放不是对比）',
+    /S\.pointers\.size === 2[\s\S]{0,80}cancelLongPress\(\)/.test(js));
+  t('★★ 长按时画的是 docCanvas（原图，不含编辑）',
+    /longPressActive && S\.docCanvas[\s\S]{0,120}drawImage\(S\.docCanvas/.test(js));
+  t('★★ 长按时跳过选区/笔迹/引导线（只看干净原图）',
+    /longPressActive && S\.docCanvas[\s\S]{0,400}return;/.test(js));
+  t('★ 长按时有「原图」角标', /drawOriginalBadge/.test(js) && /'原图'/.test(js));
+  t('★ 松手恢复（endPointer 里取消）',
+    /function endPointer\(ev\)[\s\S]{0,200}longPressActive[\s\S]{0,120}cancelLongPress/.test(js));
+  t('★ 长按生效时丢弃当前手势（松手不会留下一笔）',
+    /longPressActive = true;/.test(js) && /S\.gesture = null;/.test(js));
+})();
+
 /* ---------- 检查更新 ---------- */
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);
