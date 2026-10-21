@@ -173,6 +173,20 @@ html, body {
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
+/* 全局禁选：修图应用里长按画布是「看原图」，
+   不能让 WebView 把长按当成选字（选中界面上的汉字会弹气泡盖住画面）。
+   JS 里还会再注入一份同样的规则并拦 selectstart / contextmenu —— 
+   这里先静态写死，是为了「页面刚打开、JS 还没跑到」那一瞬间也生效。
+   输入框必须放行，否则长按粘贴 API Key 就废了。 */
+html, body, #app, #stage, #cv, .sheet-mask, .st-card, .cl-item {
+  -webkit-user-select: none; -moz-user-select: none; -ms-user-select: none; user-select: none;
+  -webkit-touch-callout: none;
+}
+input, textarea, [contenteditable="true"] {
+  -webkit-user-select: text; -moz-user-select: text; -ms-user-select: text; user-select: text;
+  -webkit-touch-callout: default;
+}
+
 /* hidden 必须压过下面的 display:flex */
 [hidden] { display: none !important; }
 
@@ -1253,6 +1267,15 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 /* 日志详情：默认收起，点一下展开。
    排查要看的是「请求到底长什么样」，但那信息量大，
    全铺开会把列表淹掉，所以默认收着。 */
+/* 「查看详情 / 复制详情」并排一行。
+   复制是排查时最常用的动作（要把这条发给别人看），
+   单独一行按钮比塞进详情里更好找。 */
+.cl-acts {
+  display: flex;
+  gap: 8px;
+  margin-top: 7px;
+}
+.cl-acts .cl-more { margin-top: 0; }
 .cl-more {
   margin-top: 7px;
   padding: 3px 9px;

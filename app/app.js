@@ -7765,11 +7765,30 @@
       // 参考图发没发出去、走的哪种传输、图片字段名、请求体多大…
       // 这些在摘要里放不下，全放又太吵，所以默认收起。
       const detailRows = C.buildCallLogDetail(e);
+      // 有详情就要能复制：用户排查时最常做的是「把这条发给别人看」。
+      // 只给个展开而不给复制，等于让他对着屏幕手抄。
       if (detailRows.length) {
+        const acts = document.createElement('div');
+        acts.className = 'cl-acts';
         const btn = document.createElement('button');
         btn.className = 'cl-more';
         btn.type = 'button';
         btn.textContent = '查看详情';
+        const copy = document.createElement('button');
+        copy.className = 'cl-more';
+        copy.type = 'button';
+        copy.textContent = '复制详情';
+        copy.onclick = () => {
+          const text = callLogEntryText(e, detailRows);
+          copyToClipboard(text).then((ok) => {
+            copy.textContent = ok ? '已复制' : '复制失败';
+            setTimeout(() => { copy.textContent = '复制详情'; }, 1600);
+          });
+        };
+        acts.appendChild(btn);
+        acts.appendChild(copy);
+        item.appendChild(acts);
+
         const box = document.createElement('div');
         box.className = 'cl-detail';
         box.hidden = true;
@@ -7789,11 +7808,66 @@
           box.hidden = !box.hidden;
           btn.textContent = box.hidden ? '查看详情' : '收起详情';
         };
-        item.appendChild(btn);
         item.appendChild(box);
       }
       list.appendChild(item);
     }
+  }
+
+  /**
+   * 把一条日志连同它的详情拼成纯文本（给「复制详情」用）。
+   *
+   * 摘要 + 详情都要带上：只复制详情的话，对方看不到时间、模型和成败，
+   * 还得回头问一遍，等于没复制。
+   */
+  function callLogEntryText(e, rows) {
+    const list = rows || C.buildCallLogDetail(e);
+    const lines = [];
+    lines.push(C.formatDateTime(e.at) + '  ' + (e.ok ? '成功' : '失败'));
+    lines.push('模型：' + (e.model || '（未记录）') + (e.provider ? ' · ' + e.provider : ''));
+    const hasMs = e.ms !== null && e.ms !== undefined && e.ms !== '' && Number.isFinite(Number(e.ms));
+    if (hasMs) lines.push('耗时：' + (Number(e.ms) / 1000).toFixed(1) + ' 秒');
+    if (e.prompt) lines.push('要求：' + e.prompt);
+    for (const row of list) lines.push(row.k + '：' + row.v);
+    return lines.join('\n');
+  }
+
+  /**
+   * 写剪贴板。
+   *
+   * 安卓 WebView 里 navigator.clipboard 不一定有（非安全上下文 / 老内核），
+   * 所以要有 execCommand 的兜底 —— 只靠新版 API 的话，
+   * 在老机器上「复制」会静默失败，用户以为复制成功了。
+   */
+  function copyToClipboard(text) {
+    return new Promise((resolve) => {
+      const fallback = () => {
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          // 必须真的在文档里且可见度不为 hidden，否则 execCommand 选不中
+          ta.setAttribute('readonly', '');
+          ta.style.position = 'fixed';
+          ta.style.top = '-1000px';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          ta.setSelectionRange(0, ta.value.length);
+          const ok = document.execCommand && document.execCommand('copy');
+          document.body.removeChild(ta);
+          resolve(!!ok);
+        } catch (err) {
+          resolve(false);
+        }
+      };
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(() => resolve(true)).catch(fallback);
+          return;
+        }
+      } catch (err) { /* 落到兜底 */ }
+      fallback();
+    });
   }
 
   /**
@@ -9550,10 +9624,55 @@
     return plan;
   }
 
+  /* ---------------- 禁掉「长按选字」和「长按弹出系统菜单」 ----------------
+   *
+   * 修图应用里长按画布是「看原图」，但 WebView 默认把长按当成文字操作：
+   *   按住画面 → 安卓选中界面里的汉字 → 弹出「复制/全选」气泡 → 盖住画面，
+   *   而且长按对比根本没法用（选区一出来，看的就是被选中的文字而不是照片）。
+   *
+   * 三道一起关：
+   *   1. CSS 的 user-select（老内核要加 -webkit- 前缀）—— 从根上不让文字可选
+   *   2. selectstart 事件 —— 少数内核无视 user-select
+   *   3. contextmenu 事件 —— 安卓 WebView 的长按菜单走这个事件，
+   *      不拦的话即使选不中字，按住不动也会弹出系统菜单
+   *
+   * 但输入框必须保留可选：API Key、提示词、地址栏都要能长按粘贴/全选，
+   * 把那里也禁掉等于把「粘贴 Key」这条路堵死 —— 那是用户最常做的操作之一。
+   */
+  function lockTextSelection() {
+    const style = document.createElement('style');
+    style.id = 'no-select-style';
+    style.textContent = [
+      'html, body, #app, #stage, #cv, .sheet-mask, .st-card, .cl-item {',
+      '  -webkit-user-select: none; -moz-user-select: none; -ms-user-select: none; user-select: none;',
+      '  -webkit-touch-callout: none;',
+      '}',
+      'input, textarea, [contenteditable="true"] {',
+      '  -webkit-user-select: text; -moz-user-select: text; -ms-user-select: text; user-select: text;',
+      '  -webkit-touch-callout: default;',
+      '}'
+    ].join('\n');
+    (document.head || document.documentElement).appendChild(style);
+
+    // 输入框里要放行：否则「长按粘贴」和「全选删掉重填」都会失效
+    const inField = (el) => {
+      if (!el || !el.tagName) return false;
+      const tag = String(el.tagName).toUpperCase();
+      return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable === true;
+    };
+    const guard = (ev) => {
+      if (inField(ev.target)) return;
+      ev.preventDefault();
+    };
+    document.addEventListener('selectstart', guard, true);
+    document.addEventListener('contextmenu', guard, true);
+  }
+
   /* ============================ 启动 ============================ */
 
   function boot() {
     applyCompat();               // 必须最先做：老内核要在渲染前打上补丁
+    lockTextSelection();         // 长按选字会盖住画面、挡掉长按看原图
     S.cfg = loadCfg();
     // 迁移过配置就必须立刻落盘。
     // 不落盘的话，每次启动都会重新迁移一遍 —— 用户手动改回来的设置会被反复覆盖。

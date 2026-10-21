@@ -4687,5 +4687,63 @@ console.log('\n【整图】没有框选时默认处理整张图（含 AI 生图�
 })();
 /* ---------- 没有框选 = 整张图（回归） ---------- */
 
+/* ---------- 长按不选字（回归） ---------- */
+/*
+ * 缺陷现象：按住画面想看原图，结果界面上的汉字被选中，
+ *          弹出「复制 / 全选」气泡盖住画面，长按对比完全没法用。
+ * 根因：WebView 默认把长按当成文字选择操作，而修图应用的画布
+ *      不该有任何可选的文字。
+ * 回归点：三道一起关（CSS / selectstart / contextmenu），
+ *        但**输入框必须放行** —— 否则长按粘贴 API Key 也会废掉。
+ */
+(() => {
+  const fs = require('fs');
+  const appSrc = fs.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const act = fs.readFileSync(__dirname + '/../android/src/com/photostudio/app/MainActivity.java', 'utf8');
+
+  t('页面启动时就锁住文字选择', /function boot\(\) \{[\s\S]{0,300}lockTextSelection\(\);/.test(appSrc));
+  t('禁选样式带 -webkit- 前缀（老内核只认这个）',
+    /-webkit-user-select: none/.test(appSrc));
+  t('输入框明确保留可选（长按粘贴 Key 靠它）',
+    /input, textarea, \[contenteditable="true"\] \{[\s\S]{0,200}user-select: text/.test(appSrc));
+  t('拦掉 selectstart', /addEventListener\('selectstart', guard, true\)/.test(appSrc));
+  t('拦掉 contextmenu（长按菜单走这个事件）',
+    /addEventListener\('contextmenu', guard, true\)/.test(appSrc));
+  t('输入框内放行（不能把粘贴一起禁掉）',
+    /const inField = \(el\) => \{/.test(appSrc) && /INPUT' \|\| tag === 'TEXTAREA'/.test(appSrc));
+  t('原生侧也关掉长按（老内核不认 CSS 时靠这层）',
+    /web\.setLongClickable\(false\)/.test(act) && /web\.setOnLongClickListener/.test(act));
+
+  // 样式表里也要静态写死一份：JS 注入要等脚本跑到，
+  // 页面刚打开那一瞬间若用户正好长按，还是会选中文字。
+  const css = fs.readFileSync(__dirname + '/../app/style.css', 'utf8');
+  t('样式表里也静态禁选（脚本没跑到之前也生效）',
+    /#stage, #cv[\s\S]{0,120}user-select: none/.test(css) ||
+    /-webkit-user-select: none;[\s\S]{0,120}#cv/.test(css));
+  t('样式表里输入框放行',
+    /input, textarea, \[contenteditable="true"\][\s\S]{0,160}user-select: text/.test(css));
+})();
+
+/* ---------- 日志逐条可复制（回归） ---------- */
+/*
+ * 用户要「能详细查看日志」，但只看不够：排查时最常做的是把某一条
+ * 发给别人看。只给展开不给复制，等于让他对着屏幕手抄。
+ * 回归点：每条日志都有复制按钮；老内核没有 clipboard API 时
+ *        必须退回 execCommand，不能静默失败。
+ */
+(() => {
+  const fs = require('fs');
+  const appSrc = fs.readFileSync(__dirname + '/../app/app.js', 'utf8');
+
+  t('每条日志都有「复制详情」', /copy\.textContent = '复制详情'/.test(appSrc));
+  t('复制内容是摘要 + 详情（只给详情对方看不懂）',
+    /function callLogEntryText\(e, rows\)/.test(appSrc) && /buildCallLogDetail\(e\)/.test(appSrc));
+  t('复制内容带上失败原因', /if \(!e\.ok && e\.error\)/.test(appSrc));
+  t('新版剪贴板 API 优先', /navigator\.clipboard\.writeText/.test(appSrc));
+  t('老内核退回 execCommand（否则静默失败）',
+    /document\.execCommand && document\.execCommand\('copy'\)/.test(appSrc));
+  t('复制后给出反馈（不然不知道成没成）', /copy\.textContent = ok \? '已复制' : '复制失败'/.test(appSrc));
+})();
+
 console.log(`\n合计 ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

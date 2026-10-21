@@ -6874,7 +6874,10 @@ async function run() {
     api.openCallLog();
     await sleep(250);
     t('日志面板已打开', doc.getElementById('calllog').hidden === false);
-    const moreBtns = doc.querySelectorAll('#calllog-list .cl-more');
+    // 每条日志现在有两个按钮（查看详情 / 复制详情），这里只挑「查看详情」，
+    // 否则按数量断言会变成 4 个，测的就不是这件事了。
+    const moreBtns = Array.prototype.filter.call(
+      doc.querySelectorAll('#calllog-list .cl-more'), (b) => /查看详情|收起详情/.test(b.textContent));
     t('★ 每条日志都有「查看详情」', moreBtns.length === 2, moreBtns.length);
     // 注意：日志按「最新在前」排列，所以 [0] 是后记的那条（失败），[1] 是成功的。
     // 断言必须按这个顺序来，否则会拿错条目、得到莫名其妙的结论。
@@ -7575,6 +7578,118 @@ async function run() {
 
     api.goHome();
     await sleep(120);
+  }
+
+  /* ---------- 长按不能选中界面上的文字 ---------- */
+  console.log('\n【66】长按不选字：按住照片看原图时，不能把界面汉字选出来');
+  {
+    // 1) 根级禁选：没有这条，安卓 WebView 长按会选中汉字并弹出「复制/全选」
+    const css = Array.prototype.map.call(doc.querySelectorAll('style'), (s) => s.textContent).join('\n');
+    t('★★ 页面注入了禁选样式', /user-select:\s*none/.test(css));
+    t('★ 带 -webkit- 前缀（老内核只认这个）', /-webkit-user-select:\s*none/.test(css));
+    t('★★ 输入框保留可选（否则长按粘贴 Key 就废了）',
+      /input[^}]*user-select:\s*text/.test(css) || /textarea[^}]*user-select:\s*text/.test(css));
+    t('★ 关掉了长按系统菜单（touch-callout）', /-webkit-touch-callout:\s*none/.test(css));
+
+    // 2) 事件层：selectstart / contextmenu 必须被拦掉（preventDefault）
+    const fire = (type, target) => {
+      const e = new window.Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(e, 'target', { value: target });
+      doc.dispatchEvent(e);
+      return e.defaultPrevented;
+    };
+    t('★★ 在画布上 selectstart 被拦下', fire('selectstart', doc.getElementById('cv')) === true);
+    t('★★ 在画布上 contextmenu 被拦下（长按菜单不弹）', fire('contextmenu', doc.getElementById('cv')) === true);
+    // 3) 输入框里必须放行，否则「长按粘贴 Key」和「全选重填」都用不了
+    const promptEl = doc.getElementById('prompt');
+    t('★★ 输入框里 selectstart 放行（能长按粘贴）', fire('selectstart', promptEl) === false);
+    t('★ 输入框里 contextmenu 放行', fire('contextmenu', promptEl) === false);
+
+    // 4) 长按看原图仍然正常工作（禁选不能把它一起废掉）
+    const api = window.__PS_API;
+    S.jobs = [];
+    api.goHome();
+    await sleep(100);
+    {
+      const c = napi.createCanvas(200, 140);
+      const cx0 = c.getContext('2d');
+      cx0.fillStyle = 'rgb(30, 90, 160)';
+      cx0.fillRect(0, 0, 200, 140);
+      const inp = doc.getElementById('file-input');
+      Object.defineProperty(inp, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'sel.png', { type: 'image/png' })],
+        configurable: true
+      });
+      inp.dispatchEvent(new window.Event('change'));
+      await sleep(400);
+    }
+    api.resetView();
+    api.draw();
+    await sleep(120);
+    const scr = api.imageToScreen({ x: 100, y: 70 });
+    const ptr = (type, x, y) => {
+      const e = new window.MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button: 0, buttons: 1 });
+      Object.defineProperty(e, 'pointerId', { value: 1 });
+      Object.defineProperty(e, 'pointerType', { value: 'mouse' });
+      cv.dispatchEvent(e);
+    };
+    ptr('pointerdown', scr.x, scr.y);
+    await sleep(700);
+    t('★★ 禁选之后长按看原图仍然生效', api.longPressState().active === true, api.longPressState());
+    ptr('pointerup', scr.x, scr.y);
+    await sleep(120);
+    t('★ 松手后退出原图状态', api.longPressState().active === false);
+    S.rect = null;
+    api.goHome();
+    await sleep(100);
+  }
+
+  /* ---------- 日志能逐条复制（排查时要把单条发出来） ---------- */
+  console.log('\n【67】日志详情可复制：单条记录能整段拷出来');
+  {
+    const api = window.__PS_API;
+    api.setCallLog([{
+      at: Date.now(), ok: false, provider: '自定义', model: 'gpt-image-2',
+      ms: 3200, status: 400, transport: 'multipart', imageField: 'image[]',
+      refCount: 1, refUsed: 0, promptLen: 12, prompt: '把背景换成海边',
+      error: '服务端返回 400', costUsd: null
+    }]);
+    api.openCallLog();
+    await sleep(120);
+    const list = doc.getElementById('calllog-list');
+    const copyBtn = Array.prototype.filter.call(
+      list.querySelectorAll('.cl-more'), (b) => /复制详情/.test(b.textContent))[0];
+    t('★★ 每条日志都有「复制详情」按钮', !!copyBtn);
+    t('★ 「查看详情」按钮还在', Array.prototype.some.call(
+      list.querySelectorAll('.cl-more'), (b) => /查看详情/.test(b.textContent)));
+
+    // 点一下必须真的把内容写进剪贴板
+    let written = null;
+    Object.defineProperty(window.navigator, 'clipboard', {
+      value: { writeText: (txt) => { written = txt; return Promise.resolve(); } },
+      configurable: true
+    });
+    copyBtn.onclick();
+    await sleep(80);
+    t('★★ 复制出去的是这段文字', !!written);
+    const txt = String(written || '');
+    t('★★ 复制内容带模型名', /gpt-image-2/.test(txt), txt.slice(0, 120));
+    t('★★ 复制内容带失败原因（排查的关键）', /服务端返回 400/.test(txt));
+    t('★★ 复制内容带详情（参考图没发出去要看得见）', /参考图/.test(txt) && /一张都没发出去/.test(txt));
+    t('★ 复制后按钮变成「已复制」反馈', /已复制/.test(copyBtn.textContent), copyBtn.textContent);
+
+    // 没有新版剪贴板 API 时要退回 execCommand，不能静默失败
+    Object.defineProperty(window.navigator, 'clipboard', { value: undefined, configurable: true });
+    let execCalled = 0;
+    doc.execCommand = () => { execCalled++; return true; };
+    // 按钮刚点过，文字还停在「已复制」上（1.6 秒后才还原），
+    // 所以按文字筛会筛不到 —— 直接取同一个元素引用。
+    copyBtn.onclick();
+    await sleep(80);
+    t('★★ 老内核没有 clipboard API 时走 execCommand 兜底', execCalled > 0, execCalled);
+
+    api.closeCallLog();
+    await sleep(80);
   }
 
   /* ---------- 无 JS 错误 ---------- */

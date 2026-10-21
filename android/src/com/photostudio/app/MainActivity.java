@@ -137,6 +137,22 @@ public class MainActivity extends Activity {
             s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         }
 
+        // 关掉长按的文字选择 / 系统菜单。
+        //
+        // WebView 默认把长按当作「选字」：用户按住照片想看原图，
+        // 结果界面上的汉字被选中，弹出「复制/全选」气泡盖住画面，
+        // 长按对比彻底用不了。网页侧已经用 user-select + selectstart
+        // + contextmenu 三道拦住了，这里再关掉原生那一层 ——
+        // 老内核可能根本不认 CSS 的 user-select，只有原生这层能兜住。
+        // 输入框不受影响：文字选择在输入框里由网页自己的 user-select:text 放行。
+        web.setLongClickable(false);
+        web.setOnLongClickListener(new android.view.View.OnLongClickListener() {
+            @Override
+            public boolean onLongClick(android.view.View v) {
+                return true;   // 消费掉，不交给系统的选字/菜单逻辑
+            }
+        });
+
         web.setWebViewClient(new WebViewClient() {
             // API 24+ 走这个重载
             @Override
