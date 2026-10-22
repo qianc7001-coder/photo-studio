@@ -2837,6 +2837,21 @@
    */
   const SESSION_PATCH_MAX_CHARS = 256 * 1024;
 
+  /**
+   * 文件存储下的 patch 总上限（字符数）。
+   *
+   * 为什么必须单独给一个更大的值：
+   *   256K 是**为 localStorage 的 5MB 定的**。但安卓壳有文件存储（240MB），
+   *   沿用 256K 会造成一个很荒谬的结果 ——
+   *   一张 1024×1024 的生成结果，patch 编码后约 36 万字符，**单条就超预算**，
+   *   于是整条会话一个图层都没存进去。用户点「继续编辑」看到的是原图，
+   *   而记录上还标着「可继续编辑」。这就是「明明保存了，进去还是初始状态」。
+   *
+   * 取 2M 字符（≈4MB UTF-16）：按 240MB / 60 条约 4MB 一条的余量算得下，
+   * 也足够放 5 个 1024px 的生成块。
+   */
+  const SESSION_PATCH_MAX_CHARS_FILE = 2 * 1024 * 1024;
+
   /** 估算一条作品记录占多少存储 */
   function estimateWorkBytes(rec) {
     const r = rec || {};
@@ -2864,6 +2879,34 @@
       before: typeof r.before === 'string' ? r.before : '',
       session: (r.session && typeof r.session === 'object') ? r.session : null
     };
+  }
+
+  /**
+   * 这条会话能不能真的「继续编辑」。
+   *
+   * 为什么不能只看 !!w.session：
+   *   会话对象本身可能是个**空壳** —— 有 base（底图）但 items 是空数组。
+   *   那种会话恢复出来就是原图，一个图层都没有。
+   *   老版本在「编辑数据超上限」时正是这么存的（items 被 break 成 []），
+   *   但记录上照样标「可继续编辑」—— 用户点进去看到原图，
+   *   会认为「明明保存了却变回初始状态」。
+   *
+   * 判定标准：至少有一个能还原的图层（有 patch 的生成块，或有参数的调色图层）。
+   * 只有 base 的会话不算 —— 那等于什么都没改。
+   *
+   * @param {object} session 作品记录里的 session 字段
+   * @returns {boolean}
+   */
+  function isSessionUsable(session) {
+    const s = session;
+    if (!s || typeof s !== 'object') return false;
+    const items = Array.isArray(s.items) ? s.items : [];
+    for (const it of items) {
+      if (!it || typeof it !== 'object') continue;
+      if (it.patch) return true;              // 生成贴回的图层
+      if (it.grade) return true;              // 调色图层（没有 patch，但参数就是要还原的东西）
+    }
+    return false;
   }
 
   /** 按时间从新到旧排序（不改原数组） */
@@ -6371,7 +6414,20 @@
       items.push(item);
     }
     items.reverse();   // 还原成时间顺序
-    return { items, dropped, bytes };
+
+    // **一条都存不下**时必须显式说出来，不能返回一个「看着像有内容」的空壳。
+    //
+    // 这是「明明保存了，进去还是初始状态」的根因：
+    // 一张 1024×1024 的生成块编码后约 36 万字符，而预算曾经是 256K，
+    // 从最新往回遍历时**第一条就超**，直接 break —— items 变成空数组。
+    // 但空数组是 truthy，于是整条会话照样被存进作品库、照样标「可继续编辑」，
+    // 用户点进去恢复出来就是原图。
+    //
+    // empty=true 让调用方知道「这次什么都没存下」，从而：
+    //   - 不去标「可继续编辑」
+    //   - 明确告诉用户这张图太大、编辑数据没能存档
+    const empty = items.length === 0 && list.length > 0;
+    return { items, dropped, bytes, empty };
   }
 
   /**
@@ -7515,8 +7571,9 @@
     planLibrary, dayStartTs, describeWorkAge, formatWorkClock,
     groupWorksByDay, workLibraryStats,
     LIBRARY_BUDGET_BYTES, LIBRARY_MAX_ITEMS, FILE_LIBRARY_BUDGET_BYTES, THUMB_MAX_SIDE, THUMB_QUALITY,
+    isSessionUsable,
     SESSION_BUDGET_BYTES, SESSION_BASE_MAX_SIDE, SESSION_BASE_QUALITY,
-    SESSION_PATCH_MAX_CHARS,
+    SESSION_PATCH_MAX_CHARS, SESSION_PATCH_MAX_CHARS_FILE,
     // 会话基准图缩放（把整张工作图缩到 SESSION_BASE_MAX_SIDE 以内）
     planSessionBase,
     // 后台保活

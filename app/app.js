@@ -5124,6 +5124,11 @@
         // 不静默：告诉用户为什么这张不能继续编辑
         S.libraryNote = '这张图较大，编辑数据未存档（只能看预览，不能继续编辑）';
       }
+    } else if (S.edits.length) {
+      // payload 为 null 但有编辑 = 这次什么都没能存下来（编辑数据超上限）。
+      // 必须记下来：不记的话 rec.session 是 null，首页不会标「可继续编辑」，
+      // 用户点进去只会看到预览 —— 至少不会以为「保存成功却变回原图」。
+      S.libraryNote = '编辑数据太大，这张只保存了预览（不能继续编辑）';
     }
 
     const i = S.library.findIndex((e) => e.id === S.workId);
@@ -5377,7 +5382,7 @@
       ok: lastSaveOk,
       pending: !!workSaveTimer,
       edits: S.edits ? S.edits.length : 0,
-      hasSession: !!(S.library || []).filter((e) => e.id === S.workId && e.session)[0]
+      hasSession: !!(S.library || []).filter((e) => e.id === S.workId && C.isSessionUsable(e.session))[0]
     };
   }
 
@@ -5973,7 +5978,10 @@
         nm.className = 'home-name';
         nm.textContent = w.name;
         // 能继续编辑的标一下，用户才知道点进去能接着改
-        if (w.session) {
+        // 「可继续编辑」= 有能还原的图层，或者挂着待贴回的后台结果。
+        // 只看 !!session 会把空壳会话也标上（点进去是原图）；
+        // 只看 isSessionUsable 又会让「只有后台结果」的记录进不去。
+        if (C.isSessionUsable(w.session) || !!w.bgResult) {
           const tag = document.createElement('span');
           tag.className = 'home-tag';
           tag.textContent = '可继续编辑';
@@ -6012,8 +6020,14 @@
         item.appendChild(go);
 
         item.onclick = () => {
-          // 有编辑数据就直接进编辑页；没有（已被空间清理）就只预览
-          if (w.session) continueWork(w.id);
+          // 有**能真正还原的**编辑数据就直接进编辑页；
+          // 没有（被空间清理、或是老版本留下的空壳会话）就只预览。
+          // 判空壳很关键：老版本在编辑数据超上限时存过「只有底图、items 为空」
+          // 的会话，点进去恢复出来就是原图 —— 用户会以为保存失败了。
+          // 挂着的后台结果也算「能进去」：进去是为了把它贴回。
+          // 这种记录的会话可能只有底图（用户当时还没贴回任何修改），
+          // 单看会话会被误判成空壳。
+          if (C.isSessionUsable(w.session) || !!w.bgResult) continueWork(w.id);
           else openWorkPreview(w.id);
         };
         list.appendChild(item);
@@ -6429,7 +6443,7 @@
     const el = $('work-preview');
     if (!el) return;
 
-    const canEdit = !!w.session;
+    const canEdit = C.isSessionUsable(w.session) || !!w.bgResult;
     el.innerHTML =
       '<div class="wp-mask" data-wp-close></div>' +
       '<div class="wp-body">' +
@@ -6475,7 +6489,10 @@
   async function continueWork(id) {
     const w = S.library.find((e) => e.id === id);
     if (!w) { toast('这条记录已不存在'); return; }
-    if (!w.session) {
+    // 会话存在（有底图可还原）就行 —— 空壳会话 + 待贴回结果是有意义的：
+    // 恢复底图之后紧接着会把结果贴上去。
+    // 只有「会话本身就是空壳、又没有待贴回结果」才是真的没法继续。
+    if (!w.session || (!C.isSessionUsable(w.session) && !w.bgResult)) {
       // 没有会话 = 不能还原整张照片。
       // 但如果上面挂着「后台生成的结果」，用户点它的意图很明确（想看看结果），
       // 不该被一句「没有可恢复的编辑数据」堵住 —— 至少把结果作为一条独立记录
@@ -9564,14 +9581,30 @@
         plan = payloadCache.plan;
       } else {
         baseUrl = encodeSessionBase(S.docCanvas);
+        // patch 总量上限：按存储通道分开。
+        //
+        // 以前这里写死 localStorage 的预算（256K 字符）。但安卓壳走的是文件存储
+        // （240MB），沿用 256K 会让一张 1024×1024 的生成块（实测约 36 万字符）
+        // **单条就超预算**，整条会话一个图层都存不下 —— 用户点「继续编辑」
+        // 看到原图，记录却还标着「可继续编辑」。
+        // 这就是「明明保存了，进去还是初始状态」的直接原因。
+        const patchBudget = kvStorageAvailable()
+          ? C.SESSION_PATCH_MAX_CHARS_FILE
+          : C.SESSION_PATCH_MAX_CHARS;
         plan = C.planSessionPersist(S.edits, {
-          // patch 总量上限由 core 定：作品库里要放好几条会话，
-          // 单条吃太多会把别的挤没。超出的部分只影响「最老的几次编辑能不能继续调」，
-          // 最近的操作永远保住。
-          maxBytes: C.SESSION_PATCH_MAX_CHARS,
+          // 作品库里要放好几条会话，单条吃太多会把别的挤没。
+          // 超出的部分只影响「最老的几次编辑能不能继续调」，最近的操作永远保住。
+          maxBytes: patchBudget,
           encode: (patch) => patch.toDataURL('image/jpeg', 0.82)
         });
         payloadCache = { rev: S.docRev, base: baseUrl, plan };
+      }
+      // 一个图层都没打包进去 = 这次存档等于没有。
+      // 返回 null 让调用方走「没有可存内容」的分支，
+      // 而不是把一个空壳存进作品库、再标上「可继续编辑」骗用户。
+      if (plan.empty) {
+        console.warn('[枫叶修图] 编辑数据超过存档上限，本次没有可保存的内容');
+        return null;
       }
       // 以下字段每次都现读：体积小，且可能在两次打包之间变化
       return {
@@ -9732,8 +9765,13 @@
       renderHome();
       syncToolbar();
       updateUI();
-      // 如实报告：有没恢复成功的就说清楚，别让用户以为「全都回来了」
-      if (failedPatches > 0) {
+      // 如实报告：有没恢复成功的就说清楚，别让用户以为「全都回来了」。
+      //
+      // 「一个都没恢复」要单独说 —— 这正是用户抱怨的「明明保存了却是初始状态」：
+      // 以前这种情况也会弹「已恢复 0 处修改」，听起来像成功了，实际画面是原图。
+      if (!S.edits.length) {
+        toast('这条记录的编辑数据没能恢复（可能已损坏或超出存档上限），当前显示的是原图', 6000);
+      } else if (failedPatches > 0) {
         toast('已恢复 ' + S.edits.length + ' 处修改，另有 ' + failedPatches +
           ' 处没能恢复（数据可能已损坏）', 5000);
       } else {

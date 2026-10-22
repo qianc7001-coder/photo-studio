@@ -7644,6 +7644,125 @@ async function run() {
     await sleep(100);
   }
 
+  /* ---------- 大选区生成后，从首页进去不能变回原图 ---------- */
+  console.log('\n【70】大选区生成 → 保存 → 从首页进入，修改必须还在（不能变回原图）');
+  {
+    const api = window.__PS_API;
+    S.jobs = [];
+    S.library = [];
+    api.saveLibrary();
+    api.goHome();
+    await sleep(150);
+
+    // 用 1024×1024 的选区生成 —— 这正是旧预算会整条丢光的尺寸
+    {
+      const c = napi.createCanvas(1200, 1200);
+      const cx0 = c.getContext('2d');
+      cx0.fillStyle = 'rgb(50, 50, 50)';
+      cx0.fillRect(0, 0, 1200, 1200);
+      const inp = doc.getElementById('file-input');
+      Object.defineProperty(inp, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'bigsel.png', { type: 'image/png' })],
+        configurable: true
+      });
+      inp.dispatchEvent(new window.Event('change'));
+      await sleep(400);
+    }
+    S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.contextPct = 0;
+    S.cfg.upscaleSmall = false; S.cfg.autoGrade = false;
+    window.confirm = () => true;
+
+    // 1024×1024 的选区：patch 编码后约 36 万字符，旧预算下必然整条丢
+    S.rect = { x: 60, y: 60, w: 1024, h: 1024 };
+    fake.setColor([240, 20, 20]);
+    doc.getElementById('prompt').value = '大选区测试';
+    const ep = doc.getElementById('gen-error'); if (ep) ep.hidden = true;
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 20000);
+    if (S.pending) {
+      doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
+      await sleep(500);
+    }
+    t('★ 大选区生成结果已贴回', S.edits.length === 1, S.edits.length);
+
+    // 主动保存（用户点「保存修改」）
+    const saved = api.forceSaveNow({ silent: true });
+    t('★★ 主动保存报告成功', saved.ok === true, saved);
+
+    const workId = api.workId();
+    const rec = api.library().find((w) => w.id === workId);
+    t('★★ 记录存住了', !!rec);
+    t('★★★ 会话里真的有图层（不是空壳）',
+      !!(rec && rec.session && rec.session.items && rec.session.items.length >= 1),
+      rec && rec.session && rec.session.items && rec.session.items.length);
+    t('★★ 会话里的图层带着 patch（能真正还原）',
+      !!(rec && rec.session && rec.session.items.some((it) => !!it.patch)));
+
+    // 记下画面颜色，用于恢复后比对
+    const pxBefore = (() => {
+      const d = S.viewCtx.getImageData(400, 400, 1, 1).data;
+      return [d[0], d[1], d[2]];
+    })();
+
+    // 回首页 → 点进去
+    api.goHome();
+    await sleep(200);
+    const items = doc.querySelectorAll('#home-list .home-item');
+    t('★ 首页列出了这条记录', items.length === 1, items.length);
+    t('★★ 标了「可继续编辑」（因为真的能继续编辑）',
+      /可继续编辑/.test(items[0].textContent), items[0].textContent.slice(0, 60));
+
+    items[0].dispatchEvent(new window.Event('click'));
+    for (let i = 0; i < 100 && !S.img; i++) await sleep(60);
+    await sleep(500);
+
+    t('★★★ 从首页进入后，编辑记录还在（不是初始状态）',
+      S.edits.length >= 1, S.edits.length);
+    const pxAfter = (() => {
+      const d = S.viewCtx.getImageData(400, 400, 1, 1).data;
+      return [d[0], d[1], d[2]];
+    })();
+    t('★★★ 画面和离开前一致（真的还原了，不是原图）',
+      Math.abs(pxAfter[0] - pxBefore[0]) <= 4 &&
+      Math.abs(pxAfter[1] - pxBefore[1]) <= 4 &&
+      Math.abs(pxAfter[2] - pxBefore[2]) <= 4,
+      { before: pxBefore, after: pxAfter });
+
+    // 空壳会话不能被标成「可继续编辑」
+    api.goHome();
+    await sleep(150);
+    S.library = [{
+      id: 'shell1', at: Date.now(), createdAt: Date.now(), name: 'shell.jpg',
+      imgW: 100, imgH: 100, docW: 100, docH: 100, edits: 3,
+      thumb: '', before: '',
+      session: { v: 1, at: Date.now(), base: 'data:image/jpeg;base64,x', items: [] }
+    }];
+    api.saveLibrary();
+    api.renderHome();
+    await sleep(120);
+    const shellItem = doc.querySelectorAll('#home-list .home-item')[0];
+    t('★★★ 空壳会话不标「可继续编辑」（不能再骗人）',
+      shellItem && !/可继续编辑/.test(shellItem.textContent),
+      shellItem && shellItem.textContent.slice(0, 60));
+
+    // 点它应该走预览（说清楚不能编辑），而不是进编辑页看到原图
+    shellItem.dispatchEvent(new window.Event('click'));
+    await sleep(300);
+    const pv = doc.getElementById('work-preview');
+    t('★★★ 空壳会话点进去是预览页（不是编辑页）',
+      pv && !pv.hidden, pv && pv.hidden);
+    t('★★ 预览页说明「不能继续编辑」',
+      /只能查看预览|空间清理|没能/.test(pv ? pv.textContent : ''),
+      pv && pv.textContent.slice(0, 120));
+    if (pv) pv.hidden = true;
+
+    // 收尾
+    S.library = [];
+    api.saveLibrary();
+    api.goHome();
+    await sleep(150);
+  }
+
   /* ---------- 自定义快捷提示词 ---------- */
   console.log('\n【69】自定义快捷提示词：设置里加的，编辑页真的能用');
   {

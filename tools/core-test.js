@@ -4730,6 +4730,82 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
     /longPressActive = true;/.test(js) && /S\.gesture = null;/.test(js));
 })();
 
+/* ---------- 会话存档：不能「存了个空壳」 ---------- */
+/*
+ * 缺陷现象：明明点了保存，从首页点进去还是原图（初始状态）。
+ * 根因（两层）：
+ *   1. 单条会话的 patch 预算写死 256K 字符（那是给 localStorage 定的），
+ *      但一张 1024×1024 的生成块编码后约 36 万字符 —— **单条就超**，
+ *      planSessionPersist 从最新往回遍历时第一条就 break，items 变成空数组。
+ *   2. 空数组是 truthy，于是会话照样存进作品库、照样标「可继续编辑」，
+ *      用户点进去 restoreSession 恢复 0 个图层 = 原图。
+ * 回归点：
+ *   - 文件存储下预算必须更大（否则大选区必然丢）
+ *   - 一条都存不下时必须显式标记 empty，不能返回「看着像有内容」的空壳
+ *   - isSessionUsable 必须识别空壳会话（只有底图、没有图层）
+ */
+(() => {
+  const big = 'x'.repeat(360000);   // 实测 1024×1024 生成块的量级
+  const mkPatch = () => ({ toDataURL: () => 'data:image/jpeg;base64,' + big });
+  const oneEdit = (w, h) => ([{
+    rect: { x: 0, y: 0, w: w, h: h }, feather: 8, colorMatch: 0.5,
+    grade: null, mask: null, patch: mkPatch()
+  }]);
+
+  // 1) 文件存储的预算必须明显大于 localStorage 那份
+  t('★★ 文件存储有单独的、更大的 patch 预算',
+    C.SESSION_PATCH_MAX_CHARS_FILE > C.SESSION_PATCH_MAX_CHARS * 4,
+    [C.SESSION_PATCH_MAX_CHARS_FILE, C.SESSION_PATCH_MAX_CHARS]);
+  t('★ 文件预算能装下 1024px 的生成块（约 36 万字符）',
+    C.SESSION_PATCH_MAX_CHARS_FILE > 360000, C.SESSION_PATCH_MAX_CHARS_FILE);
+
+  // 2) 同一份数据：旧预算丢光，新预算存住
+  const oldPlan = C.planSessionPersist(oneEdit(1024, 1024),
+    { maxBytes: C.SESSION_PATCH_MAX_CHARS, encode: (p) => p.toDataURL() });
+  t('★★ 对照：localStorage 预算下这条会话一个图层都存不下（这就是 bug）',
+    oldPlan.items.length === 0, oldPlan.items.length);
+  const newPlan = C.planSessionPersist(oneEdit(1024, 1024),
+    { maxBytes: C.SESSION_PATCH_MAX_CHARS_FILE, encode: (p) => p.toDataURL() });
+  t('★★ 文件预算下同一张图能存住',
+    newPlan.items.length === 1 && newPlan.empty === false, newPlan);
+
+  // 3) 关键：存不下时必须显式说 empty，不能返回空壳骗人
+  t('★★★ 一条都存不下时标记 empty=true（不能假装存成功）',
+    oldPlan.empty === true, oldPlan);
+  t('★★ 有内容时 empty=false', newPlan.empty === false);
+  t('★ 没有任何编辑时不算 empty（那是「本来就没改」）',
+    C.planSessionPersist([], { maxBytes: 100, encode: (p) => p.toDataURL() }).empty === false);
+
+  // 4) isSessionUsable：空壳会话不能被当成「可继续编辑」
+  t('★★★ 空壳会话（只有底图、items 为空）判定为不可继续编辑',
+    C.isSessionUsable({ v: 1, base: 'data:...', items: [] }) === false);
+  t('★★ null / 缺字段都判 false',
+    C.isSessionUsable(null) === false && C.isSessionUsable({}) === false &&
+    C.isSessionUsable({ v: 1, base: 'x' }) === false);
+  t('★★ 有 patch 的图层 → 可继续编辑',
+    C.isSessionUsable({ items: [{ patch: 'data:image/jpeg;base64,x' }] }) === true);
+  t('★★ 只有调色图层（没有 patch）→ 也算可继续编辑',
+    C.isSessionUsable({ items: [{ grade: { exposure: 20 } }] }) === true);
+  t('★ items 里有垃圾数据不崩',
+    C.isSessionUsable({ items: [null, 'x', {}] }) === false);
+
+  // 5) 接线：app 里不能再直接用 !!session 判断
+  const fsN2 = require('fs');
+  const js2 = fsN2.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  t('★★ 首页「可继续编辑」标记改用 isSessionUsable',
+    /isSessionUsable\(w\.session\) \|\| !!w\.bgResult\) \{[\s\S]{0,160}可继续编辑/.test(js2));
+  t('★★ 点进记录时也用它判断（空壳直接走预览）',
+    /isSessionUsable\(w\.session\) \|\| !!w\.bgResult\) continueWork/.test(js2));
+  t('★ 预览页的「能编辑」同样用它',
+    /const canEdit = C\.isSessionUsable\(w\.session\) \|\| !!w\.bgResult/.test(js2));
+  t('★★ 存档预算按存储通道分开（文件大、localStorage 小）',
+    /kvStorageAvailable\(\)[\s\S]{0,80}SESSION_PATCH_MAX_CHARS_FILE/.test(js2));
+  t('★★ 打包为空时不返回空壳（否则又会标成可继续编辑）',
+    /if \(plan\.empty\)[\s\S]{0,160}return null/.test(js2));
+  t('★★ 一个图层都没恢复时如实告诉用户（不能弹「已恢复 0 处」）',
+    /if \(!S\.edits\.length\)[\s\S]{0,160}原图/.test(js2));
+})();
+
 /* ---------- 自定义快捷提示词 ---------- */
 (() => {
   // 清洗

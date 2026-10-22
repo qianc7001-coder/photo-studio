@@ -4223,7 +4223,15 @@ console.log('\n【作品库】历史记录必须存得住多张（用真实 JPEG
   t('app 传了会话预算', /sessionBudgetBytes: C\.SESSION_BUDGET_BYTES/.test(appSrc));
   t('app 用 core 的基准图规划', /C\.planSessionBase\(/.test(appSrc));
   t('app 用 core 的基准图质量', /C\.SESSION_BASE_QUALITY/.test(appSrc));
-  t('app 用 core 的 patch 上限', /maxBytes: C\.SESSION_PATCH_MAX_CHARS/.test(appSrc));
+  // patch 上限现在按存储通道分两档（文件大 / localStorage 小），
+  // 断言要守住「两个上限都来自 core，且真的传给了 planSessionPersist」，
+  // 而不是「某一行的字面量长什么样」。
+  t('app 用 core 的 patch 上限',
+    /maxBytes: patchBudget/.test(appSrc) &&
+    /C\.SESSION_PATCH_MAX_CHARS_FILE/.test(appSrc) &&
+    /C\.SESSION_PATCH_MAX_CHARS\b/.test(appSrc));
+  t('★ 文件存储用更大的 patch 预算（否则大选区必然存不下）',
+    /kvStorageAvailable\(\)[\s\S]{0,80}SESSION_PATCH_MAX_CHARS_FILE/.test(appSrc));
   t('app 用 core 的缩略图质量', /C\.THUMB_QUALITY/.test(appSrc));
   // 兜底路径不能直接砍记录（用户会莫名丢历史），要先丢会话
   // 按函数边界截取（写死长度会在函数改长后截断，导致断言误报缺失）
