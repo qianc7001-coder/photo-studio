@@ -617,7 +617,7 @@
           <svg class="st-arrow" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
         </button>
         <button class="st-row st-row-btn" data-stopen="gen">
-          <span class="st-label">生成参数 <i class="st-desc-inline">提示词风格 · 引导线</i></span>
+          <span class="st-label">生成参数 <i class="st-desc-inline">提示词风格 · 快捷提示词 · 引导线</i></span>
           <svg class="st-arrow" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
         </button>
         <button class="st-row st-row-btn" data-stopen="app">
@@ -835,6 +835,29 @@
           <select class="st-value" id="set-preset" style="width:100%"></select>
           <span class="st-desc" id="preset-desc"></span>
         </label>
+      </div>
+
+      <!-- ============ 自定义快捷提示词 ============ -->
+      <!--
+        编辑页底下那排快捷指令原本写死 6 条，覆盖不到具体需求。
+        每个人拍的东西不一样（婚纱/产品/宠物/建筑），这里让他自己加。
+        自己加的排在编辑页那排的最前面，内置的接在后面。
+      -->
+      <div class="st-card">
+        <div class="st-row-col">
+          <span class="st-label">自定义快捷提示词
+            <i class="st-desc-inline" id="qp-count">还没有自定义</i>
+          </span>
+          <div class="qp-list" id="qp-list"></div>
+          <div class="qp-add">
+            <input class="st-input" type="text" id="qp-input" maxlength="60"
+                   placeholder="例如：把婚纱换成缎面材质">
+            <button class="st-btn" id="qp-add">添加</button>
+          </div>
+          <div class="st-desc" id="qp-hint">
+            加在这里的会出现在编辑页底部的快捷指令里，点一下直接填进提示词输入框。
+          </div>
+        </div>
       </div>
 
       <div id="custom-export" hidden>

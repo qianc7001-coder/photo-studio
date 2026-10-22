@@ -7264,6 +7264,124 @@
     { id: 'global', label: '整张统一处理' }
   ];
 
+  /* ---------------- 自定义快捷提示词 ----------------
+   *
+   * 编辑页底下那排「快捷指令」原本是写死的 6 条，覆盖不到具体需求
+   * （每个人拍的东西不一样：婚纱、产品、宠物、建筑…）。
+   *
+   * 设计取舍：
+   *   - 存在配置里（cfg.quickPrompts），跟着「覆盖安装保留设置」一起走
+   *   - 空数组 = 用内置默认（不是「一条都没有」），升级后不会突然变空
+   *   - 用户条目排在内置前面：自己写的显然更常用
+   *   - 有上限：几十条会把编辑页挤爆，也会让会话存档变大
+   */
+
+  /** 内置默认快捷指令（用户没自定义时用它们） */
+  const QUICK_PROMPT_DEFAULTS = [
+    '去掉这个物体，背景自然补全',
+    '皮肤精修，保留质感',
+    '换成傍晚的光线',
+    '把这行字改成「」',
+    '衣服换成深蓝色',
+    '修复模糊，变清晰'
+  ];
+
+  /** 自定义条数上限：再多编辑页那排就挤成一片了 */
+  const QUICK_PROMPT_MAX = 20;
+  /** 单条字数上限。提示词是发给模型的，太长既费 token 也不便点选 */
+  const QUICK_PROMPT_CHARS = 60;
+
+  /**
+   * 清洗一条自定义提示词。
+   *
+   * 为什么要清洗：
+   *   - 换行会把 chip 撑成两行，把工具栏顶歪
+   *   - 首尾空格肉眼看不见，点上去却可能让模型理解成空内容
+   *   - 超长条目会挤爆那一排
+   * @returns {string} 空字符串表示这条无效
+   */
+  function normalizeQuickPrompt(text) {
+    let s = String(text === null || text === undefined ? '' : text);
+    s = s.replace(/[\r\n\t]+/g, ' ');      // 换行/制表 → 空格（不是删掉，避免两个词粘一起）
+    s = s.replace(/\s+/g, ' ');
+    s = s.trim();
+    if (!s) return '';
+    if (s.length > QUICK_PROMPT_CHARS) s = s.slice(0, QUICK_PROMPT_CHARS);
+    return s;
+  }
+
+  /**
+   * 清洗整个自定义列表：逐条规范化、去重（重复的 chip 点了没区别，纯占位）。
+   * @param {Array} list 用户存的内容
+   * @returns {string[]}
+   */
+  function normalizeQuickPrompts(list) {
+    const src = Array.isArray(list) ? list : [];
+    const out = [];
+    const seen = Object.create(null);
+    for (const item of src) {
+      const s = normalizeQuickPrompt(item);
+      if (!s) continue;
+      if (seen[s]) continue;
+      seen[s] = 1;
+      out.push(s);
+      if (out.length >= QUICK_PROMPT_MAX) break;
+    }
+    return out;
+  }
+
+  /**
+   * 编辑页那排 chip 最终显示什么。
+   *
+   * 用户自定义的排前面，后面接内置默认（去掉和自定义重复的）——
+   * 用户加了 3 条，剩下的位置仍然能用内置那几条，不会变成只有 3 个可选。
+   * @param {Array} custom 用户自定义列表
+   * @returns {{list:string[], customCount:number}}
+   */
+  function planQuickPrompts(custom) {
+    const mine = normalizeQuickPrompts(custom);
+    const seen = Object.create(null);
+    for (const s of mine) seen[s] = 1;
+    const list = mine.slice();
+    for (const d of QUICK_PROMPT_DEFAULTS) {
+      if (seen[d]) continue;
+      seen[d] = 1;
+      list.push(d);
+    }
+    return { list, customCount: mine.length };
+  }
+
+  /**
+   * 增删自定义提示词（纯函数，便于单测）。
+   *
+   * @param {Array} list 现有列表
+   * @param {string} text 要加的文本（加的时候用）
+   * @param {number} [removeIndex] 要删的下标（删的时候用）
+   * @returns {{list:string[], added:boolean, removed:boolean, full:boolean, dup:boolean}}
+   */
+  function planEditQuickPrompt(list, text, removeIndex) {
+    const cur = normalizeQuickPrompts(list);
+    // 删除
+    if (typeof removeIndex === 'number' && removeIndex >= 0) {
+      if (removeIndex >= cur.length) {
+        return { list: cur, added: false, removed: false, full: false, dup: false };
+      }
+      cur.splice(removeIndex, 1);
+      return { list: cur, added: false, removed: true, full: false, dup: false };
+    }
+    // 新增
+    const s = normalizeQuickPrompt(text);
+    if (!s) return { list: cur, added: false, removed: false, full: false, dup: false };
+    if (cur.indexOf(s) >= 0) {
+      return { list: cur, added: false, removed: false, full: false, dup: true };
+    }
+    if (cur.length >= QUICK_PROMPT_MAX) {
+      return { list: cur, added: false, removed: false, full: true, dup: false };
+    }
+    cur.push(s);
+    return { list: cur, added: true, removed: false, full: false, dup: false };
+  }
+
   /**
    * 拼装提示词。
    * @param {object} o { instruction, style, extra, scope, hasMask, language }
@@ -7454,6 +7572,8 @@
     validateImageRequest, diagnoseResponse,
     // 提示词
     STYLE_PRESETS, SCOPE_PRESETS, buildPrompt,
+    QUICK_PROMPT_DEFAULTS, QUICK_PROMPT_MAX, QUICK_PROMPT_CHARS,
+    normalizeQuickPrompt, normalizeQuickPrompts, planQuickPrompts, planEditQuickPrompt,
     // 导出
     formatBytes, timestampName
   };

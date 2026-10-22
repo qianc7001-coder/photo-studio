@@ -141,6 +141,30 @@ async function boot(seedCfg) {
   t('全新安装不误报迁移', c.S.cfg.__cfgRev === c.window.PSCore.CFG_REV);
   t('全新安装也没有 tile 字段', c.S.cfg.tile === undefined, c.S.cfg.tile);
 
+  // 4.5) 自定义快捷提示词：老用户升级后不能被清掉，脏数据要被清洗
+  const e1 = await boot(Object.assign({}, oldCfg, {
+    quickPrompts: ['我的宠物', '  带空格的  ', '我的宠物', '', 'x'.repeat(120)]
+  }));
+  t('★ 老用户的自定义提示词完整保留',
+    e1.S.cfg.quickPrompts.indexOf('我的宠物') >= 0, e1.S.cfg.quickPrompts);
+  t('★ 升级时去重 + 去空',
+    e1.S.cfg.quickPrompts.filter((x) => x === '我的宠物').length === 1,
+    e1.S.cfg.quickPrompts);
+  t('★ 首尾空格被清掉',
+    e1.S.cfg.quickPrompts.indexOf('带空格的') >= 0, e1.S.cfg.quickPrompts);
+  t('★ 超长条目被截断（不会把界面撑坏）',
+    e1.S.cfg.quickPrompts.every((x) => x.length <= e1.window.PSCore.QUICK_PROMPT_CHARS),
+    e1.S.cfg.quickPrompts.map((x) => x.length));
+  t('★★ 自定义提示词在编辑页真的显示出来',
+    e1.doc.querySelectorAll('#quick-chips .chip-mine').length >= 1,
+    e1.doc.querySelectorAll('#quick-chips .chip-mine').length);
+
+  // 没有自定义的老用户：仍然有内置 6 条，不能变成空白
+  const e2 = await boot(oldCfg);
+  t('★★ 没有自定义时，编辑页仍有内置快捷指令',
+    e2.doc.querySelectorAll('#quick-chips .chip').length === 6,
+    e2.doc.querySelectorAll('#quick-chips .chip').length);
+
   // 5) 界面：分块开关必须彻底消失
   const d = await boot(undefined);
   t('设置里已无分块滑块', d.doc.getElementById('set-tile') === null);

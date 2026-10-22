@@ -4730,6 +4730,65 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
     /longPressActive = true;/.test(js) && /S\.gesture = null;/.test(js));
 })();
 
+/* ---------- 自定义快捷提示词 ---------- */
+(() => {
+  // 清洗
+  t('快捷提示词：换行会被压成空格（否则 chip 会撑成两行）',
+    C.normalizeQuickPrompt('把背景\n换成海边') === '把背景 换成海边', C.normalizeQuickPrompt('把背景\n换成海边'));
+  t('快捷提示词：首尾空格去掉', C.normalizeQuickPrompt('  精修皮肤  ') === '精修皮肤');
+  t('快捷提示词：超长截断到上限',
+    C.normalizeQuickPrompt('x'.repeat(200)).length === C.QUICK_PROMPT_CHARS);
+  t('快捷提示词：空内容判为无效', C.normalizeQuickPrompt('   ') === '');
+  t('快捷提示词：null/undefined 不崩', C.normalizeQuickPrompt(null) === '' && C.normalizeQuickPrompt(undefined) === '');
+
+  // 列表清洗与去重
+  t('列表清洗：去空 + 去重',
+    JSON.stringify(C.normalizeQuickPrompts(['a', '', 'a', '  ', 'b'])) === '["a","b"]');
+  t('列表清洗：非数组不崩', C.normalizeQuickPrompts(null).length === 0);
+  t('列表清洗：超过上限就截断',
+    C.normalizeQuickPrompts(Array.from({ length: 50 }, (_, i) => 'p' + i)).length === C.QUICK_PROMPT_MAX);
+
+  // 合并计划：自定义在前，内置在后
+  const p0 = C.planQuickPrompts([]);
+  t('没有自定义时，显示的就是内置 6 条',
+    p0.list.length === C.QUICK_PROMPT_DEFAULTS.length && p0.customCount === 0, p0);
+  const p1 = C.planQuickPrompts(['我的宠物']);
+  t('★★ 自定义的排在最前面', p1.list[0] === '我的宠物', p1.list[0]);
+  t('★★ 内置的不会被顶掉（仍然全在）',
+    p1.list.length === C.QUICK_PROMPT_DEFAULTS.length + 1, p1.list.length);
+  t('★ 自定义条数单独统计', p1.customCount === 1);
+  const p2 = C.planQuickPrompts(['皮肤精修，保留质感']);
+  t('★ 和内置重复的不重复出现',
+    p2.list.filter((x) => x === '皮肤精修，保留质感').length === 1, p2.list);
+
+  // 增删
+  const a1 = C.planEditQuickPrompt([], '新的提示词');
+  t('新增：真的加进去了', a1.added && a1.list[0] === '新的提示词', a1);
+  const a2 = C.planEditQuickPrompt(['a'], 'a');
+  t('★ 重复添加会被拦住（点了没区别的 chip 只是占位）', a2.dup === true && a2.list.length === 1);
+  const a3 = C.planEditQuickPrompt([], '   ');
+  t('空内容添加被拦住', a3.added === false && a3.list.length === 0);
+  const a4 = C.planEditQuickPrompt(Array.from({ length: C.QUICK_PROMPT_MAX }, (_, i) => 'p' + i), 'x');
+  t('★ 满了就不再加（并告知）', a4.full === true && a4.list.length === C.QUICK_PROMPT_MAX);
+  const a5 = C.planEditQuickPrompt(['a', 'b', 'c'], '', 1);
+  t('删除：按下标删掉对应那条', a5.removed && JSON.stringify(a5.list) === '["a","c"]', a5.list);
+  const a6 = C.planEditQuickPrompt(['a'], '', 99);
+  t('删除越界不崩、也不改数据', a6.removed === false && a6.list.length === 1);
+
+  // 接线：编辑页必须用动态列表，不能再写死
+  const fsN = require('fs');
+  const js = fsN.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html = fsN.readFileSync(__dirname + '/../app/index.html', 'utf8');
+  t('★★ 编辑页快捷指令改成动态渲染', /renderQuickChips\(\)/.test(js));
+  t('★★ 写死的 6 条已经从绑定里删掉',
+    !/const quick = \[[\s\S]{0,200}去掉这个物体/.test(js));
+  t('★★ 设置页有自定义入口', /id="qp-list"/.test(html) && /id="qp-add"/.test(html));
+  t('★ 自定义存进配置（覆盖安装会保留）',
+    /'quickPrompts'/.test(js) && /quickPrompts: \[\]/.test(js));
+  t('★ 读配置时会清洗（脏数据不会把界面搞坏）',
+    /c\.quickPrompts = C\.normalizeQuickPrompts\(c\.quickPrompts\)/.test(js));
+})();
+
 /* ---------- 检查更新 ---------- */
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

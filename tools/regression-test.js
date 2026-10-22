@@ -4783,5 +4783,42 @@ console.log('\n【整图】没有框选时默认处理整张图（含 AI 生图�
     /result\.why = '保存失败：记录没有写进作品库'/.test(appSrc));
 })();
 
+/* ---------- 自定义快捷提示词（回归） ---------- */
+/*
+ * 需求：编辑页底下那排快捷指令原本写死 6 条，覆盖不到具体需求。
+ * 现在可以在设置里自己加。
+ * 回归点：
+ *   1. 编辑页那排必须是动态渲染的（写死的列表改不动）
+ *   2. 自定义的排前面，内置的不能被顶掉
+ *   3. 存进配置（覆盖安装要保留），脏数据要清洗
+ *   4. 全删光也要退回内置默认，不能变成一条都没有
+ */
+(() => {
+  const fs = require('fs');
+  const appSrc = fs.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html = fs.readFileSync(__dirname + '/../app/index.html', 'utf8');
+  const coreSrc = fs.readFileSync(__dirname + '/../app/core.js', 'utf8');
+
+  t('编辑页那排改成动态渲染', /function renderQuickChips\(\)/.test(appSrc));
+  t('★★ 写死的列表已经删掉（否则设置里加了也不生效）',
+    !/const quick = \[[\s\S]{0,240}去掉这个物体/.test(appSrc));
+  t('设置页有自定义区块', /id="qp-list"/.test(html) && /id="qp-add"/.test(html) && /id="qp-input"/.test(html));
+  t('入口在「生成参数」页里',
+    /data-stpage="gen"[\s\S]{0,4000}id="qp-list"/.test(html));
+  t('自定义的排在前面', /const list = mine\.slice\(\);/.test(coreSrc));
+  t('内置的接在后面（不会被替换掉）',
+    /for \(const d of QUICK_PROMPT_DEFAULTS\)/.test(coreSrc));
+  t('自定义存进配置并被持久化',
+    /quickPrompts: \[\]/.test(appSrc) && /'quickPrompts'/.test(appSrc));
+  t('读配置时清洗（换行/超长/重复都拦住）',
+    /C\.normalizeQuickPrompts\(c\.quickPrompts\)/.test(appSrc));
+  t('有上限，防止把编辑页挤爆', /QUICK_PROMPT_MAX = 20/.test(coreSrc));
+  t('自定义的 chip 有区分标记', /chip-mine/.test(appSrc) && /chip-mine/.test(
+    fs.readFileSync(__dirname + '/../app/style.css', 'utf8')));
+  t('删除按钮存在（能反悔）', /qp-del/.test(appSrc));
+  t('保存后编辑页立即同步（不用重开应用）',
+    /renderQuickPromptSettings\(\);[\s\S]{0,80}renderQuickChips\(\)/.test(appSrc));
+})();
+
 console.log(`\n合计 ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

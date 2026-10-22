@@ -823,6 +823,14 @@ input[type=range]::-moz-range-thumb { width: var(--ps-thumb); height: var(--ps-t
 }
 .chip.on { background: rgba(77, 163, 255, .16); border-color: rgba(77, 163, 255, .45); color: var(--accent); }
 .chip:active { background: var(--press); }
+/* 用户自己加的快捷指令：带一点主题色，和内置的那几条区分开。
+   不区分的话，用户改完设置回来分不清哪条是自己写的，
+   会怀疑「是不是没保存上」。 */
+.chip.chip-mine {
+  border-color: rgba(77, 163, 255, .40);
+  color: var(--accent);
+  background: rgba(77, 163, 255, .10);
+}
 
 #prompt-panel { padding: 0 10px 8px; }
 .row { display: flex; gap: 8px; align-items: center; margin-bottom: 7px; }
@@ -1921,6 +1929,38 @@ textarea { resize: none; line-height: 1.5; font-size: 13.5px; }
 
 /* 非交互行（状态显示这类） */
 #settings .st-row-plain { cursor: default; }
+
+/* ---------- 自定义快捷提示词 ---------- */
+.qp-list { display: flex; flex-direction: column; gap: 6px; margin: 2px 0 9px; }
+.qp-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-sm);
+}
+.qp-text {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 12.5px; color: var(--text);
+  /* 长条目折行而不是溢出：手机上一条 60 字写不下 */
+  word-break: break-word;
+}
+.qp-del {
+  flex: 0 0 auto;
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  color: var(--text-faint);
+  font-size: 17px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.qp-del:active { background: var(--press); color: var(--danger-text); }
+.qp-empty {
+  font-size: 12px; color: var(--text-faint);
+  padding: 8px 0;
+}
+.qp-add { display: flex; gap: 8px; align-items: center; }
+.qp-add .st-input { flex: 1 1 auto; min-width: 0; }
+.qp-add .st-btn { flex: 0 0 auto; }
 
 /* 卡片下方的操作按钮组 */
 #settings .st-actions {

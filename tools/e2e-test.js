@@ -7644,6 +7644,101 @@ async function run() {
     await sleep(100);
   }
 
+  /* ---------- 自定义快捷提示词 ---------- */
+  console.log('\n【69】自定义快捷提示词：设置里加的，编辑页真的能用');
+  {
+    const api = window.__PS_API;
+    S.jobs = [];
+    api.goHome();
+    await sleep(120);
+
+    // 默认状态：只有内置那几条
+    const base = doc.querySelectorAll('#quick-chips .chip').length;
+    t('★ 默认就有内置快捷指令', base === 6, base);
+    t('★ 默认没有「自定义」标记',
+      doc.querySelectorAll('#quick-chips .chip-mine').length === 0);
+
+    // 设置页里有入口
+    api.openSettings();
+    api.showSettingsPage('gen');
+    await sleep(120);
+    t('★★ 设置里能找到自定义区块', !!doc.getElementById('qp-list'));
+    t('★★ 有输入框', !!doc.getElementById('qp-input'));
+
+    // 加一条
+    const inp = doc.getElementById('qp-input');
+    inp.value = '把婚纱换成缎面材质';
+    doc.getElementById('qp-add').onclick();
+    await sleep(100);
+    t('★★ 加完之后配置里存住了',
+      api.quickPrompts().indexOf('把婚纱换成缎面材质') >= 0, api.quickPrompts());
+    t('★ 设置页列表里能看到这条',
+      /把婚纱换成缎面材质/.test(doc.getElementById('qp-list').textContent));
+
+    // 关键：编辑页那排真的出现了，而且排在最前面
+    const chips = doc.querySelectorAll('#quick-chips .chip');
+    t('★★ 编辑页那排多了一条', chips.length === base + 1, chips.length);
+    t('★★ 自定义的排在最前面（自己写的更常用）',
+      /把婚纱换成缎面材质/.test(chips[0].textContent), chips[0].textContent);
+    t('★★ 自定义的那条有区分标记（能看出是自己加的）',
+      chips[0].className.indexOf('chip-mine') >= 0, chips[0].className);
+    t('★ 内置的没被顶掉',
+      doc.querySelectorAll('#quick-chips .chip:not(.chip-mine)').length === base);
+
+    // 点一下要填进提示词框
+    chips[0].onclick();
+    await sleep(60);
+    t('★★ 点自定义 chip 会填进提示词输入框',
+      doc.getElementById('prompt').value === '把婚纱换成缎面材质',
+      doc.getElementById('prompt').value);
+
+    // 重复添加要被拦住（同一个 chip 点两下没区别）
+    inp.value = '把婚纱换成缎面材质';
+    doc.getElementById('qp-add').onclick();
+    await sleep(80);
+    t('★ 重复添加不会出现第二条', api.quickPrompts().length === 1, api.quickPrompts());
+
+    // 添加第二条并删掉第一条
+    inp.value = '背景虚化更强';
+    doc.getElementById('qp-add').onclick();
+    await sleep(90);
+    t('★ 能加第二条', api.quickPrompts().length === 2);
+    const dels = doc.querySelectorAll('#qp-list .qp-del');
+    t('★ 每条都有删除按钮', dels.length === 2, dels.length);
+    dels[0].onclick();
+    await sleep(100);
+    t('★★ 删除生效', api.quickPrompts().length === 1 && api.quickPrompts()[0] === '背景虚化更强',
+      api.quickPrompts());
+    t('★ 删掉后编辑页那排同步减少',
+      doc.querySelectorAll('#quick-chips .chip-mine').length === 1);
+
+    // 存进配置：覆盖安装后还在（走 PERSIST_KEYS 这条路）
+    const cfgRaw = window.localStorage.getItem('photoStudio.cfg.v1');
+    t('★★ 写进了配置文件（覆盖安装会保留）',
+      !!cfgRaw && /背景虚化更强/.test(cfgRaw), !!cfgRaw);
+
+    // 带换行的脏数据要被压平（否则 chip 撑成两行把工具栏顶歪）
+    api.addQuickPrompt('第一行\n第二行');
+    await sleep(80);
+    const all = api.quickPrompts();
+    t('★★ 换行被压成空格（不撑坏排版）',
+      all.indexOf('第一行 第二行') >= 0, all);
+
+    // 清空后回到内置默认（不是变成一条都没有）
+    api.quickPrompts().slice().forEach((_, i) => {
+      const d = doc.querySelectorAll('#qp-list .qp-del')[0];
+      if (d) d.onclick();
+    });
+    await sleep(120);
+    t('★★ 全删光后编辑页仍有内置 6 条（不会变成空的）',
+      doc.querySelectorAll('#quick-chips .chip').length === 6,
+      doc.querySelectorAll('#quick-chips .chip').length);
+
+    api.closeSettings();
+    api.goHome();
+    await sleep(100);
+  }
+
   /* ---------- 主动保存：不用等 1.6 秒防抖 ---------- */
   console.log('\n【68】主动保存：改完立刻存住，退出也不会丢');
   {

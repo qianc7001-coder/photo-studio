@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-4428%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-4489%20passed-brightgreen.svg)](#测试)
 
 给摄影师用的**局部修图**工具：在照片上框选任意区域，交给生图模型修改，结果自动贴回原位置。
 
 **核心特点**：结果无缝融合，非破坏性可调，保留拍摄信息。
 
-> 最新版本 **v3.9.5** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
+> 最新版本 **v3.9.6** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
 
 ---
 
@@ -301,7 +301,7 @@ node tools/migrate-test.js     # 配置迁移（模拟老用户升级路径）
 node tools/e2e-test.js         # 端到端（jsdom + 真实 canvas，逐像素校验）
 ```
 
-当前规模：**4428 项**（1647 单元 + 1482 回归 + 17 配置迁移 + 1282 端到端）。
+当前规模：**4489 项**（1671 单元 + 1494 回归 + 23 配置迁移 + 1301 端到端）。
 
 端到端测试会：
 - 启动一个假生图模型服务器
@@ -427,7 +427,8 @@ WebView 里用 `file://` 打开页面时，跨域请求会被拦截，而且 `lo
 
 | 版本 | 主要变化 |
 |---|---|
-| **v3.9.5** | 更多菜单新增「保存修改」（立刻落盘 + 状态显示）；修掉会丢数据的时间窗：回首页前强制保存并核对结果，存不住不再假报「已存」；切后台/关页面/原生 onPause 三处自动兜底 |
+| **v3.9.6** | 新增「自定义快捷提示词」：设置 → 生成参数里自己加，编辑页底部点一下直接填进输入框；自定义排前面并带标记，内置 6 条始终保留；最多 20 条，覆盖安装不丢 |
+| [v3.9.5](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.9.5) | 更多菜单新增「保存修改」（立刻落盘 + 状态显示）；修掉会丢数据的时间窗：回首页前强制保存并核对结果，存不住不再假报「已存」；切后台/关页面/原生 onPause 三处自动兜底 |
 | [v3.9.4](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.9.4) | 修复长按看原图时把界面汉字选中、弹出「复制/全选」气泡盖住画面（CSS + 事件 + 原生三层禁选，输入框仍可长按粘贴）；调用日志每条可「复制详情」 |
 | [v3.9.3](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.9.3) | 修复生成后确认页尺寸错位（画布尺寸与 CSS 打架 + 布局迟到）；新增长按看原图（按住约半秒显示原图，松手恢复） |
 | [v3.9.2](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.9.2) | 画笔含义反转：不涂 = 改整块，涂了 = 只改涂成红色的地方（红色从「保护区」变成「要改区」）；默认笔刷即「画上=改」 |

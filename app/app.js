@@ -198,6 +198,9 @@
     // 设置页那张卡片只在存过配置后才显得有用。
     presets: [],
     activePreset: '',
+    // 自定义快捷提示词（编辑页底部那排 chip）。
+    // 空数组 = 用内置默认，不是「一条都没有」—— 升级后不该突然变空。
+    quickPrompts: [],
     // 主题：auto 跟随系统 / dark / light
     theme: 'auto',
     // 画布背景：{ dataUrl, blur, dim, fit }
@@ -258,7 +261,9 @@
     'theme', 'bg',
     // 多组供应商：presets 是数组（每组含 provider/baseUrl/apiKey/model），
     // activePreset 记住当前用的是哪一组（手改连接信息后可能不再指向任何一组）
-    'presets', 'activePreset'
+    'presets', 'activePreset',
+    // 自定义快捷提示词：用户自己写的，覆盖安装必须保留
+    'quickPrompts'
   ];
 
   /**
@@ -314,6 +319,9 @@
       c.presets = C.normalizePresets(c.presets);
       // 画布背景：脏数据会让 canvas 画出黑块，必须规范化
       c.bg = C.normalizeBg(c.bg);
+      // 自定义快捷提示词：存档可能是脏数据（手改 localStorage、写了一半）。
+      // 不清洗的话，带换行的条目会把编辑页那排 chip 撑成两行、把工具栏顶歪。
+      c.quickPrompts = C.normalizeQuickPrompts(c.quickPrompts);
       if (typeof c.activePreset !== 'string') c.activePreset = '';
       // activePreset 指向一组已不存在的配置时清掉，
       // 免得下拉框选中一个空项、界面上看不出当前在用哪组。
@@ -5250,6 +5258,87 @@
    *   - 有没有还没落盘的改动（防抖还没触发，此刻退出会丢）
    *   - 上次保存是什么时候、成没成
    */
+  /* ---------------- 自定义快捷提示词 ---------------- */
+
+  /** 渲染编辑页底部那排快捷指令 */
+  function renderQuickChips() {
+    const qc = $('quick-chips');
+    if (!qc) return;
+    const plan = C.planQuickPrompts(S.cfg.quickPrompts);
+    qc.innerHTML = '';
+    plan.list.forEach((t, i) => {
+      const b = document.createElement('button');
+      b.className = 'chip';
+      // 自定义的标一下：用户得能分清哪些是自己加的（否则以为没保存成功）
+      if (i < plan.customCount) b.className += ' chip-mine';
+      b.textContent = t.length > 14 ? t.slice(0, 13) + '…' : t;
+      b.title = t;
+      b.onclick = () => { $('prompt').value = t; $('prompt').focus(); };
+      qc.appendChild(b);
+    });
+  }
+
+  /** 渲染设置页里的自定义提示词列表 */
+  function renderQuickPromptSettings() {
+    const list = $('qp-list');
+    if (!list) return;
+    const mine = C.normalizeQuickPrompts(S.cfg.quickPrompts);
+    list.innerHTML = '';
+    mine.forEach((t, i) => {
+      const row = document.createElement('div');
+      row.className = 'qp-item';
+      const span = document.createElement('span');
+      span.className = 'qp-text';
+      span.textContent = t;
+      const del = document.createElement('button');
+      del.className = 'qp-del';
+      del.type = 'button';
+      del.textContent = '×';
+      del.setAttribute('aria-label', '删除这条');
+      del.onclick = () => {
+        const plan = C.planEditQuickPrompt(S.cfg.quickPrompts, '', i);
+        S.cfg.quickPrompts = plan.list;
+        saveCfg();
+        renderQuickPromptSettings();
+        renderQuickChips();
+        toast('已删除');
+      };
+      row.appendChild(span);
+      row.appendChild(del);
+      list.appendChild(row);
+    });
+    if (!mine.length) {
+      const empty = document.createElement('div');
+      empty.className = 'qp-empty';
+      empty.textContent = '还没有自定义。下面加一条试试。';
+      list.appendChild(empty);
+    }
+    const cnt = $('qp-count');
+    if (cnt) {
+      cnt.textContent = mine.length
+        ? (mine.length + ' 条自定义（共 ' + C.QUICK_PROMPT_MAX + ' 条上限）')
+        : '还没有自定义';
+    }
+    const hint = $('qp-hint');
+    if (hint) {
+      hint.innerHTML = '加在这里的会出现在编辑页底部的快捷指令里，点一下直接填进提示词输入框。' +
+        '自己加的排在前面；<b>内置的 6 条一直在</b>，不会被替换掉。';
+    }
+  }
+
+  /** 添加一条自定义提示词 */
+  function addQuickPrompt(text) {
+    const plan = C.planEditQuickPrompt(S.cfg.quickPrompts, text);
+    if (plan.dup) { toast('这条已经有了', 2200); return false; }
+    if (plan.full) { toast('最多 ' + C.QUICK_PROMPT_MAX + ' 条，先删掉一条', 2800); return false; }
+    if (!plan.added) { toast('请先输入内容', 2200); return false; }
+    S.cfg.quickPrompts = plan.list;
+    saveCfg();
+    renderQuickPromptSettings();
+    renderQuickChips();
+    return true;
+  }
+
   function syncSaveNowUI() {
     const btn = $('btn-save-now');
     if (!btn) return;
@@ -8209,6 +8298,7 @@
     renderThemeChips();
     syncBgUI();
     updateCallLogBrief();
+    renderQuickPromptSettings();   // 自定义快捷提示词列表
     $('set-provider').value = S.cfg.provider;
     $('set-baseurl').value = S.cfg.baseUrl;
     $('set-apikey').value = S.cfg.apiKey;
@@ -9018,25 +9108,21 @@
     }
     sc.value = 'region';
 
-    // 快捷指令
-    const quick = [
-      '去掉这个物体，背景自然补全',
-      '皮肤精修，保留质感',
-      '换成傍晚的光线',
-      '把这行字改成「' + '」',
-      '衣服换成深蓝色',
-      '修复模糊，变清晰'
-    ];
-    const qc = $('quick-chips');
-    qc.innerHTML = '';
-    quick.forEach((t) => {
-      const b = document.createElement('button');
-      b.className = 'chip';
-      b.textContent = t.length > 14 ? t.slice(0, 13) + '…' : t;
-      b.title = t;
-      b.onclick = () => { $('prompt').value = t; $('prompt').focus(); };
-      qc.appendChild(b);
-    });
+    // 快捷指令（用户自定义的排前面，内置的接在后面）
+    renderQuickChips();
+
+    // 自定义快捷提示词：设置页里加 / 删
+    if ($('qp-add')) {
+      $('qp-add').onclick = () => {
+        const inp = $('qp-input');
+        if (addQuickPrompt(inp.value)) { inp.value = ''; inp.focus(); }
+      };
+    }
+    if ($('qp-input')) {
+      $('qp-input').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); if ($('qp-add')) $('qp-add').onclick(); }
+      });
+    }
 
     $('btn-model').onclick = openSettings;
     $('btn-generate').onclick = generate;
@@ -9967,6 +10053,11 @@
     forceSaveNow,
     saveState,
     syncSaveNowUI,
+    // 自定义快捷提示词（供测试与外部调用）
+    renderQuickChips,
+    renderQuickPromptSettings,
+    addQuickPrompt,
+    quickPrompts: () => S.cfg.quickPrompts,
     renderLibrary,
     openLibrary,
     closeLibrary,
