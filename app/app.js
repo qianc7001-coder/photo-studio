@@ -5128,9 +5128,168 @@
 
   /** 防抖保存：编辑过程中频繁写 localStorage 会卡 */
   let workSaveTimer = null;
+  // 会话保存的防抖定时器。声明放在这里而不是「会话保存」那一节，
+  // 是因为 forceSaveNow() 要先把它取消掉 —— 用 let 声明在后面的块里，
+  // 调用方就落在 TDZ 里，运行时直接抛错。
+  let sessionSaveTimer = null;
   function scheduleWorkSave() {
     clearTimeout(workSaveTimer);
-    workSaveTimer = setTimeout(() => { try { touchWork(); } catch (e) { /* ignore */ } }, 1600);
+    workSaveTimer = setTimeout(() => {
+      try { touchWork(); } catch (e) { /* ignore */ }
+      // 存完了要立刻把「未保存」标记去掉 —— 否则用户会一直以为还没存，
+      // 反复去点「保存修改」。
+      try { syncSaveNowUI(); } catch (e2) { /* ignore */ }
+    }, 1600);
+    // 刚改了东西、还没落盘：菜单里要能立刻看到「未保存」
+    try { syncSaveNowUI(); } catch (e3) { /* ignore */ }
+  }
+
+  /** 最近一次「主动/强制保存」的时间与结果（给界面显示） */
+  let lastSaveAt = 0;
+  let lastSaveOk = null;
+
+  /**
+   * 立刻、同步地把当前编辑存起来（跳过 1.6 秒防抖）。
+   *
+   * 为什么需要：防抖保存意味着「刚刚那一下改动」最多有 1.6 秒还在内存里。
+   * 用户改完立刻按返回 / 退出 / 被系统回收，那一下就可能没了 ——
+   * 日志里「历史记录丢修改」十有八九是这个时间窗。
+   *
+   * 返回是否真的写进去了。**写失败必须让用户知道**：
+   * 磁盘满 / 通道异常时如果还提示「已保存」，等于骗人。
+   *
+   * @param {{silent?:boolean}} opt silent = 不弹提示（用于自动兜底）
+   * @returns {{ok:boolean, why:string, edits:number}}
+   */
+  function forceSaveNow(opt) {
+    // 外层只负责「存完刷新界面」：内部有多条返回路径（没照片 / 没改动 /
+    // 写失败 / 部分成功），每条都手动刷一次界面很容易漏。
+    // 漏掉的表现是：文件其实存好了，菜单里还写着「未保存」，
+    // 用户会以为没存住，反复点、最后干脆不敢退出。
+    const r = forceSaveNowInner(opt);
+    try { syncSaveNowUI(); } catch (e) { /* 刷新失败不该影响保存结果 */ }
+    return r;
+  }
+
+  function forceSaveNowInner(opt) {
+    const o = opt || {};
+    clearTimeout(workSaveTimer);
+    workSaveTimer = null;
+    clearTimeout(sessionSaveTimer);
+    sessionSaveTimer = null;
+
+    const result = { ok: false, why: '', edits: S.edits ? S.edits.length : 0 };
+    if (!S.docCanvas || !S.viewCanvas) {
+      result.why = '还没有打开照片';
+      if (!o.silent) toast(result.why);
+      return result;
+    }
+    if (!result.edits) {
+      result.why = '这张照片还没有任何修改，不需要保存';
+      if (!o.silent) toast(result.why, 2600);
+      return result;
+    }
+
+    // 1) 作品库（历史记录里能点进去继续编辑的那份）—— 这是用户真正怕丢的东西
+    try {
+      touchWork();
+    } catch (e) {
+      console.warn('[枫叶修图] 主动保存：作品库写入异常', e);
+      result.why = '保存出错：' + ((e && e.message) || '未知原因');
+      lastSaveOk = false;
+      if (!o.silent) toast(result.why, 3600);
+      return result;
+    }
+
+    // 2) 核对：记录真的在库里，并且带上了可恢复的编辑数据。
+    //    只信 touchWork 没抛异常是不够的 —— 它在「单条太大」时会
+    //    主动放弃 session，那种情况下用户点进去还是变原图。
+    const rec = (S.library || []).filter((e) => e.id === S.workId)[0];
+    if (!rec) {
+      result.why = '保存失败：记录没有写进作品库';
+      lastSaveOk = false;
+      if (!o.silent) toast(result.why, 3600);
+      return result;
+    }
+
+    // 3) 会话兜底：万一这张图的编辑数据没法进作品库（体积超限），
+    //    至少把「未完成的编辑」留在本地，下次打开还能恢复。
+    let sessionOk = !!rec.session;
+    if (!sessionOk) {
+      try {
+        const payload = buildSessionPayload();
+        if (payload) {
+          localStorage.setItem(LS_KEY_SESSION, JSON.stringify(payload));
+          lastSavedSession = payload;
+          sessionOk = true;
+        }
+      } catch (e2) { /* 兜底失败不额外报，下面统一说明 */ }
+      if (sessionOk) {
+        result.ok = true;
+        result.why = '编辑数据太大，已存成「未完成的编辑」，下次打开可以恢复';
+      } else {
+        result.ok = true;
+        result.why = '已保存，但这张图太大，只存了预览（不能继续编辑）';
+      }
+    } else {
+      result.ok = true;
+      result.why = '已保存';
+    }
+
+    lastSaveAt = Date.now();
+    lastSaveOk = result.ok;
+    if (!o.silent) toast(result.why, 2600);
+    return result;
+  }
+
+  /**
+   * 刷新「保存修改」按钮的状态。
+   *
+   * 三项信息，缺一用户就会瞎猜：
+   *   - 能不能点（没有照片 / 没有任何修改时点它没有意义）
+   *   - 有没有还没落盘的改动（防抖还没触发，此刻退出会丢）
+   *   - 上次保存是什么时候、成没成
+   */
+  function syncSaveNowUI() {
+    const btn = $('btn-save-now');
+    if (!btn) return;
+    const st = saveState();
+    const can = !!S.img && st.edits > 0;
+    btn.disabled = !can;
+
+    const brief = $('save-state-brief');
+    if (brief) {
+      let txt = '';
+      let warn = false;
+      if (!S.img) {
+        txt = '';
+      } else if (st.pending) {
+        // 防抖窗口内：明确告诉用户「还没存」，这时候退出确实会丢
+        txt = '未保存';
+        warn = true;
+      } else if (st.lastAt) {
+        txt = st.ok ? ('已存 ' + C.formatClock(st.lastAt)) : '保存失败';
+        warn = !st.ok;
+      } else if (st.edits > 0) {
+        txt = st.hasSession ? '已自动保存' : '待保存';
+        warn = !st.hasSession;
+      }
+      brief.textContent = txt;
+      brief.hidden = !txt;
+      brief.className = 'mi-state' + (warn ? ' warn' : '');
+    }
+    btn.title = can ? '立刻把这次修改写进修图记录（不用等自动保存）' : '还没有可保存的修改';
+  }
+
+  /** 保存了吗？界面上显示「已保存 / 未保存」用 */
+  function saveState() {
+    return {
+      lastAt: lastSaveAt,
+      ok: lastSaveOk,
+      pending: !!workSaveTimer,
+      edits: S.edits ? S.edits.length : 0,
+      hasSession: !!(S.library || []).filter((e) => e.id === S.workId && e.session)[0]
+    };
   }
 
   function updateLibraryBadge() {
@@ -5998,10 +6157,21 @@
           resetTipDecision();
           updateUI(); draw();
           break;
-        case 'home':
+        case 'home': {
+          // 先确认真的存住了再说「已存」。
+          // 以前是无条件弹这句话：保存失败（磁盘满 / 单条超限）时
+          // 用户被这句提示骗了，回头发现记录里是原图。
+          //
+          // 注意必须在 goHome() 之前把「有没有修改」记下来 ——
+          // goHome 会把 S.edits 清空，之后再读就永远是 0。
+          const hadEdits = S.edits.length > 0;
+          const saved = hadEdits ? forceSaveNow({ silent: true }) : { ok: true, why: '' };
           goHome();
-          toast('已存进修图记录，可随时继续编辑', 3000);
+          toast(!hadEdits ? '已回到首页'
+            : saved.ok ? '已存进修图记录，可随时继续编辑'
+              : ('没能保存：' + (saved.why || '未知原因')), 3200);
           break;
+        }
       }
       return true;
     } catch (e) {
@@ -7285,6 +7455,7 @@
     $('btn-save').disabled = !S.viewCanvas;
     const piBtn = $('btn-photoinfo');
     if (piBtn) piBtn.disabled = !S.img;
+    syncSaveNowUI();
 
     // 历史按钮上的步数（不含「原图」那一格）
     const hb = $('hist-count');
@@ -8660,6 +8831,11 @@
     $('btn-more').onclick = (e) => { e.stopPropagation(); toggleMoreMenu(); };
     $('btn-settings').onclick = () => { closeMoreMenu(); openSettings(); };
 
+    // ---- 主动保存 ----
+    // 点完**不关菜单**：用户要看到「已保存」的反馈和保存时间，
+    // 菜单一关反馈就没了，他会不确定到底存没存。
+    if ($('btn-save-now')) $('btn-save-now').onclick = () => { forceSaveNow(); syncSaveNowUI(); };
+
     // ---- 设置分级：一级入口 / 二级页返回 ----
     document.querySelectorAll('#settings [data-stopen]').forEach((el) => {
       el.onclick = () => showSettingsPage(el.dataset.stopen);
@@ -9226,8 +9402,6 @@
 
   /* ============================ 会话保存与恢复 ============================ */
 
-  let sessionSaveTimer = null;
-
   /** 最后一次真正写进存档的会话内容（测试用；也便于排查「存档里到底是什么」） */
   let lastSavedSession = null;
 
@@ -9741,7 +9915,18 @@
       if (!document.hidden) {
         syncKeepAlive();
         updateKeepAliveUI();
+        return;
       }
+      // 切到后台 = 最可能被系统回收的时刻。防抖保存还有 1.6 秒没落地，
+      // 这一下没存住，回来就是「记录不见了」。
+      // 这里同步存一次（不弹提示，用户看不见界面）。
+      try { forceSaveNow({ silent: true }); } catch (e) { /* 后台保存失败不该崩 */ }
+    });
+
+    // 页面被卸载前的最后机会。
+    // pagehide 比 beforeunload 更可靠（安卓 WebView 常常不触发后者）。
+    window.addEventListener('pagehide', () => {
+      try { forceSaveNow({ silent: true }); } catch (e) { /* ignore */ }
     });
 
     // 若通过本地服务打开，探测代理是否可用
@@ -9778,6 +9963,10 @@
     loadLibrary, kvStorageAvailable, kvSaveLibrary, kvLoadLibrary,
     saveLibrary,
     touchWork,
+    scheduleWorkSave,
+    forceSaveNow,
+    saveState,
+    syncSaveNowUI,
     renderLibrary,
     openLibrary,
     closeLibrary,

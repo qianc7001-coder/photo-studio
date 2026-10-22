@@ -51,6 +51,14 @@
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5M12 8v.01"/></svg>
         <span class="mi-label">照片信息</span>
       </button>
+      <!-- 主动保存：防抖保存有 1.6 秒的空窗，用户改完立刻退出就可能丢那一下。
+           放在「更多」菜单第一项，是「我要走了，先存一下」这个动作最自然的位置；
+           顶栏已经因为文件名可见性收敛过一次，不能再塞按钮。 -->
+      <button class="more-item" id="btn-save-now" role="menuitem" disabled>
+        <svg viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
+        <span class="mi-label">保存修改</span>
+        <b class="mi-state" id="save-state-brief" hidden></b>
+      </button>
       <button class="more-item" id="btn-library" role="menuitem">
         <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 9v11"/></svg>
         <span class="mi-label">修图记录</span>

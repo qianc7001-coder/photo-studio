@@ -7644,6 +7644,130 @@ async function run() {
     await sleep(100);
   }
 
+  /* ---------- 主动保存：不用等 1.6 秒防抖 ---------- */
+  console.log('\n【68】主动保存：改完立刻存住，退出也不会丢');
+  {
+    const api = window.__PS_API;
+    S.jobs = [];
+    S.library = [];
+    api.goHome();
+    await sleep(120);
+
+    // 载入一张图，做一次「编辑」（直接改 viewCanvas + 塞一条 edit，
+    // 走的是和真实贴回完全一样的落库路径）
+    {
+      const c = napi.createCanvas(240, 160);
+      const cx0 = c.getContext('2d');
+      cx0.fillStyle = 'rgb(200, 60, 60)';
+      cx0.fillRect(0, 0, 240, 160);
+      const inp = doc.getElementById('file-input');
+      Object.defineProperty(inp, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'save.png', { type: 'image/png' })],
+        configurable: true
+      });
+      inp.dispatchEvent(new window.Event('change'));
+      await sleep(400);
+    }
+    t('照片已载入', S.docW === 240, [S.docW, S.docH]);
+
+    // 没有任何修改时，按钮应该是禁用的（点了也没意义）
+    api.updateUI();
+    t('★★ 没有修改时「保存修改」是禁用的',
+      doc.getElementById('btn-save-now').disabled === true);
+
+    // 造一次真实编辑
+    {
+      // 直接画在文档自己的画布上：jsdom 的 canvas 元素不能传给
+      // @napi-rs/canvas 的上下文，混用会抛 "Value is not one of these types"。
+      const tctx = S.viewCanvas.getContext('2d');
+      tctx.fillStyle = 'rgb(20, 180, 80)';
+      tctx.fillRect(20, 20, 80, 60);
+      S.viewCtx = tctx;
+      S.edits.push({
+        rect: { x: 20, y: 20, w: 80, h: 60 },
+        patch: napi.createCanvas(80, 60),
+        feather: 4, colorMatch: 0, mask: null,
+        opacity: 1, enabled: true, label: '测试', createdAt: Date.now()
+      });
+      S.docRev++;
+      api.scheduleWorkSave();          // 真实路径：编辑后进防抖
+    }
+    await sleep(80);
+    t('★ 有修改后按钮可点', doc.getElementById('btn-save-now').disabled === false);
+
+    // 关键：防抖还没触发（1.6 秒）时，记录里应该还没有这张
+    const before = api.library().length;
+    t('★★ 防抖期间记录还没写进作品库（这就是丢数据的时间窗）',
+      before === 0, before);
+    t('★★ 菜单里显示「未保存」提醒用户',
+      /未保存/.test(doc.getElementById('save-state-brief').textContent),
+      doc.getElementById('save-state-brief').textContent);
+
+    // 主动保存：必须立刻落地，并且带可恢复的会话
+    const res = api.forceSaveNow({ silent: true });
+    t('★★ 主动保存报告成功', res.ok === true, res);
+    t('★★ 记录立刻进了作品库', api.library().length === 1, api.library().length);
+    const rec = api.library()[0];
+    t('★★ 记录带上了编辑数据（点进去能继续编辑）', !!rec.session);
+    t('★ 记录里有这次编辑', rec.edits === 1, rec.edits);
+    t('★★ 保存后状态字变成「已存 + 时间」',
+      /已存 \d{2}:\d{2}/.test(doc.getElementById('save-state-brief').textContent),
+      doc.getElementById('save-state-brief').textContent);
+
+    // 存到文件里（有原生桥时）或 localStorage —— 无论哪条，必须真的可读回
+    const reloaded = api.loadLibrary();
+    t('★★ 重新读盘能读回这条记录', reloaded.length === 1, reloaded.length);
+    t('★★ 读回来的记录仍带编辑数据', !!(reloaded[0] && reloaded[0].session));
+
+    // 点按钮本身也要能工作（不是只有 API 能用）
+    {
+      const btn = doc.getElementById('btn-save-now');
+      S.edits.push({
+        rect: { x: 0, y: 0, w: 10, h: 10 },
+        patch: napi.createCanvas(10, 10),
+        feather: 0, colorMatch: 0, mask: null,
+        opacity: 1, enabled: true, label: '第二次', createdAt: Date.now()
+      });
+      api.scheduleWorkSave();
+      await sleep(60);
+      btn.onclick();
+      await sleep(80);
+      const r2 = api.library()[0];
+      t('★★ 点「保存修改」按钮能立刻落盘', r2.edits === 2, r2 && r2.edits);
+    }
+
+    // 切后台 / 页面被关掉时也要自动存（用户不会主动点）
+    {
+      S.edits.push({
+        rect: { x: 0, y: 0, w: 10, h: 10 },
+        patch: napi.createCanvas(10, 10),
+        feather: 0, colorMatch: 0, mask: null,
+        opacity: 1, enabled: true, label: '第三次', createdAt: Date.now()
+      });
+      api.scheduleWorkSave();
+      await sleep(60);
+      // 模拟切到后台
+      Object.defineProperty(doc, 'hidden', { value: true, configurable: true });
+      doc.dispatchEvent(new window.Event('visibilitychange'));
+      await sleep(120);
+      t('★★ 切到后台会自动存住（防抖窗口内的改动不丢）',
+        api.library()[0].edits === 3, api.library()[0] && api.library()[0].edits);
+      Object.defineProperty(doc, 'hidden', { value: false, configurable: true });
+    }
+
+    // 没打开照片时点保存要给明确说法，不能静默什么都不做
+    api.goHome();
+    await sleep(150);
+    const empty = api.forceSaveNow({ silent: true });
+    t('★ 没有照片时保存返回明确原因', empty.ok === false && /没有打开照片/.test(empty.why), empty);
+    t('★ 没有照片时按钮是禁用的',
+      doc.getElementById('btn-save-now').disabled === true);
+
+    S.library = [];
+    api.saveLibrary();
+    await sleep(60);
+  }
+
   /* ---------- 日志能逐条复制（排查时要把单条发出来） ---------- */
   console.log('\n【67】日志详情可复制：单条记录能整段拷出来');
   {

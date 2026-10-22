@@ -4277,6 +4277,16 @@
     }, null, 2);
   }
 
+  /** 时分秒：10:05:33（界面上「已存 10:05」用，日期对当天记录是噪音） */
+  function formatClock(ts) {
+    const n = num(ts, 0);
+    if (!(n > 0)) return '';
+    const d = new Date(n);
+    if (isNaN(d.getTime())) return '';
+    const p = (x) => String(x).padStart(2, '0');
+    return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+
   /** 日期时间：2024-09-23 10:05:33（日志导出用，本地时区） */
   function formatDateTime(ts) {
     const n = num(ts, 0);
@@ -7400,7 +7410,7 @@
     // 滑块「只能拖滑块头」（防止设置页点轨道误触跳值）
     sliderThumbGeometry, planSliderHit, SLIDER_THUMB_PX,
     // 调用日志（每次模型调用都留痕）
-    appendCallLog, callLogStats, buildCallLogDetail, callLogToText, callLogToJson, truncateText, formatDateTime,
+    appendCallLog, callLogStats, buildCallLogDetail, callLogToText, callLogToJson, truncateText, formatDateTime, formatClock,
     CALL_LOG_MAX, CALL_LOG_PROMPT_CHARS,
     // 新手教程
     TUTORIAL_STEPS, TUTORIAL_LEN, planTutorial, planTutorialStep,

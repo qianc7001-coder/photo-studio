@@ -1238,7 +1238,14 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('生成中取消走任务取消（只取消当前这张）',
     /case 'cancel-gen':[\s\S]{0,300}cancelJobsForCurrentDoc\(/.test(appSrc));
   t('模式动作回到框选', /case 'mode':[\s\S]{0,200}S\.mode = 'select'/.test(appSrc));
-  t('编辑中回首页', /case 'home':[\s\S]{0,80}goHome\(\)/.test(appSrc));
+  // 位置放宽到 600 字：这里现在先做一次「强制保存并核对结果」再 goHome，
+  // 代码变长是正常的；要保住的语义是「回首页这道分支里确实调了 goHome」，
+  // 不是「goHome 紧跟在 case 后面」。
+  t('编辑中回首页', /case 'home':[\s\S]{0,600}goHome\(\)/.test(appSrc));
+  // 回首页前必须真的存住，并且**存失败要说出来** ——
+  // 以前无条件弹「已存进修图记录」，保存失败时这是在骗用户
+  t('回首页前强制保存', /case 'home':[\s\S]{0,400}forceSaveNow\(\{ silent: true \}\)/.test(appSrc));
+  t('保存失败不会假报「已存」', /saved\.ok[\s\S]{0,200}没能保存/.test(appSrc));
   // 处理失败时返回 false（宁可退出，也不要让用户卡在按返回没反应的界面里）
   t('handleBack 异常时返回 false（不把用户卡住）',
     /catch \(e\) \{[\s\S]{0,300}return false;[\s\S]{0,40}\}/.test(appSrc));

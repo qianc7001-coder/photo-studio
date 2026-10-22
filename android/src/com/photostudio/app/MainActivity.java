@@ -412,6 +412,28 @@ public class MainActivity extends Activity {
         }
     }
 
+    /**
+     * 退到后台时催页面存一次。
+     *
+     * 页面自己已经监听了 visibilitychange，这里再加一道原生兜底：
+     * 某些 OEM（vivo/OPPO 的省电策略）在 WebView 还没派发 visibilitychange
+     * 时就把进程挂起了，页面那次保存根本来不及跑 —— 用户回来发现
+     * 「刚才那一下修改没了」。evaluateJavascript 是异步的，不保证一定执行完，
+     * 所以它是**兜底**而不是唯一手段（页面侧还有防抖 + 主动保存）。
+     */
+    @Override
+    protected void onPause() {
+        if (web != null) {
+            web.evaluateJavascript(SAVE_PROBE_JS, null);
+        }
+        super.onPause();
+    }
+
+    /** 催页面立刻保存；页面异常时静默忽略（保存失败不该让应用崩溃） */
+    private static final String SAVE_PROBE_JS =
+            "(function(){try{if(window.__PS_API&&window.__PS_API.forceSaveNow){" +
+            "window.__PS_API.forceSaveNow({silent:true});}}catch(e){}})()";
+
     /** 应用回到前台时补一次：后台期间没能启动的保活，在这里补上 */
     @Override
     protected void onResume() {

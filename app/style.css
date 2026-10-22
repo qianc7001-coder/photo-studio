@@ -279,6 +279,19 @@ button:disabled { opacity: .38; cursor: default; }
 .more-item svg { width: 19px; height: 19px; flex: 0 0 auto; color: var(--text-dim); }
 .more-item .mi-label { flex: 1 1 auto; }
 
+/* 「保存修改」右侧的状态字：已存 10:05 / 未保存 / 保存失败。
+   它必须一直可见 —— 用户点保存就是为了确认「这次真的存住了」，
+   只在 toast 里闪一下，闪完还是不知道当前是什么状态。 */
+.more-item .mi-state {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+/* 未保存 / 失败要能一眼看到，用警示色而不是灰 */
+.more-item .mi-state.warn { color: var(--warn); }
+
 #file-info { flex: 1 1 auto; min-width: 0; padding: 0 4px; }
 #file-name { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #file-meta { font-size: 10.5px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

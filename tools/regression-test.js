@@ -4745,5 +4745,43 @@ console.log('\n【整图】没有框选时默认处理整张图（含 AI 生图�
   t('复制后给出反馈（不然不知道成没成）', /copy\.textContent = ok \? '已复制' : '复制失败'/.test(appSrc));
 })();
 
+/* ---------- 主动保存（回归） ---------- */
+/*
+ * 缺陷现象：改完立刻按返回 / 退出，最后一次修改没进历史记录。
+ * 根因：保存是 1.6 秒防抖的，那一瞬间改动还在内存里；
+ *      而「回首页」的提示是无条件弹的 —— 没存住也说「已存」。
+ * 回归点：
+ *   1. 有「保存修改」入口，且能立刻落盘（不等防抖）
+ *   2. 切后台 / 页面卸载时自动兜底保存
+ *   3. 保存失败必须说出来，不能假报成功
+ */
+(() => {
+  const fs = require('fs');
+  const appSrc = fs.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html = fs.readFileSync(__dirname + '/../app/index.html', 'utf8');
+
+  t('菜单里有「保存修改」入口', /id="btn-save-now"/.test(html));
+  t('入口带状态字（已存时间 / 未保存）', /id="save-state-brief"/.test(html));
+  t('主动保存会取消防抖定时器', /function forceSaveNowInner[\s\S]{0,300}clearTimeout\(workSaveTimer\)/.test(appSrc));
+  t('保存后会刷新状态显示',
+    /function forceSaveNow\(opt\)[\s\S]{0,400}syncSaveNowUI\(\)/.test(appSrc));
+  t('核对记录真的进了作品库（不只看有没有抛异常）',
+    /\(S\.library \|\| \[\]\)\.filter\(\(e\) => e\.id === S\.workId\)\[0\]/.test(appSrc));
+  t('会话兜底：编辑数据进不了作品库时另存一份',
+    /localStorage\.setItem\(LS_KEY_SESSION, JSON\.stringify\(payload\)\)/.test(appSrc));
+  t('切到后台自动保存（防抖窗口不丢）',
+    /visibilitychange[\s\S]{0,400}forceSaveNow\(\{ silent: true \}\)/.test(appSrc));
+  t('页面卸载前也存一次', /addEventListener\('pagehide'[\s\S]{0,200}forceSaveNow/.test(appSrc));
+
+  // 原生侧兜底：OEM 省电策略可能让页面来不及派发 visibilitychange
+  const act = fs.readFileSync(__dirname + '/../android/src/com/photostudio/app/MainActivity.java', 'utf8');
+  t('退到后台时原生也催一次保存', /protected void onPause\(\)[\s\S]{0,300}SAVE_PROBE_JS/.test(act));
+  t('原生催保存调用的是 forceSaveNow', /forceSaveNow\(\{silent:true\}\)/.test(act));
+  t('没有照片 / 没有修改时给明确原因，不静默',
+    /还没有打开照片/.test(appSrc) && /还没有任何修改/.test(appSrc));
+  t('保存失败不会假报「已保存」',
+    /result\.why = '保存失败：记录没有写进作品库'/.test(appSrc));
+})();
+
 console.log(`\n合计 ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
