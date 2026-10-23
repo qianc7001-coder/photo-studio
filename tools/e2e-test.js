@@ -7644,6 +7644,98 @@ async function run() {
     await sleep(100);
   }
 
+  /* ---------- 竖屏照片：请求图要按模型比例补齐，贴回不能裁掉内容 ---------- */
+  console.log('\n【71】竖屏照片：请求图按模型比例补齐，贴回不裁内容');
+  {
+    const api = window.__PS_API;
+    S.jobs = [];
+    S.library = [];
+    api.saveLibrary();
+    api.goHome();
+    await sleep(150);
+
+    // 3:4 竖屏照片（OpenAI 没有 3:4 档，正好触发比例补齐）
+    {
+      const c = napi.createCanvas(768, 1024);
+      const x = c.getContext('2d');
+      x.fillStyle = 'rgb(40, 110, 170)';
+      x.fillRect(0, 0, 768, 1024);
+      // 画个标记，便于确认位置没有偏移
+      x.fillStyle = 'rgb(240, 240, 240)';
+      x.fillRect(300, 400, 168, 224);
+      const inp = doc.getElementById('file-input');
+      Object.defineProperty(inp, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'portrait.png', { type: 'image/png' })],
+        configurable: true
+      });
+      inp.dispatchEvent(new window.Event('change'));
+      await sleep(400);
+    }
+    t('★ 竖屏照片已载入', S.docW === 768 && S.docH === 1024, [S.docW, S.docH]);
+
+    S.cfg.provider = 'openai';
+    S.cfg.baseUrl = 'https://api.openai.com/v1';
+    S.cfg.model = 'gpt-image-2';
+    S.cfg.netMode = 'direct';
+    S.cfg.apiKey = 'sk-test';
+    S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.contextPct = 12;
+    S.cfg.upscaleSmall = false; S.cfg.autoGrade = false;
+    window.confirm = () => true;
+
+    // 中部选区：3:4（0.75），模型会给 2:3（0.667）
+    S.rect = { x: 100, y: 200, w: 560, h: 746 };
+    fake.setColor([20, 200, 90]);
+    doc.getElementById('prompt').value = '竖屏适配测试';
+    const ep = doc.getElementById('gen-error'); if (ep) ep.hidden = true;
+    const before = fake.seen.length;
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await waitGen(S, 15000);
+    t('★ 竖屏请求已发出', fake.seen.length > before, fake.seen.length - before);
+
+    // 关键：从真实发出的请求图里量出宽高比，必须贴近模型出图比例
+    const req = fake.seen[fake.seen.length - 1];
+    if (req) {
+      const b64 = req.multipart
+        ? Buffer.from(req.multipart.files.image.data).toString('base64')
+        : String((req.body && req.body.image) || '').replace(/^data:[^;]+;base64,/, '');
+      const im = await napi.loadImage(Buffer.from(b64, 'base64'));
+      const reqAR = im.width / im.height;
+      // 模型会给 1024x1536 = 0.667
+      t('★★★ 请求图的宽高比已经补成模型的出图比例（这是竖屏不裁的关键）',
+        Math.abs(reqAR - 1024 / 1536) < 0.02, [im.width, im.height, reqAR.toFixed(3)]);
+      t('★★ 补的是高度方向（竖图加高，不是压扁）',
+        im.height / im.width > 1.4, [im.width, im.height]);
+
+      // 选区必须在请求图内完整可见（不能被切）
+      const offX = 100 - (768 / 2 - im.width / (768 / Math.max(768, 1024)) / 2);
+      t('★ 请求图尺寸合理（没有离谱的放大）',
+        im.width >= 300 && im.width <= 3000, [im.width, im.height]);
+    }
+
+    if (S.pending) {
+      doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
+      await sleep(400);
+    }
+    t('★★ 竖屏生成结果已贴回', S.edits.length === 1, S.edits.length);
+
+    // 贴回后：选区外必须原样（说明没有把内容整体挪位）
+    if (S.edits.length) {
+      const ed = S.edits[0];
+      t('★★ 贴回图层的尺寸正好等于选区（没有被裁掉一条）',
+        ed.rect.w === 560 && ed.rect.h === 746, [ed.rect.w, ed.rect.h]);
+      t('★★ 贴回的 patch 宽高比 = 选区宽高比（说明没裁）',
+        Math.abs((ed.patch.width / ed.patch.height) - (560 / 746)) < 0.02,
+        [ed.patch.width, ed.patch.height]);
+      // 选区外的像素必须完全没变
+      const outside = S.viewCanvas.getContext('2d').getImageData(20, 100, 1, 1).data;
+      t('★★★ 选区外像素完全没被改动', outside[0] === 40 && outside[1] === 110 && outside[2] === 170,
+        [outside[0], outside[1], outside[2]]);
+    }
+
+    api.goHome();
+    await sleep(150);
+  }
+
   /* ---------- 大选区生成后，从首页进去不能变回原图 ---------- */
   console.log('\n【70】大选区生成 → 保存 → 从首页进入，修改必须还在（不能变回原图）');
   {

@@ -3397,6 +3397,47 @@
    *   画到请求图上的位置整体偏掉（实测偏到 20%~40% 而不是 25%~75%）。
    *   所以必须由调用方把基准显式传进来。
    */
+  /**
+   * 把超出图片边界的那一条用**边缘像素往外延**补满。
+   *
+   * 为什么不用黑边：黑边会被模型当成画面内容，生成结果边上会发黑/发灰。
+   * 为什么不用镜像：镜像是翻转的内容，模型可能把倒影当真实景物画进去。
+   * 边缘延伸（把最外一行/一列像素拉伸出去）在视觉上最中性 ——
+   * 它只是把天空继续是天空、墙继续是墙，模型不会因此改变构图。
+   *
+   * 这段补出来的内容**最后会被裁掉**（贴回只取选区那一块），
+   * 所以它只影响模型对画面的理解，不会出现在成品里。
+   *
+   * @param {CanvasRenderingContext2D} dst 目标上下文（已经画好图片内的部分）
+   * @param {HTMLCanvasElement} doc 原图
+   * @param {{x,y,w,h}} fit 扩大后的矩形（可能超出图片）
+   */
+  function extendCanvasEdges(dst, doc, fit) {
+    const DW = doc.width, DH = doc.height;
+    const x0 = Math.max(0, fit.x), y0 = Math.max(0, fit.y);
+    const x1 = Math.min(DW, fit.x + fit.w), y1 = Math.min(DH, fit.y + fit.h);
+    if (x1 <= x0 || y1 <= y0) return;
+    const dw = x1 - x0, dh = y1 - y0;
+    // 图片内容在目标画布里的位置
+    const dx = x0 - fit.x, dy = y0 - fit.y;
+
+    // 上：把最上面一行横向拉出去
+    if (dy > 0) dst.drawImage(doc, x0, y0, dw, 1, dx, 0, dw, dy);
+    // 下
+    if (dy + dh < fit.h) dst.drawImage(doc, x0, y1 - 1, dw, 1, dx, dy + dh, dw, fit.h - (dy + dh));
+    // 左：把最左一列纵向拉出去
+    if (dx > 0) dst.drawImage(doc, x0, y0, 1, dh, 0, dy, dx, dh);
+    // 右
+    if (dx + dw < fit.w) dst.drawImage(doc, x1 - 1, y0, 1, dh, dx + dw, dy, fit.w - (dx + dw), dh);
+    // 四个角：用对应的那一个像素
+    if (dx > 0 && dy > 0) dst.drawImage(doc, x0, y0, 1, 1, 0, 0, dx, dy);
+    if (dx + dw < fit.w && dy > 0) dst.drawImage(doc, x1 - 1, y0, 1, 1, dx + dw, 0, fit.w - (dx + dw), dy);
+    if (dx > 0 && dy + dh < fit.h) dst.drawImage(doc, x0, y1 - 1, 1, 1, 0, dy + dh, dx, fit.h - (dy + dh));
+    if (dx + dw < fit.w && dy + dh < fit.h) {
+      dst.drawImage(doc, x1 - 1, y1 - 1, 1, 1, dx + dw, dy + dh, fit.w - (dx + dw), fit.h - (dy + dh));
+    }
+  }
+
   function buildRequestImage(rect, mask, baseRect, guides) {
     const pct = Number(S.cfg.contextPct) || 0;
     const padX = Math.round(rect.w * pct / 100), padY = Math.round(rect.h * pct / 100);
@@ -3442,7 +3483,44 @@
       }
     }
 
-    const off = { x: rect.x - ctxRect.x, y: rect.y - ctxRect.y };
+    // ---- 竖屏/比例不符时：把请求图外扩成模型的出图比例 ----
+    //
+    // 背景：OpenAI 没有 3:4 这一档（只有 1:1 / 3:2 / 2:3 / 16:9 / 9:16）。
+    // 竖屏照片（3:4）最接近 2:3，比例差 13%。贴回时必须「盖满 + 居中裁切」，
+    // 于是**上下各被切掉约 6% 的画面** —— 用户框了整张竖图，结果少了上下一条。
+    //
+    // 修法：在发请求前就把请求图按模型比例**补足**（补的是选区外已有的画面，
+    // 不是凭空生成的内容），这样返回图的比例和选区完全一致，贴回时不用裁，
+    // 用户选中的每一像素都能原样落回原位。
+    //
+    // 只在不打码、且选区外还有可用画面时补；补不出来（选区已经顶到图片边界）
+    // 就维持原样，宁可轻微裁切也不能把画布撑出边界变成黑边。
+    // 目标比例取自模型实际会输出的尺寸（不是写死 2:3）：
+    // 换模型 / 换服务商时不用改代码，竖屏和横屏都走同一套。
+    const wantSize = pickOutputSize(rect);
+    let targetAspect = 0;
+    if (wantSize && wantSize.size) {
+      const parts = String(wantSize.size).split('x');
+      if (parts.length === 2) targetAspect = (+parts[0]) / (+parts[1]);
+    } else if (wantSize && wantSize.aspect) {
+      const ap = String(wantSize.aspect).split(':');
+      if (ap.length === 2) targetAspect = (+ap[0]) / (+ap[1]);
+    }
+    const fit = C.planRequestAspect(ctxRect, rect, {
+      targetAspect,
+      docW: S.docW, docH: S.docH,
+      // 打码模式下补出来的那圈也是原图内容，没必要补（而且会稀释打码范围）
+      maxGrow: S.cfg.mosaic ? 0 : 0.6,
+      // 选区贴边（整张竖屏照片就是这种）时，允许把画面往外延一点点
+      allowExtend: !S.cfg.mosaic
+    });
+    // 外扩要**最后**做：引导线和打码都画在 ctxRect 这块画布上，
+    // 提前外扩会把它们丢掉（复制的是还没画线的那一版）。
+    let srcCanvas = c;
+    let srcOff = { x: rect.x - ctxRect.x, y: rect.y - ctxRect.y };
+    let srcRect = ctxRect;
+
+    let off = srcOff;
 
     // 隐私打码：把选区外的内容打码（只在整图发送时才需要，这里给整图模式保留）
     if (S.cfg.mosaic) {
@@ -3522,6 +3600,26 @@
     }
     lastStrokeNote = strokeNote;
 
+    // ---- 竖屏/比例不符：把请求图补成模型的出图比例 ----
+    //
+    // 放在引导线之后：这段会新建一块更大的画布，然后把**已经画好标注的**
+    // 请求图复制进去。放在前面的话，复制的是还没画线的版本，线就丢了。
+    if (fit && (fit.padX || fit.padY)) {
+      const big = makeCanvas(fit.w, fit.h);
+      const bx = big.getContext('2d', { willReadFrequently: true });
+      // 先按「扩大后的矩形」直接从原图取一份（超出图片的部分由下一步补）
+      bx.drawImage(S.docCanvas, fit.x, fit.y, fit.w, fit.h, 0, 0, fit.w, fit.h);
+      // 超出图片边界的那一条：用边缘像素往外延（不是黑边，也不是凭空生成）
+      if (fit.extend) extendCanvasEdges(bx, S.docCanvas, fit);
+      // 再把已经画好标注的请求图覆盖回它该在的位置
+      bx.drawImage(srcCanvas, 0, 0, srcCanvas.width, srcCanvas.height,
+        fit.offX, fit.offY, srcCanvas.width, srcCanvas.height);
+      srcCanvas = big;
+      srcRect = fit;
+      srcOff = { x: rect.x - fit.x, y: rect.y - fit.y };
+      off = srcOff;
+    }
+
     // ---- 小选区上采样 ----
     // 很多接口对输入图有最小像素要求（如 0.66MP）。摄影师常改的恰恰是小区域，
     // 裁出来可能只有 100x100，直接发会被服务端拒收。
@@ -3529,17 +3627,18 @@
     const up = (S.cfg.upscaleSmall === false)
       ? { needed: false, scale: 1, w: rect.w, h: rect.h, srcW: rect.w, srcH: rect.h }
       : C.planUpscale(rect.w, rect.h, S.cfg.provider);
-    let outCanvas = c;
+    let outCanvas = srcCanvas;
     let upInfo = null;
     if (up.needed && up.w > rect.w) {
-      // 放大后的画布尺寸 = 外扩部分按同倍数放大
+      // 放大后的画布尺寸 = 外扩部分按同倍数放大。
+      // 用 srcCanvas/srcRect（可能已被补过比例），否则补出来的那圈会被丢掉。
       const k = up.w / rect.w;
-      const ow = Math.round(ctxRect.w * k), oh = Math.round(ctxRect.h * k);
+      const ow = Math.round(srcCanvas.width * k), oh = Math.round(srcCanvas.height * k);
       const big = makeCanvas(ow, oh);
       const bx = big.getContext('2d', { willReadFrequently: true });
       bx.imageSmoothingEnabled = true;
       bx.imageSmoothingQuality = 'high';
-      bx.drawImage(c, 0, 0, ctxRect.w, ctxRect.h, 0, 0, ow, oh);
+      bx.drawImage(srcCanvas, 0, 0, srcCanvas.width, srcCanvas.height, 0, 0, ow, oh);
       outCanvas = big;
       upInfo = {
         scale: k,
@@ -3549,7 +3648,7 @@
         reqW: ow, reqH: oh
       };
     }
-    return { canvas: outCanvas, rect: ctxRect, off, up: upInfo };
+    return { canvas: outCanvas, rect: srcRect, off, up: upInfo, aspectFit: !!fit };
   }
 
   function canvasToDataUrl(canvas, format, quality) {

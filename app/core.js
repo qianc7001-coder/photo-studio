@@ -834,6 +834,99 @@
     return { sx: rx + inner.sx, sy: ry + inner.sy, sw: inner.sw, sh: inner.sh };
   }
 
+  /**
+   * 规划「把请求图补成模型出图比例」。
+   *
+   * 为什么需要：
+   *   OpenAI 只有 1:1 / 3:2 / 2:3 / 16:9 / 9:16 这几档，**没有 3:4**。
+   *   竖屏照片（3:4 = 0.75）最接近 2:3（0.667），差 13%。
+   *   贴回时必须「盖满 + 居中裁切」，于是上下各被切掉约 6% ——
+   *   用户框了整张竖图，结果发现上下各少了一条，而且再也找不回来。
+   *
+   * 修法：发请求前就把请求图按模型比例**补足**（补的是选区外原本就有的画面），
+   * 这样返回图比例与选区一致，贴回时不用裁，用户选的每一像素都落回原位。
+   *
+   * 约束：
+   *   - 补出来的部分必须落在图片范围内（不能凭空造黑边）
+   *   - 只在「补得出来」时才补；补不出来就维持原样（轻微裁切好过黑边）
+   *   - 扩得太多也没意义：超过 60% 的额外面积说明比例差太远，
+   *     与其塞一大圈无关画面，不如让它按原比例轻微裁切
+   *
+   * @param {{x:number,y:number,w:number,h:number}} ctxRect 当前请求图在原图上的矩形
+   * @param {{x:number,y:number,w:number,h:number}} selRect 选区矩形
+   * @param {object} [opts] { targetAspect, docW, docH, maxGrow }
+   * @returns {{x,y,w,h,offX,offY,padX,padY}|null} null = 不补
+   */
+  function planRequestAspect(ctxRect, selRect, opts) {
+    const o = opts || {};
+    const cw = Math.max(1, Math.round(num(ctxRect && ctxRect.w, 1)));
+    const ch = Math.max(1, Math.round(num(ctxRect && ctxRect.h, 1)));
+    const target = num(o.targetAspect, 0);
+    if (!(target > 0)) return null;
+
+    // 请求图本身已经够接近目标比例就不动（2% 以内肉眼无差）
+    const cur = cw / ch;
+    if (Math.abs(Math.log(cur / target)) < 0.02) return null;
+
+    const maxGrow = num(o.maxGrow, 0.6);
+    const docW = num(o.docW, 0);
+    const docH = num(o.docH, 0);
+
+    // 以请求图中心为锚点扩成目标比例
+    let w = cw, h = ch;
+    if (cur > target) {
+      // 太宽 → 加高
+      h = Math.round(cw / target);
+    } else {
+      // 太高 → 加宽
+      w = Math.round(ch * target);
+    }
+    // 扩得太多就放弃（比例差太远，塞进来的一圈无关画面反而干扰模型）
+    const grow = (w * h) / (cw * ch) - 1;
+    if (grow > maxGrow) return null;
+
+    // 以请求图中心对齐
+    const cx = num(ctxRect.x, 0) + cw / 2;
+    const cy = num(ctxRect.y, 0) + ch / 2;
+    let x = Math.round(cx - w / 2);
+    let y = Math.round(cy - h / 2);
+
+    // 必须整体落在图片内。落不下时有两种选择：
+    //   - 默认放弃（补黑边会污染生成结果）
+    //   - allowExtend=true 时允许超出，由调用方用**边缘像素延伸**补满
+    //     （不是黑边，也不是凭空生成 —— 就是边上的颜色往外延一条）
+    //
+    // 后者是为整张竖屏照片准备的：选区顶满整张图，没有多余的上下文可借，
+    // 而 3:4 的照片配 2:3 的出图比例必然要裁掉上下 11%。
+    // 与其裁掉用户照片的一条边，不如把画面往外延一点点再让模型改。
+    let extend = false;
+    if (docW > 0 && docH > 0) {
+      if (w > docW || h > docH) {
+        if (!o.allowExtend) return null;
+        // 连图片本身都装不下，说明比例差得太远，放弃
+        if (w > docW * 1.3 || h > docH * 1.3) return null;
+        extend = true;
+      } else {
+        x = Math.max(0, Math.min(docW - w, x));
+        y = Math.max(0, Math.min(docH - h, y));
+        // 居中后仍然出界（选区贴边）→ 允许延伸
+        if (x < 0 || y < 0 || x + w > docW || y + h > docH) {
+          if (!o.allowExtend) return null;
+          extend = true;
+        }
+      }
+    }
+
+    // 补出来的偏移：原请求图在扩大后画布里的位置
+    const offX = num(ctxRect.x, 0) - x;
+    const offY = num(ctxRect.y, 0) - y;
+    const padX = w - cw;
+    const padY = h - ch;
+    if (padX <= 0 && padY <= 0) return null;
+
+    return { x, y, w, h, offX, offY, padX, padY, extend };
+  }
+
   /** 生图结果与选区的比例偏差程度：1 表示完全一致，>1.25 说明偏差明显 */
   function aspectMismatch(srcW, srcH, dstW, dstH) {
     const a = Math.max(1, num(srcW, 1)) / Math.max(1, num(srcH, 1));
@@ -7618,6 +7711,7 @@
     planStrokeOverlay, drawStrokeOverlay,
     describeGuides, mapGuidesToRequest,
     normalizeExifOrientation, buildExifPayload, injectMetadata, isSrgbProfile,
+    planRequestAspect,
     // 模型
     PROVIDERS, getProvider, findModel, joinUrl, buildImageRequest, parseImageResponse, extractError,
     dataUrlToBytes, resolveEndpoint, needsMultipart, buildMultipartBody,
