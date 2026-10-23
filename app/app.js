@@ -1315,7 +1315,7 @@
    * 所以这里在「解码阶段」就用 resizeWidth/resizeHeight 直接解出工作尺寸的位图，
    * 从源头避免超大分配。
    */
-  async function decodeToWorkSize(blob, maxSide) {
+  async function decodeToWorkSize(blob, maxSide, orientation) {
     let srcW = 0, srcH = 0;
 
     // 第一步：只读文件头拿到原始像素尺寸（不分配任何像素内存）
@@ -1332,14 +1332,36 @@
     if (typeof createImageBitmap === 'function') {
       // 第二步：如果原图比工作尺寸大，在解码阶段就直接解出缩小版，
       // 完全不产生全尺寸位图 —— 这是避免「导入大照片黑屏」的关键。
-      if (maxSide > 0 && srcW > 0 && Math.max(srcW, srcH) > maxSide) {
-        const k = maxSide / Math.max(srcW, srcH);
-        const tw = Math.max(1, Math.round(srcW * k));
-        const th = Math.max(1, Math.round(srcH * k));
+      //
+      // 但这一步有个致命细节：**文件头里的宽高是未旋转的**。
+      // 手机竖拍的 JPEG 像素数据是横的（4032×3024）配一个 Orientation=6，
+      // 而 createImageBitmap 默认会按 EXIF 把它转成 3024×4032。
+      // 若还按 4032×3024 算缩放，传进去的 resizeWidth/Height 就反了 ——
+      // 竖图会被拉成横图，用户看到的就是「导入之后直接被压扁」。
+      // 所以先判断方向是否需要互换宽高。
+      const swapped = C.isSwappedOrientation(orientation);
+      const realW = swapped ? srcH : srcW;
+      const realH = swapped ? srcW : srcH;
+      if (maxSide > 0 && realW > 0 && Math.max(realW, realH) > maxSide) {
+        const k = maxSide / Math.max(realW, realH);
+        const tw = Math.max(1, Math.round(realW * k));
+        const th = Math.max(1, Math.round(realH * k));
+        try {
+          // imageOrientation:'from-image' 明确要求按 EXIF 转正，
+          // 这样 resize 的宽高就是**转正之后**的宽高，两者一致。
+          const bmp = await createImageBitmap(blob, {
+            resizeWidth: tw, resizeHeight: th, resizeQuality: 'high',
+            imageOrientation: 'from-image'
+          });
+          return bmp;
+        } catch (e) { /* 老内核不认 imageOrientation，落到下面的不带选项重载 */ }
         try {
           return await createImageBitmap(blob, { resizeWidth: tw, resizeHeight: th, resizeQuality: 'high' });
         } catch (e) { /* 落到全尺寸解码 */ }
       }
+      try {
+        return await createImageBitmap(blob, { imageOrientation: 'from-image' });
+      } catch (e) { /* 老内核不认这个选项，落到不带选项的重载 */ }
       try {
         return await createImageBitmap(blob);
       } catch (e) { /* 落到 img 兜底 */ }
@@ -1357,10 +1379,12 @@
     const maxSide = Number(S.cfg.maxRes) || 0;
     // 先把原图的 EXIF / ICC 存下来：canvas 一重绘这些就没了，
     // 而摄影师交片需要保留相机型号、镜头、光圈快门 ISO、拍摄时间等信息。
+    // 元数据要在**解码之前**取，因为解码缩放后 Orientation 就没意义了；
+    // 而解码又需要它来判断宽高要不要互换（竖拍的旋转标记）。
     S.meta = await captureMetadata(blob);
     let bmp;
     try {
-      bmp = await decodeToWorkSize(blob, maxSide);
+      bmp = await decodeToWorkSize(blob, maxSide, S.meta && S.meta.orientation);
     } catch (e) {
       toast('照片打开失败：' + (e && e.message ? e.message : e), 4200);
       return;

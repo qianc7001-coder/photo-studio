@@ -7644,6 +7644,88 @@ async function run() {
     await sleep(100);
   }
 
+  /* ---------- 竖拍照片（EXIF 旋转）导入后不能被压扁 ---------- */
+  console.log('\n【72】竖拍照片：带 EXIF 旋转标记导入，不能被压扁');
+  {
+    const api = window.__PS_API;
+    S.jobs = [];
+    api.goHome();
+    await sleep(150);
+
+    // 造一张「像素是横的 + EXIF Orientation=6」的 JPEG —— 这正是手机竖拍的存法。
+    // 图像内容故意做成「上半蓝、下半红」，这样转正与否一眼能看出来。
+    const raw = napi.createCanvas(800, 600);
+    const rx = raw.getContext('2d');
+    rx.fillStyle = 'rgb(30, 90, 200)';   // 上半：蓝
+    rx.fillRect(0, 0, 800, 300);
+    rx.fillStyle = 'rgb(220, 40, 40)';   // 下半：红
+    rx.fillRect(0, 300, 800, 300);
+    const jpg = raw.toBuffer('image/jpeg', 0.92);
+
+    // 在 JPEG 里插入 EXIF APP1（含 Orientation=6）
+    const withExif = (() => {
+      const tiff = new Uint8Array(8 + 2 + 12 + 4);
+      tiff[0] = 0x49; tiff[1] = 0x49; tiff[2] = 0x2a; tiff[4] = 8;   // II + 0x2a + IFD0@8
+      tiff[8] = 1;                                                    // 1 个条目
+      tiff[10] = 0x12; tiff[11] = 0x01;   // tag 0x0112 = Orientation
+      tiff[12] = 3;                        // SHORT
+      tiff[14] = 1;                        // count = 1
+      tiff[18] = 6;                        // 值 = 6（顺时针 90 度）
+      const payload = new Uint8Array(6 + tiff.length);
+      payload[0] = 0x45; payload[1] = 0x78; payload[2] = 0x69; payload[3] = 0x66;   // "Exif"
+      payload.set(tiff, 6);
+      const seg = new Uint8Array(4 + payload.length);
+      seg[0] = 0xff; seg[1] = 0xe1;
+      const len = payload.length + 2;
+      seg[2] = (len >> 8) & 0xff; seg[3] = len & 0xff;
+      seg.set(payload, 4);
+      // 拼到 JPEG 的 SOI 之后
+      const out = new Uint8Array(2 + seg.length + (jpg.length - 2));
+      out[0] = 0xff; out[1] = 0xd8;
+      out.set(seg, 2);
+      out.set(jpg.subarray(2), 2 + seg.length);
+      return out;
+    })();
+
+    // 确认这张测试图真的带上了 Orientation=6
+    {
+      const C2 = window.PSCore;
+      const tiff2 = C2.extractExif(withExif);
+      t('★ 测试图确实带了 EXIF 旋转标记（Orientation=6）',
+        C2.readExifOrientation(tiff2) === 6, C2.readExifOrientation(tiff2));
+    }
+
+    const inp = doc.getElementById('file-input');
+    Object.defineProperty(inp, 'files', {
+      value: [new window.File([new Uint8Array(withExif)], 'portrait-exif.jpg', { type: 'image/jpeg' })],
+      configurable: true
+    });
+    inp.dispatchEvent(new window.Event('change'));
+    await sleep(600);
+
+    t('★★ 照片已载入', !!S.docCanvas, !!S.docCanvas);
+    // 关键：像素是 800×600（横），但 Orientation=6 表示显示时应转成 600×800（竖）
+    t('★★★ 导入后文档尺寸是竖的（600×800），不是横的（800×600）',
+      S.docW === 600 && S.docH === 800, [S.docW, S.docH]);
+    t('★★★ 宽高比是 0.75（竖），说明没有被压扁',
+      Math.abs(S.docW / S.docH - 0.75) < 0.02, (S.docW / S.docH).toFixed(3));
+    t('★ 记下了「已校正旋转」', !!(S.meta && S.meta.orientation === 6), S.meta && S.meta.orientation);
+
+    // 内容方向：转正后，原来的「上半蓝」应变成「右半蓝」（顺时针转 90 度）
+    if (S.docCanvas) {
+      const cx2 = S.docCanvas.getContext('2d');
+      const left = cx2.getImageData(Math.round(S.docW * 0.15), Math.round(S.docH * 0.5), 1, 1).data;
+      const right = cx2.getImageData(Math.round(S.docW * 0.85), Math.round(S.docH * 0.5), 1, 1).data;
+      // 顺时针转 90 度：原上方 → 右侧。所以右边应该是蓝、左边是红。
+      t('★★ 转正后内容方向正确（原上半部分转到了右侧）',
+        right[2] > 140 && left[0] > 140,
+        { left: [left[0], left[1], left[2]], right: [right[0], right[1], right[2]] });
+    }
+
+    api.goHome();
+    await sleep(150);
+  }
+
   /* ---------- 竖屏照片：请求图要按模型比例补齐，贴回不能裁掉内容 ---------- */
   console.log('\n【71】竖屏照片：请求图按模型比例补齐，贴回不裁内容');
   {

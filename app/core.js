@@ -4423,6 +4423,27 @@
     return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
   }
 
+  /**
+   * EXIF 方向是否是「转了 90 度」（宽高要互换）。
+   *
+   * 手机竖拍时传感器仍是横着拍的：像素数据存成 4032×3024，
+   * 另在 EXIF 里写 Orientation=6/8 表示「显示时转 90 度」。
+   * 浏览器解码（createImageBitmap / <img>）会自动按这个标记转过来，
+   * 实际得到 3024×4032。
+   *
+   * 而 parseImageSize 只读像素数据、不看这个标记，读出来是 4032×3024。
+   * 拿它去算缩放比例，就会把竖图当横图缩 —— 图片被拉扁。
+   * 这就是「导入竖屏照片直接被压扁」的根因。
+   *
+   * @param {number} o EXIF Orientation（1~8）
+   * @returns {boolean}
+   */
+  function isSwappedOrientation(o) {
+    const v = parseInt(o, 10);
+    // 5/6/7/8 都是「转 90 度」的分支，宽高互换
+    return v === 5 || v === 6 || v === 7 || v === 8;
+  }
+
   /** 日期时间：2024-09-23 10:05:33（日志导出用，本地时区） */
   function formatDateTime(ts) {
     const n = num(ts, 0);
@@ -7644,7 +7665,7 @@
     planUpscale, mapUpscaledSelection,
     coverCrop, aspectMismatch, mapSelectionToResult,
 
-    parseImageSize,
+    parseImageSize, isSwappedOrientation,
     patchMemory, planHistoryMemory, planSessionPersist, packMask, unpackMask,
     normalizeLayer, layerAlphaAt, layerAlphaMap, layerCoverage, sortLayers,
     createUndoStack, makeUndoCommand, commandDirection,

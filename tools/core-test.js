@@ -4733,6 +4733,71 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
     /longPressActive = true;/.test(js) && /S\.gesture = null;/.test(js));
 })();
 
+/* ---------- 竖拍照片的 EXIF 旋转：不能被压扁 ---------- */
+/*
+ * 缺陷现象：导入手机竖拍的照片，画面直接被压扁（竖图变横图）。
+ * 根因：竖拍的 JPEG 像素数据是横的（4032×3024），另在 EXIF 写 Orientation=6
+ *      表示「显示时转 90 度」。浏览器解码会按它转正（得到 3024×4032），
+ *      但 parseImageSize 只读像素数据，读到的是 4032×3024。
+ *      拿这个尺寸去算 createImageBitmap 的 resizeWidth/Height 就反了 ——
+ *      竖图被硬缩成横图，宽高比从 0.75 拉成 1.333，就是「压扁」。
+ * 回归点：需要互换宽高的方向（5/6/7/8）必须被识别出来。
+ */
+(() => {
+  // 1) 哪些方向要互换宽高
+  for (const o of [5, 6, 7, 8]) {
+    t('★ Orientation=' + o + ' 判定为需要互换宽高', C.isSwappedOrientation(o) === true);
+  }
+  for (const o of [1, 2, 3, 4]) {
+    t('★ Orientation=' + o + ' 不需要互换（只是翻转/180 度）', C.isSwappedOrientation(o) === false);
+  }
+  t('★ 脏数据不崩（null / 字符串 / 越界）',
+    C.isSwappedOrientation(null) === false &&
+    C.isSwappedOrientation(undefined) === false &&
+    C.isSwappedOrientation('6') === true &&
+    C.isSwappedOrientation(99) === false);
+
+  // 2) 真实场景：手机竖拍 4032×3024 + Orientation=6
+  //    转正后应是 3024×4032，缩放要给竖的尺寸
+  const srcW = 4032, srcH = 3024, maxSide = 3072;
+  const swapped = C.isSwappedOrientation(6);
+  t('★★ 竖拍照片被识别为需要互换', swapped === true);
+  const realW = swapped ? srcH : srcW;
+  const realH = swapped ? srcW : srcH;
+  t('★★★ 转正后的宽高是竖的（3024×4032），不是横的',
+    realW === 3024 && realH === 4032, [realW, realH]);
+  t('★★★ 转正后的宽高比 0.75（竖），不是 1.333（横）',
+    Math.abs(realW / realH - 0.75) < 0.001, realW / realH);
+
+  const k = maxSide / Math.max(realW, realH);
+  const tw = Math.round(realW * k), th = Math.round(realH * k);
+  t('★★ 缩放到工作尺寸后仍是竖的', th > tw, [tw, th]);
+  t('★★ 缩放后的宽高比不变（没有被拉伸）',
+    Math.abs(tw / th - 0.75) < 0.005, tw / th);
+
+  // 3) 对照：不修的话会得到什么
+  const badW = Math.round(srcW * (maxSide / Math.max(srcW, srcH)));
+  const badH = Math.round(srcH * (maxSide / Math.max(srcW, srcH)));
+  t('★★ 对照：按未旋转尺寸算，会要求 3072×2304（横的）——这就是压扁的来源',
+    badW === 3072 && badH === 2304, [badW, badH]);
+  t('★★ 对照：那个宽高比是 1.333，与真实 0.75 相差 78%',
+    Math.abs((badW / badH) / 0.75 - 1) > 0.7, (badW / badH) / 0.75);
+
+  // 4) 接线：解码时必须按方向修尺寸，并明确要求解码器转正
+  const fsN4 = require('fs');
+  const js4 = fsN4.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  t('★★ 解码时用 isSwappedOrientation 判断宽高互换',
+    /isSwappedOrientation\(orientation\)/.test(js4));
+  t('★★ resize 用的是转正后的尺寸（realW/realH）',
+    /resizeWidth: tw, resizeHeight: th[\s\S]{0,120}realW|const realW = swapped \? srcH : srcW/.test(js4));
+  t('★★ 明确要求解码器按 EXIF 转正（from-image）',
+    /imageOrientation: 'from-image'/.test(js4));
+  t('★ 老内核不认这个选项时有兜底（不会直接失败）',
+    /imageOrientation: 'from-image'[\s\S]{0,400}catch \(e\)/.test(js4));
+  t('★★ 方向信息在解码前就已读出（否则没法判断）',
+    /S\.meta = await captureMetadata\(blob\)[\s\S]{0,300}decodeToWorkSize\(blob, maxSide, S\.meta && S\.meta\.orientation\)/.test(js4));
+})();
+
 /* ---------- 竖屏照片：请求图要补成模型的出图比例 ---------- */
 /*
  * 缺陷现象：竖屏照片（3:4）修完，上下各少一条 —— 框选的内容被裁掉了。
