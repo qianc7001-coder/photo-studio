@@ -1486,7 +1486,12 @@
         refCapped = r.capped;
       }
     }
-    return { url, headers, body, refUsed, refCapped };
+    // endpoint 必须一起返回：调用方要靠它判断「该走表单上传还是 JSON」
+    // （needsMultipart 收的就是这个值）。
+    // 曾经漏掉它 → needsMultipart(undefined) 恒为 false →
+    // OpenAI 系模型走了 JSON 路径，图片字段进了 body 但请求被当成表单接口，
+    // 结果就是「模型没有收到照片」。这个漏字段极难从返回值上看出来。
+    return { url, headers, body, refUsed, refCapped, endpoint };
   }
 
   /* ====================== 7.8 请求体编码（JSON / multipart） ====================== */

@@ -8249,20 +8249,34 @@
       let body = req;
       // needsMultipart 收的是**端点**（不是模型名）：只有 OpenAI 系的
       // images/edits 走表单上传，其余都是 JSON。
-      if (C.needsMultipart(req.endpoint)) {
+      //
+      // 这里显式算一遍端点，而不是读 req.endpoint ——
+      // 和主修图路径（prepareJob）保持同一套判断，避免两条路走出不同结果。
+      if (C.needsMultipart(C.resolveEndpoint({
+        providerId: S.cfg.provider, kind: 'edit',
+        imageDataUrl: dataUrl, model: S.cfg.model
+      }))) {
         const mp = C.buildMultipartBody({
           model: S.cfg.model,
           prompt: prompt,
           imageDataUrl: dataUrl,
-          imageField: 'image',
+          // 用模型自己的字段名，别写死 'image'：
+          // Kontext 系要的是 input_image，写死会让服务端找不到图。
+          imageField: m && m.imageField ? m.imageField : 'image',
           size: outSize && outSize.size,
           providerId: S.cfg.provider
         });
         body = Object.assign({}, req, { multipart: mp });
       }
 
+      // 日志要记**实际发出去**的字段名，而不是「我以为的」——
+      // 排查「模型没收到照片」时，这一项就是第一证据。
+      const sentField = m && m.imageField ? m.imageField : 'image';
+      const sentName = body.multipart ? sentField.replace(/\[\]$/, '') : sentField;
       callMeta.transport = body.multipart ? 'multipart' : 'json';
-      callMeta.imageField = body.multipart ? 'image' : (req.body && req.body.image ? 'image' : '');
+      callMeta.imageField = body.multipart
+        ? sentName
+        : ((req.body && req.body[sentField]) ? sentField : '');
       callMeta.endpoint = req.url;
       callMeta.bodyBytes = body.multipart
         ? (body.multipart.body && body.multipart.body.length) || 0

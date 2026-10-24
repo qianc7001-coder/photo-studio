@@ -1035,7 +1035,10 @@ async function run() {
     configurable: true
   });
   memBigInput.dispatchEvent(new window.Event('change'));
-  await sleep(300);
+  // 轮询等载入完成，而不是固定 sleep(300)：
+  // 解码是异步的，跑了几百个用例后进程变重，300ms 偶尔不够，
+  // 于是断言拿到上一张图的尺寸（400×300）—— 是测试时序问题，不是产品 bug。
+  for (let i = 0; i < 60 && S.docW !== 1200; i++) await sleep(50);
   t('大图已载入', S.docW === 1200 && S.docH === 900, [S.docW, S.docH]);
 
   // 连续做多次编辑，检查内存预算是否生效
@@ -7745,6 +7748,66 @@ async function run() {
       /扩图/.test(doc.getElementById('file-name').textContent),
       doc.getElementById('file-name').textContent);
     t('★ 扩图面板已关闭', api.expandOpen() === false);
+
+    // ---- 关键补充：OpenAI（multipart 路径）也必须真的带上图 ----
+    //
+    // 这里守的是一个很隐蔽的坑：buildImageRequest 返回的对象曾经没有 endpoint，
+    // 于是 needsMultipart(undefined) 恒为 false —— OpenAI 系模型走了 JSON 路径，
+    // 图片进了 body 却没按表单上传，服务端直接回「没有收到图片」。
+    // 这条测试专门用 OpenAI 模型跑一次扩图，确认 multipart 里真有文件。
+    {
+      api.goHome();
+      await sleep(150);
+      // 重新载入竖图（上一步已经变成横版新照片了）
+      {
+        const c = napi.createCanvas(300, 400);
+        const x = c.getContext('2d');
+        x.fillStyle = 'rgb(20, 80, 200)';
+        x.fillRect(0, 0, 300, 400);
+        const inp = doc.getElementById('file-input');
+        Object.defineProperty(inp, 'files', {
+          value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'vertical2.png', { type: 'image/png' })],
+          configurable: true
+        });
+        inp.dispatchEvent(new window.Event('change'));
+        await sleep(400);
+      }
+      S.cfg.provider = 'openai';
+      S.cfg.baseUrl = 'https://api.openai.com/v1';
+      S.cfg.model = 'gpt-image-2';
+      S.cfg.apiKey = 'sk-test';
+      S.cfg.netMode = 'direct';
+
+      api.openExpand();
+      await sleep(120);
+      const before2 = fake.seen.length;
+      fake.setColor([120, 200, 90]);
+      doc.getElementById('expand-go').dispatchEvent(new window.Event('click'));
+      for (let i = 0; i < 120 && api.expandState().busy; i++) await sleep(100);
+      await sleep(600);
+
+      t('★★★ OpenAI 扩图请求已发出', fake.seen.length > before2, fake.seen.length - before2);
+      const oreq = fake.seen[fake.seen.length - 1];
+      if (oreq) {
+        t('★★★ OpenAI 扩图走的是 multipart 表单（不是 JSON）',
+          !!oreq.multipart, { hasMultipart: !!oreq.multipart, url: oreq.url });
+        if (oreq.multipart) {
+          const files = oreq.multipart.files || {};
+          const names = Object.keys(files);
+          t('★★★ 表单里真的有图片文件（模型收得到照片）', names.length > 0, names);
+          const anyFile = names.length ? files[names[0]] : null;
+          t('★★ 图片文件不是空的',
+            !!(anyFile && anyFile.data && anyFile.data.length > 100),
+            anyFile && anyFile.data && anyFile.data.length);
+          t('★★ 表单里带上了 model 与 prompt',
+            oreq.multipart.fields.model === 'gpt-image-2' &&
+            /只补左右两侧的空白/.test(oreq.multipart.fields.prompt || ''),
+            { model: oreq.multipart.fields.model, prompt: String(oreq.multipart.fields.prompt).slice(0, 40) });
+        }
+        t('★★ 请求打到 /images/edits', /\/images\/edits/.test(oreq.url), oreq.url);
+      }
+      t('★★ OpenAI 扩图也产出了横版新照片', S.docW === 600 && S.docH === 400, [S.docW, S.docH]);
+    }
 
     api.goHome();
     await sleep(150);
