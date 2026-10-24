@@ -7644,6 +7644,112 @@ async function run() {
     await sleep(100);
   }
 
+  /* ---------- 扩图：竖图补成横版，原图内容必须原样保留 ---------- */
+  console.log('\n【73】扩图：竖图补成横版，原图像素原样保留');
+  {
+    const api = window.__PS_API;
+    S.jobs = [];
+    api.goHome();
+    await sleep(150);
+
+    // 竖图 300×400，左半蓝、右半红 —— 扩图后左右两半的位置必须不变
+    {
+      const c = napi.createCanvas(300, 400);
+      const x = c.getContext('2d');
+      x.fillStyle = 'rgb(20, 80, 200)';
+      x.fillRect(0, 0, 150, 400);      // 左半：蓝
+      x.fillStyle = 'rgb(210, 40, 40)';
+      x.fillRect(150, 0, 150, 400);    // 右半：红
+      const inp = doc.getElementById('file-input');
+      Object.defineProperty(inp, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'vertical.png', { type: 'image/png' })],
+        configurable: true
+      });
+      inp.dispatchEvent(new window.Event('change'));
+      await sleep(400);
+    }
+    t('★ 竖图已载入', S.docW === 300 && S.docH === 400, [S.docW, S.docH]);
+
+    // 打开扩图面板
+    api.openExpand();
+    await sleep(150);
+    t('★★ 扩图面板打开了', api.expandOpen() === true);
+    t('★★ 面板里有比例选项', doc.querySelectorAll('#expand-ratios .chip').length === 4,
+      doc.querySelectorAll('#expand-ratios .chip').length);
+    t('★ 面板里有对齐选项', doc.querySelectorAll('#expand-anchors .chip').length === 3);
+
+    // 关键 1：扩图画布布局正确
+    const plan = window.PSCore.planExpand({ imgW: 300, imgH: 400, ratioId: '3:2', anchor: 'center' });
+    t('★★ 规划成功', plan.ok === true, plan);
+    t('★★ 扩完是横版（600×400）', plan.w === 600 && plan.h === 400, [plan.w, plan.h]);
+    t('★★ 原图居中（左右各 150）', plan.padLeft === 150 && plan.padRight === 150);
+
+    // 关键 2：扩图画布里，原图内容必须在正确位置且没变形
+    const ec = api.buildExpandCanvas(plan);
+    t('★★ 扩图画布尺寸正确', ec.width === 600 && ec.height === 400, [ec.width, ec.height]);
+    {
+      const ex = ec.getContext('2d');
+      // 原图左半蓝现在应该在 x=150~300，右半红在 x=300~450
+      const leftBlue = ex.getImageData(200, 200, 1, 1).data;
+      const rightRed = ex.getImageData(400, 200, 1, 1).data;
+      t('★★★ 原图左半（蓝）仍在左侧正确位置',
+        leftBlue[2] > 140 && leftBlue[0] < 100,
+        [leftBlue[0], leftBlue[1], leftBlue[2]]);
+      t('★★★ 原图右半（红）仍在右侧正确位置',
+        rightRed[0] > 140 && rightRed[2] < 100,
+        [rightRed[0], rightRed[1], rightRed[2]]);
+      // 两侧留白不能是黑的或透明的（否则模型会当成画面内容）
+      const padL = ex.getImageData(30, 200, 1, 1).data;
+      t('★★ 左侧留白是边缘像素延伸（不是黑边）',
+        padL[0] > 10 && padL[3] === 255,
+        [padL[0], padL[1], padL[2], padL[3]]);
+      t('★★ 左侧留白延伸的是原图最左边那一列（蓝色）',
+        padL[2] > 100 && padL[0] < 100, [padL[0], padL[2]]);
+    }
+
+    // 关键 3：真的发出请求，且带上原图
+    S.cfg.provider = 'siliconflow';
+    S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
+    S.cfg.model = 'Qwen/Qwen-Image-Edit';
+    S.cfg.apiKey = 'sk-test';
+    S.cfg.netMode = 'direct';
+    const before = fake.seen.length;
+    fake.setColor([200, 120, 60]);
+    doc.getElementById('expand-go').dispatchEvent(new window.Event('click'));
+    // 等扩图跑完
+    for (let i = 0; i < 120 && api.expandState().busy; i++) await sleep(100);
+    await sleep(600);
+
+    t('★★ 扩图请求已发出', fake.seen.length > before, fake.seen.length - before);
+    const req = fake.seen[fake.seen.length - 1];
+    if (req) {
+      const img = String((req.body && req.body.image) || '');
+      t('★★★ 请求里带了图（模型能看到原图）', /^data:image\//.test(img), img.slice(0, 30));
+      t('★★ 请求提示词要求「只补两侧」',
+        /只补左右两侧的空白/.test(String(req.body && req.body.prompt)),
+        String(req.body && req.body.prompt).slice(0, 60));
+      // 请求图的宽高比应该是 3:2（横版）
+      if (/^data:image\//.test(img)) {
+        const b64 = img.replace(/^data:[^;]+;base64,/, '');
+        const im = await napi.loadImage(Buffer.from(b64, 'base64'));
+        t('★★★ 发出去的图是横版（宽 > 高）', im.width > im.height, [im.width, im.height]);
+        t('★★ 发出去的图比例接近 3:2',
+          Math.abs(im.width / im.height - 1.5) < 0.1, (im.width / im.height).toFixed(3));
+      }
+    }
+
+    // 关键 4：结果作为新照片打开，尺寸是扩完的
+    t('★★★ 扩图后打开了新照片', !!S.docCanvas);
+    t('★★★ 新照片是横版（600×400）', S.docW === 600 && S.docH === 400, [S.docW, S.docH]);
+    t('★★ 新照片文件名标了「扩图」',
+      /扩图/.test(doc.getElementById('file-name').textContent),
+      doc.getElementById('file-name').textContent);
+    t('★ 扩图面板已关闭', api.expandOpen() === false);
+
+    api.goHome();
+    await sleep(150);
+  }
+
   /* ---------- 竖拍照片（EXIF 旋转）导入后不能被压扁 ---------- */
   console.log('\n【72】竖拍照片：带 EXIF 旋转标记导入，不能被压扁');
   {

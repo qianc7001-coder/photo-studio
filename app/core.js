@@ -3322,6 +3322,7 @@
     { id: 'moremenu', z: 130, zh: '更多菜单' },
     { id: 'workPreview', z: 120, zh: '作品预览' },   // #work-preview
     { id: 't2i', z: 115, zh: '文生图' },             // #t2i（可从首页或设置里打开）
+    { id: 'expand', z: 115, zh: '扩图' },            // #expand（竖图补成横版）
     { id: 'calllog', z: 110, zh: '调用日志' },       // #calllog（在设置之上打开）
     { id: 'settings', z: 100, zh: '设置' },
     { id: 'library', z: 100, zh: '修图记录' },
@@ -7415,6 +7416,151 @@
     };
   }
 
+  /* ====================== 7.9 扩图（外扩画布） ====================== */
+
+  /**
+   * 扩图目标比例（宽:高）。
+   *
+   * 用户要的是「竖图变横版」，但具体多宽得选。给几档常见值：
+   * 16:9 是视频/屏幕，3:2 是相机横拍，4:3 是老相机/打印，
+   * 1:1 是社交方图。默认 3:2 —— 和多数相机横拍一致，扩得也不算夸张。
+   */
+  const EXPAND_RATIOS = [
+    { id: '3:2', label: '3:2', w: 3, h: 2, zh: '相机横拍' },
+    { id: '16:9', label: '16:9', w: 16, h: 9, zh: '宽屏' },
+    { id: '4:3', label: '4:3', w: 4, h: 3, zh: '经典横幅' },
+    { id: '1:1', label: '1:1', w: 1, h: 1, zh: '方图' }
+  ];
+
+  function getExpandRatio(id) {
+    return EXPAND_RATIOS.find((r) => r.id === id) || EXPAND_RATIOS[0];
+  }
+
+  /**
+   * 规划「把这张图扩成目标比例」的画布布局。
+   *
+   * 扩图的做法不是「让模型重新画一张大的」（那样原图内容会全变），
+   * 而是：
+   *   1. 先造一块更大的画布（目标比例）
+   *   2. 把原图**原样贴进中间**，位置按对齐方式放
+   *   3. 两侧留白交给模型补画
+   *   4. 提示词明确要求「只补空白处，原图内容一个字都不许改」
+   *
+   * 这样原图的每一像素都保留在原来的位置，模型只需要补左右两条。
+   *
+   * @param {object} o { imgW, imgH, ratioId, anchor }
+   *   anchor: 'center'（默认）| 'left' | 'right'
+   * @returns {{ok:boolean, w, h, x, y, padLeft, padRight, padTop, padBottom, note}}
+   */
+  function planExpand(o) {
+    const opt = o || {};
+    const W = Math.max(1, Math.round(num(opt.imgW, 0)));
+    const H = Math.max(1, Math.round(num(opt.imgH, 0)));
+    const r = getExpandRatio(opt.ratioId);
+    const target = r.w / r.h;
+    const cur = W / H;
+
+    if (W <= 1 || H <= 1) {
+      return { ok: false, w: W, h: H, note: '先打开一张照片' };
+    }
+    // 已经够宽了就不用扩（避免「扩图」把横图又裁成竖的）
+    if (cur >= target - 0.005) {
+      return {
+        ok: false, w: W, h: H,
+        note: '这张已经是 ' + r.label + ' 或更宽的比例，不需要扩图'
+      };
+    }
+
+    // 保持原图尺寸不变，只往宽里加
+    const outW = Math.round(H * target);
+    const outH = H;
+    const pad = outW - W;
+
+    const anchor = opt.anchor === 'left' || opt.anchor === 'right' ? opt.anchor : 'center';
+    let x = 0;
+    if (anchor === 'center') x = Math.round(pad / 2);
+    else if (anchor === 'right') x = pad;
+
+    const padLeft = x, padRight = pad - x;
+    // 说明文字要如实反映左右各扩多少：靠左/靠右时两侧并不相等，
+    // 写成「两侧各扩 N」会让用户以为居中，实际画面偏一边。
+    let note;
+    if (padLeft === padRight) {
+      note = '左右各扩 ' + padLeft + 'px（画面加宽 ' + Math.round((pad / W) * 100) + '%）';
+    } else if (padLeft === 0) {
+      note = '只往右侧扩 ' + padRight + 'px（画面加宽 ' + Math.round((pad / W) * 100) + '%）';
+    } else if (padRight === 0) {
+      note = '只往左侧扩 ' + padLeft + 'px（画面加宽 ' + Math.round((pad / W) * 100) + '%）';
+    } else {
+      note = '左扩 ' + padLeft + 'px、右扩 ' + padRight + 'px（画面加宽 ' + Math.round((pad / W) * 100) + '%）';
+    }
+    // 加宽超过 2 倍时提醒一下：补出来的面积远大于原图，
+    // 模型能参考的内容太少，结果容易「越补越假」。
+    const grow = pad / W;
+    if (grow > 1) {
+      note += ' · 补画面积比原图还大，效果可能不自然，可换更接近的比例';
+    }
+
+    return {
+      ok: true,
+      w: outW, h: outH,
+      x, y: 0,
+      padLeft, padRight,
+      padTop: 0,
+      padBottom: 0,
+      ratioLabel: r.label,
+      ratioZh: r.zh,
+      grow,
+      note
+    };
+  }
+
+  /**
+   * 拼「扩图」用的提示词。
+   *
+   * 关键在于把边界说死：模型很容易顺手把原图内容也「优化」一遍，
+   * 那样就不是扩图了，是把用户的照片重画了。
+   * 所以逐条列出「不许改什么」，并且明确左右各自要补什么。
+   *
+   * @param {object} o { isZh, ratioLabel, side, userNote }
+   * @returns {string}
+   */
+  function buildExpandPrompt(o) {
+    const opt = o || {};
+    const isZh = opt.isZh !== false;
+    const ratio = opt.ratioLabel || '3:2';
+    const extra = String(opt.userNote || '').trim();
+
+    if (!isZh) {
+      const en = [
+        'Extend this photo horizontally to a ' + ratio + ' aspect ratio.',
+        'The existing photo sits in the middle of the canvas; the left and right areas are empty and must be filled in.',
+        '',
+        'Rules:',
+        '- Only paint the empty side areas. Do NOT alter, move, resize, retouch or re-render the original photo content in any way.',
+        '- The extension must continue the existing scene seamlessly: same lighting direction, same color temperature, same perspective, same depth of field, same grain and sharpness.',
+        '- If the original has a sky, ground, wall, water or other continuous surfaces, continue them naturally. If there are objects cut off by the frame edge, complete them plausibly.',
+        '- Do not add new subjects, text, watermarks or logos.',
+        '- Do not draw any border, frame, vignette or visible seam between the original and the extended area.'
+      ];
+      if (extra) en.push('', 'Additional requirement: ' + extra);
+      return en.join('\n');
+    }
+    const zh = [
+      '把这张照片向左右扩展成 ' + ratio + ' 的横版构图。',
+      '原照片位于画面中间，左右两侧是空白区域，需要你补画完整。',
+      '',
+      '要求：',
+      '- **只补左右两侧的空白**。原照片里的内容一个字都不许改：不移动、不缩放、不重画、不修饰。',
+      '- 补出来的部分必须和原画面无缝衔接：光照方向一致、色温一致、透视一致、景深一致、颗粒与锐度一致。',
+      '- 天空、地面、墙面、水面这类连续的面，顺着原有走向自然延伸；被画框切断的物体，把缺的那部分补完整。',
+      '- 不要新增主体、文字、水印或商标。',
+      '- 不要在拼接处画任何边框、暗角或看得见的接缝。'
+    ];
+    if (extra) zh.push('', '额外要求：' + extra);
+    return zh.join('\n');
+  }
+
   /* ============================ 8. 提示词模板 ============================ */
 
   const STYLE_PRESETS = [
@@ -7733,6 +7879,8 @@
     describeGuides, mapGuidesToRequest,
     normalizeExifOrientation, buildExifPayload, injectMetadata, isSrgbProfile,
     planRequestAspect,
+    // 扩图（把竖图补成横版）
+    EXPAND_RATIOS, getExpandRatio, planExpand, buildExpandPrompt,
     // 模型
     PROVIDERS, getProvider, findModel, joinUrl, buildImageRequest, parseImageResponse, extractError,
     dataUrlToBytes, resolveEndpoint, needsMultipart, buildMultipartBody,

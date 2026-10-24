@@ -201,6 +201,12 @@
         <span>调色</span>
         <b id="grade-count" hidden>0</b>
       </button>
+      <!-- 扩图：竖图补成横版。放在工具栏而不是菜单里 ——
+           它是一个「整张照片」的操作，和框选/画笔属于同一层级的常用动作 -->
+      <button class="tool" id="btn-expand">
+        <svg viewBox="0 0 24 24"><rect x="7" y="4" width="10" height="16" rx="1"/><path d="M4 8v8M2 10v4M20 8v8M22 10v4"/></svg>
+        <span>扩图</span>
+      </button>
       <button class="tool" id="btn-fit">
         <svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M16 21h3a2 2 0 0 0 2-2v-3M8 21H5a2 2 0 0 1-2-2v-3"/></svg>
         <span>适应</span>
@@ -356,6 +362,62 @@
     <div class="hist-foot" id="hist-foot" hidden>
       <button class="ghost" id="hist-preview-off" hidden>退出预览</button>
       <button class="primary" id="hist-jump" hidden>回到这一步</button>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= 扩图：把照片补成横版 ======================= -->
+<!--
+  用户场景：竖着拍的照片想做成横版（视频封面、横屏展示、印刷横幅）。
+  做法不是「让模型重画一张大的」（那样原图内容全变），而是：
+  造一块更大的画布 → 把原图原样贴进中间 → 两侧留白交给模型补画。
+  原图每一像素都留在原位，模型只补左右两条。
+-->
+<div id="expand" class="sheet" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-body">
+    <div class="sheet-head">
+      <h3>扩图成横版</h3>
+      <button class="tb-btn icon" data-close>
+        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="sheet-scroll">
+      <div class="tip" style="margin:0 0 12px">
+        把这张竖图向<b>左右扩展</b>成横版。<b>原图内容一个像素都不动</b>，
+        只让模型补画两侧的空白。
+      </div>
+
+      <div class="st-group">目标比例</div>
+      <div class="st-card">
+        <div class="st-row-col">
+          <div class="chips" id="expand-ratios"></div>
+          <div class="st-desc" id="expand-ratio-note"></div>
+        </div>
+      </div>
+
+      <div class="st-group">原图位置</div>
+      <div class="st-card">
+        <div class="st-row-col">
+          <div class="chips" id="expand-anchors"></div>
+          <div class="st-desc">照片放在中间最稳；放一侧的话补画面积更大，效果更容易不自然。</div>
+        </div>
+      </div>
+
+      <div class="st-group">额外要求（可选）</div>
+      <div class="st-card">
+        <div class="st-row-col">
+          <input class="st-input" type="text" id="expand-note"
+            placeholder="例：左侧补成同款墙面，右侧补成延伸的海面">
+        </div>
+      </div>
+
+      <div class="status" id="expand-status"></div>
+      <div class="tip" id="expand-tip"></div>
+    </div>
+    <div class="t2i-foot">
+      <button class="ghost" data-close>取消</button>
+      <button class="primary" id="expand-go">开始扩图</button>
     </div>
   </div>
 </div>

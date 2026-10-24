@@ -6341,6 +6341,7 @@
         photoinfo: !!$('photoinfo') && !$('photoinfo').hidden,
         exportpanel: !!$('exportpanel') && !$('exportpanel').hidden,
         t2i: !!$('t2i') && !$('t2i').hidden,
+        expand: expandOpen(),
         calllog: !!$('calllog') && !$('calllog').hidden,
         tutorial: tutorialOpen(),
         compare: !!$('compare') && !$('compare').hidden,
@@ -6358,6 +6359,7 @@
             case 'workPreview': $('work-preview').hidden = true; break;
             case 'settings': closeSettings(); break;
             case 't2i': closeT2i(); break;
+            case 'expand': closeExpand(); break;
             case 'library': closeLibrary(); break;
             case 'history': closeHistory(); break;
             case 'layers': closeLayers(); break;
@@ -7684,6 +7686,9 @@
     $('btn-save').disabled = !S.viewCanvas;
     const piBtn = $('btn-photoinfo');
     if (piBtn) piBtn.disabled = !S.img;
+    // 扩图必须有照片（没有照片就没什么可扩的）
+    const exBtn = $('btn-expand');
+    if (exBtn) exBtn.disabled = !S.img;
     syncSaveNowUI();
 
     // 历史按钮上的步数（不含「原图」那一格）
@@ -8056,6 +8061,261 @@
     } finally {
       S.t2iAborter = null;
       setBusy(false);
+    }
+  }
+
+  /* ============================ 扩图（竖图 → 横版） ============================ */
+
+  /** 扩图面板的临时状态（不写进配置：每次打开都从默认开始） */
+  const expand = { ratio: '3:2', anchor: 'center', note: '', busy: false };
+
+  function openExpand() {
+    if (!S.docCanvas) { toast('先打开一张照片'); return; }
+    const p = C.planExpand({ imgW: S.docW, imgH: S.docH, ratioId: expand.ratio, anchor: expand.anchor });
+    if (!p.ok && /不需要扩图/.test(p.note)) {
+      // 已经是横图了：直接把原因说清楚，别让用户点进去发现没反应
+      toast(p.note, 3200);
+      return;
+    }
+    expand.busy = false;
+    renderExpandUI();
+    const el = $('expand');
+    if (el) el.hidden = false;
+  }
+
+  function closeExpand() {
+    const el = $('expand');
+    if (el) el.hidden = true;
+  }
+
+  function expandOpen() {
+    const el = $('expand');
+    return !!el && !el.hidden;
+  }
+
+  /** 渲染扩图面板：比例、对齐、预览说明 */
+  function renderExpandUI() {
+    // 比例
+    const rc = $('expand-ratios');
+    if (rc) {
+      rc.innerHTML = '';
+      for (const r of C.EXPAND_RATIOS) {
+        const b = document.createElement('button');
+        b.className = 'chip' + (r.id === expand.ratio ? ' on' : '');
+        b.textContent = r.label;
+        b.title = r.zh;
+        b.onclick = () => { expand.ratio = r.id; renderExpandUI(); };
+        rc.appendChild(b);
+      }
+    }
+    // 对齐
+    const ac = $('expand-anchors');
+    if (ac) {
+      ac.innerHTML = '';
+      const anchors = [
+        { id: 'center', label: '居中' },
+        { id: 'left', label: '靠左' },
+        { id: 'right', label: '靠右' }
+      ];
+      for (const a of anchors) {
+        const b = document.createElement('button');
+        b.className = 'chip' + (a.id === expand.anchor ? ' on' : '');
+        b.textContent = a.label;
+        b.onclick = () => { expand.anchor = a.id; renderExpandUI(); };
+        ac.appendChild(b);
+      }
+    }
+
+    const p = C.planExpand({
+      imgW: S.docW, imgH: S.docH,
+      ratioId: expand.ratio, anchor: expand.anchor
+    });
+    const note = $('expand-ratio-note');
+    if (note) {
+      note.textContent = p.ok
+        ? (S.docW + '×' + S.docH + ' → ' + p.w + '×' + p.h + ' · ' + p.note)
+        : p.note;
+    }
+    const st = $('expand-status');
+    if (st) {
+      st.textContent = p.ok ? '' : p.note;
+      st.className = 'status' + (p.ok ? '' : ' warn');
+    }
+    const tip = $('expand-tip');
+    if (tip) {
+      tip.innerHTML = '扩图会调用一次模型（和普通生成一样的花费）。' +
+        '生成后先出<b>对比图</b>：左边原图、右边扩完的横版，满意才点「应用」。' +
+        '不满意可以放弃，<b>不扣第二次钱</b>。';
+    }
+    const go = $('expand-go');
+    if (go) {
+      go.disabled = !p.ok || expand.busy;
+      go.textContent = expand.busy ? '扩图中…' : '开始扩图';
+    }
+  }
+
+  /**
+   * 造「扩图画布」：原图原样贴在中间，两侧留出要补画的区域。
+   *
+   * 留白处刻意用**边缘像素往外拉**填满，而不是留透明或黑：
+   *   - 透明区域会被某些模型当成「没有内容」而自行发挥
+   *   - 黑边会被当成画面内容，补出来边上发黑
+   *   - 边缘延伸只是把边上的颜色继续往外，模型很容易顺着接
+   * 这段最终会被模型补画的内容覆盖，所以它只是「提示」，不影响成品。
+   */
+  function buildExpandCanvas(plan) {
+    const c = makeCanvas(plan.w, plan.h);
+    const cx = c.getContext('2d', { willReadFrequently: true });
+    // 先把原图贴到中间
+    cx.drawImage(S.docCanvas, 0, 0, S.docW, S.docH, plan.x, plan.y, S.docW, S.docH);
+    // 再往两侧延伸边缘像素
+    if (plan.padLeft > 0) {
+      cx.drawImage(S.docCanvas, 0, 0, 1, S.docH, 0, 0, plan.padLeft, S.docH);
+    }
+    if (plan.padRight > 0) {
+      cx.drawImage(S.docCanvas, S.docW - 1, 0, 1, S.docH,
+        plan.x + S.docW, 0, plan.padRight, S.docH);
+    }
+    return c;
+  }
+
+  /** 跑一次扩图 */
+  async function runExpand() {
+    if (expand.busy) return;
+    if (!S.docCanvas) { toast('先打开一张照片'); return; }
+    if (!S.cfg.apiKey) { toast('先去设置里填 API Key', 3000); return; }
+
+    const plan = C.planExpand({
+      imgW: S.docW, imgH: S.docH,
+      ratioId: expand.ratio, anchor: expand.anchor
+    });
+    if (!plan.ok) { toast(plan.note, 3200); return; }
+
+    const m = currentModelParams();
+    const kind = m ? m.kind : 'edit';
+    if (kind === 't2i') {
+      toast('当前模型不支持参考图，扩图需要能看原图的模型', 3600);
+      return;
+    }
+
+    ensureNotifyReady();
+    expand.busy = true;
+    renderExpandUI();
+    setBusy(true, '扩图中', '正在补画两侧 · 大约 30–60 秒');
+    const t0 = Date.now();
+    const callMeta = {
+      at: t0, provider: S.cfg.provider, model: S.cfg.model, kind: 'expand',
+      prompt: ('扩图 → ' + plan.ratioLabel).slice(0, 60),
+      promptLen: 0, transport: '', imageField: '', refCount: 0, refUsed: 0,
+      guideCount: 0, endpoint: '', status: 0, imgW: plan.w, imgH: plan.h,
+      bodyBytes: 0, workId: S.workId || ''
+    };
+
+    try {
+      // 1) 造扩图画布
+      const canvas = buildExpandCanvas(plan);
+      const dataUrl = canvasToDataUrl(canvas, 'image/jpeg', 0.94);
+      const lang = S.cfg.lang === 'en' ? 'en' : 'zh';
+      const prompt = C.buildExpandPrompt({
+        isZh: lang === 'zh',
+        ratioLabel: plan.ratioLabel,
+        userNote: String($('expand-note') ? $('expand-note').value : '').trim()
+      });
+
+      // 2) 出图尺寸：按扩图画布的比例挑模型支持的一档
+      const outSize = pickOutputSize({ w: plan.w, h: plan.h });
+
+      // 3) 组请求
+      const req = C.buildImageRequest({
+        baseUrl: S.cfg.baseUrl,
+        apiKey: S.cfg.apiKey,
+        provider: S.cfg.provider,
+        model: S.cfg.model,
+        prompt: prompt,
+        imageDataUrl: dataUrl,
+        imageField: m && m.imageField ? m.imageField : 'image',
+        sizeMode: m ? m.sizeMode : 'image_size',
+        size: outSize && outSize.size,
+        aspectRatio: outSize && outSize.aspect,
+        providerId: S.cfg.provider,
+        seed: S.cfg.seed,
+        // 必须声明成 edit：resolveEndpoint 只有看到 kind='edit' + 有图
+        // 才会走 images/edits。漏了它会退化成 generations，
+        // 图片字段被上游忽略，模型拿不到原图 —— 补出来和原图毫无关系。
+        kind: 'edit'
+      });
+
+      // multipart 类接口（OpenAI 系）要单独组包
+      let body = req;
+      // needsMultipart 收的是**端点**（不是模型名）：只有 OpenAI 系的
+      // images/edits 走表单上传，其余都是 JSON。
+      if (C.needsMultipart(req.endpoint)) {
+        const mp = C.buildMultipartBody({
+          model: S.cfg.model,
+          prompt: prompt,
+          imageDataUrl: dataUrl,
+          imageField: 'image',
+          size: outSize && outSize.size,
+          providerId: S.cfg.provider
+        });
+        body = Object.assign({}, req, { multipart: mp });
+      }
+
+      callMeta.transport = body.multipart ? 'multipart' : 'json';
+      callMeta.imageField = body.multipart ? 'image' : (req.body && req.body.image ? 'image' : '');
+      callMeta.endpoint = req.url;
+      callMeta.bodyBytes = body.multipart
+        ? (body.multipart.body && body.multipart.body.length) || 0
+        : JSON.stringify(req.body || {}).length;
+
+      const aborter = new AbortController();
+      S.expandAborter = aborter;
+      const json = await callModel(body, aborter);
+      const items = C.parseImageResponse(json);
+      if (!items.length) throw new Error('接口没有返回图片');
+      callMeta.status = 200;
+
+      let blob;
+      if (items[0].dataUrl) {
+        const r0 = await fetch(items[0].dataUrl);
+        blob = await r0.blob();
+      } else {
+        blob = await urlToBlob(items[0].url);
+      }
+      const gen = await blobToCanvas(blob);
+      recordCallLog(Object.assign({}, callMeta, {
+        ms: Date.now() - t0, ok: true, status: 200, error: '',
+        costUsd: estimateCallCost().usd, costNote: estimateCallCost().note
+      }));
+
+      // 4) 结果作为「新照片」打开：扩图改变了画布尺寸，
+      //    不能当成一个图层贴回（选区坐标系已经变了）。
+      const out = makeCanvas(plan.w, plan.h);
+      const ox = out.getContext('2d', { willReadFrequently: true });
+      ox.imageSmoothingEnabled = true;
+      ox.imageSmoothingQuality = 'high';
+      ox.drawImage(gen, 0, 0, gen.width, gen.height, 0, 0, plan.w, plan.h);
+
+      closeExpand();
+      const baseName = ($('file-name').textContent || 'photo.jpg').replace(/（已恢复）$/, '').replace(/\.\w+$/, '');
+      await openAsNewPhoto(out, baseName + '-扩图-' + plan.ratioLabel.replace(':', 'x') + '.jpg');
+      notifyGenDone('扩图完成，已打开横版照片');
+      toast('扩图完成：' + plan.w + '×' + plan.h + '（原图 ' + S.docW + '×' + S.docH + ' 已保留在记录里）', 4000);
+    } catch (err) {
+      if (err && err.name === 'AbortError') return;
+      recordCallLog(Object.assign({}, callMeta, {
+        ms: Date.now() - t0, ok: false,
+        status: err && err.status ? err.status : 0,
+        error: describeCallError(err)
+      }));
+      const why = (err && err.message) || '未知错误';
+      notifyGenDone('扩图失败：' + String(why).replace(/\s+/g, ' ').slice(0, 60));
+      showGenError(err, { kind: 'edit', model: S.cfg.model, baseUrl: S.cfg.baseUrl });
+    } finally {
+      S.expandAborter = null;
+      expand.busy = false;
+      setBusy(false);
+      renderExpandUI();
     }
   }
 
@@ -9147,6 +9407,10 @@
     $('hist-jump').onclick = commitHistoryJump;
     $('btn-library').onclick = () => { closeMoreMenu(); openLibrary(); };
     document.querySelectorAll('#library [data-close]').forEach((el) => { el.onclick = closeLibrary; });
+    // 扩图
+    if ($('btn-expand')) $('btn-expand').onclick = openExpand;
+    if ($('expand-go')) $('expand-go').onclick = runExpand;
+    document.querySelectorAll('#expand [data-close]').forEach((el) => { el.onclick = closeExpand; });
     $('btn-fit').onclick = fitToScreen;
     $('btn-reset-sel').onclick = () => {
       if (!S.docCanvas) return;
@@ -10289,6 +10553,11 @@
     longPressState: () => ({ active: longPressActive, timer: !!longPressTimer }),
     imageToScreen: (p) => C.imageRectToScreen({ x: p.x, y: p.y, w: 1, h: 1 }, S.view),
     openSettings, closeSettings, handleBack,
+    // 扩图（供测试与外部调用）
+    openExpand, closeExpand, expandOpen, renderExpandUI, runExpand,
+    buildExpandCanvas,
+    expandState: () => Object.assign({}, expand),
+    setExpandState: (o) => { Object.assign(expand, o || {}); renderExpandUI(); },
     bgState: () => C.normalizeBg(S.cfg.bg),
     resetBgCache: () => { bgImage = null; bgImageKey = ''; },
     lastRefNote: () => lastRefNote,

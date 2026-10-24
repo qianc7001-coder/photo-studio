@@ -4733,6 +4733,100 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
     /longPressActive = true;/.test(js) && /S\.gesture = null;/.test(js));
 })();
 
+/* ---------- 扩图：竖图补成横版 ---------- */
+/*
+ * 需求：竖着拍的照片想做成横版（视频封面、横屏展示）。
+ * 做法不是「让模型重画一张大的」（那样原图内容全变），而是：
+ * 造一块更大的画布 → 原图原样贴中间 → 两侧留白交给模型补画。
+ * 关键不变量：原图的每一像素都留在原来的位置，只有两侧被补。
+ */
+(() => {
+  // 1) 竖图扩成常见横版比例
+  const cases = [
+    { id: '3:2', w: 3, h: 2 },
+    { id: '16:9', w: 16, h: 9 },
+    { id: '4:3', w: 4, h: 3 },
+    { id: '1:1', w: 1, h: 1 }
+  ];
+  for (const c of cases) {
+    const p = C.planExpand({ imgW: 1080, imgH: 1440, ratioId: c.id });
+    t('★★ 竖图 1080×1440 能扩成 ' + c.id, p.ok === true, p.note);
+    if (p.ok) {
+      t('★★ ' + c.id + ' 扩完的比例正确',
+        Math.abs(p.w / p.h - c.w / c.h) < 0.01, [p.w, p.h, p.w / p.h]);
+      t('★★ ' + c.id + ' 高度不变（只往宽里加，不裁上下）',
+        p.h === 1440, p.h);
+      t('★★ ' + c.id + ' 原图完整放得下（没被裁）',
+        p.x >= 0 && p.x + 1080 <= p.w, [p.x, p.w]);
+      t('★ ' + c.id + ' 左右留白加起来等于加宽量',
+        p.padLeft + p.padRight === p.w - 1080, [p.padLeft, p.padRight, p.w]);
+    }
+  }
+
+  // 2) 居中 / 靠左 / 靠右
+  const mid = C.planExpand({ imgW: 1080, imgH: 1440, ratioId: '3:2', anchor: 'center' });
+  t('★★ 居中时左右等宽', mid.padLeft === mid.padRight, [mid.padLeft, mid.padRight]);
+  const lft = C.planExpand({ imgW: 1080, imgH: 1440, ratioId: '3:2', anchor: 'left' });
+  t('★★ 靠左时左边不扩', lft.padLeft === 0 && lft.padRight > 0, [lft.padLeft, lft.padRight]);
+  const rgt = C.planExpand({ imgW: 1080, imgH: 1440, ratioId: '3:2', anchor: 'right' });
+  t('★★ 靠右时右边不扩', rgt.padRight === 0 && rgt.padLeft > 0, [rgt.padLeft, rgt.padRight]);
+
+  // 3) 已经是横图 / 更宽：不该动
+  t('★★ 已经是 3:2 的横图不再扩',
+    C.planExpand({ imgW: 1920, imgH: 1080, ratioId: '3:2' }).ok === false);
+  t('★★ 更宽的图（21:9）也不该被「扩」成 3:2',
+    C.planExpand({ imgW: 2100, imgH: 900, ratioId: '3:2' }).ok === false);
+  t('★ 拒绝时给出原因（不是静默什么都不做）',
+    /不需要扩图/.test(C.planExpand({ imgW: 1920, imgH: 1080, ratioId: '3:2' }).note));
+  t('★ 没有照片时给出明确原因',
+    /先打开一张照片/.test(C.planExpand({ imgW: 0, imgH: 0 }).note));
+
+  // 4) 说明文字要如实反映左右各扩多少（居中/靠边不能混）
+  t('★ 居中时说明写「左右各扩」', /左右各扩/.test(mid.note), mid.note);
+  t('★ 靠左时说明写「只往右侧扩」', /只往右侧扩/.test(lft.note), lft.note);
+  t('★ 靠右时说明写「只往左侧扩」', /只往左侧扩/.test(rgt.note), rgt.note);
+  // 加宽超过一倍时提醒效果风险
+  const wide = C.planExpand({ imgW: 600, imgH: 1600, ratioId: '16:9' });
+  t('★ 补画面积远大于原图时给出提醒',
+    wide.ok === false || /不自然/.test(wide.note), wide.note);
+
+  // 5) 提示词必须把「不许改原图」说死
+  const zh = C.buildExpandPrompt({ isZh: true, ratioLabel: '3:2' });
+  t('★★ 中文提示词说明了目标比例', /3:2/.test(zh), zh.slice(0, 40));
+  t('★★★ 明确要求「只补两侧空白」', /只补左右两侧的空白/.test(zh));
+  t('★★★ 明确禁止改动原图内容', /原照片里的内容一个字都不许改/.test(zh));
+  t('★★ 要求光照/色温/透视一致',
+    /光照方向一致/.test(zh) && /色温一致/.test(zh) && /透视一致/.test(zh));
+  t('★★ 禁止新增主体/文字/水印', /不要新增主体、文字、水印/.test(zh));
+  t('★★ 禁止画边框接缝', /边框、暗角或看得见的接缝/.test(zh));
+  const en = C.buildExpandPrompt({ isZh: false, ratioLabel: '16:9' });
+  t('★★ 英文提示词同样禁止改动原图',
+    /Do NOT alter, move, resize, retouch or re-render/.test(en), en.slice(0, 80));
+  t('★ 额外要求能拼进去',
+    /墙面/.test(C.buildExpandPrompt({ isZh: true, ratioLabel: '3:2', userNote: '左侧补成同款墙面' })));
+
+  // 6) 比例表
+  t('★ 提供 4 档常见横版比例', C.EXPAND_RATIOS.length === 4,
+    C.EXPAND_RATIOS.map((r) => r.id));
+  t('★ 默认比例是 3:2', C.getExpandRatio('').id === '3:2');
+  t('★ 未知比例回退到默认', C.getExpandRatio('nope').id === '3:2');
+
+  // 7) 接线
+  const fsN5 = require('fs');
+  const js5 = fsN5.readFileSync(__dirname + '/../app/app.js', 'utf8');
+  const html5 = fsN5.readFileSync(__dirname + '/../app/index.html', 'utf8');
+  t('★★ 工具栏有扩图入口', /id="btn-expand"/.test(html5));
+  t('★★ 有扩图面板', /id="expand"/.test(html5) && /id="expand-go"/.test(html5));
+  t('★★ 扩图结果作为新照片打开（不贴回图层：坐标系已变）',
+    /openAsNewPhoto\(out,/.test(js5));
+  t('★★ 请求必须声明 kind=edit（否则退化成文生图，模型看不到原图）',
+    /kind: 'edit'/.test(js5));
+  t('★★ 留白用边缘像素延伸（不留透明/黑边）',
+    /function buildExpandCanvas/.test(js5) && /drawImage\(S\.docCanvas, 0, 0, 1, S\.docH/.test(js5));
+  t('★ 返回键能关掉扩图面板',
+    /id: 'expand'/.test(fsN5.readFileSync(__dirname + '/../app/core.js', 'utf8')));
+})();
+
 /* ---------- 竖拍照片的 EXIF 旋转：不能被压扁 ---------- */
 /*
  * 缺陷现象：导入手机竖拍的照片，画面直接被压扁（竖图变横图）。
