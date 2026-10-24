@@ -7749,6 +7749,56 @@ async function run() {
       doc.getElementById('file-name').textContent);
     t('★ 扩图面板已关闭', api.expandOpen() === false);
 
+    // ---- 关键：扩图必须用「修完的画面」，不能用原片 ----
+    //
+    // 踩过的坑：buildExpandCanvas 取的是 docCanvas（导入时的原图），
+    // 于是用户修了半天的结果（生成图层、调色）全被丢掉，
+    // 扩出来的是「原片 + 补边」—— 等于把之前的修图白做了。
+    {
+      api.goHome();
+      await sleep(150);
+      // 载入一张纯蓝的竖图，然后把它「修」成红色（模拟用户已经改过）
+      {
+        const c = napi.createCanvas(300, 400);
+        const x = c.getContext('2d');
+        x.fillStyle = 'rgb(20, 80, 200)';    // 原片：蓝
+        x.fillRect(0, 0, 300, 400);
+        const inp = doc.getElementById('file-input');
+        Object.defineProperty(inp, 'files', {
+          value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'edited.png', { type: 'image/png' })],
+          configurable: true
+        });
+        inp.dispatchEvent(new window.Event('change'));
+        await sleep(400);
+      }
+      t('★ 已载入原片（蓝）', S.docW === 300 && S.docH === 400);
+
+      // 直接在 viewCanvas 上画成红色 —— 这就是「修完的当前画面」
+      {
+        const vx = S.viewCanvas.getContext('2d');
+        vx.fillStyle = 'rgb(210, 40, 40)';   // 修完：红
+        vx.fillRect(0, 0, S.docW, S.docH);
+      }
+      // 确认两张画布确实不同（否则这条测试没意义）
+      {
+        const docPx = S.docCanvas.getContext('2d').getImageData(150, 200, 1, 1).data;
+        const viewPx = S.viewCanvas.getContext('2d').getImageData(150, 200, 1, 1).data;
+        t('★★ 前提成立：原片是蓝、当前画面是红',
+          docPx[2] > 140 && viewPx[0] > 140,
+          { doc: [docPx[0], docPx[2]], view: [viewPx[0], viewPx[2]] });
+      }
+
+      const plan2 = window.PSCore.planExpand({ imgW: 300, imgH: 400, ratioId: '3:2', anchor: 'center' });
+      const ec2 = api.buildExpandCanvas(plan2);
+      const ex2 = ec2.getContext('2d');
+      const mid2 = ex2.getImageData(300, 200, 1, 1).data;
+      t('★★★ 扩图画布用的是修完的画面（红），不是原片（蓝）',
+        mid2[0] > 140 && mid2[2] < 100, [mid2[0], mid2[1], mid2[2]]);
+      const pad2 = ex2.getImageData(30, 200, 1, 1).data;
+      t('★★ 留白延伸的也是修完画面的边缘（红）',
+        pad2[0] > 140 && pad2[2] < 100, [pad2[0], pad2[1], pad2[2]]);
+    }
+
     // ---- 关键补充：OpenAI（multipart 路径）也必须真的带上图 ----
     //
     // 这里守的是一个很隐蔽的坑：buildImageRequest 返回的对象曾经没有 endpoint，

@@ -4822,7 +4822,14 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('★★ 请求必须声明 kind=edit（否则退化成文生图，模型看不到原图）',
     /kind: 'edit'/.test(js5));
   t('★★ 留白用边缘像素延伸（不留透明/黑边）',
-    /function buildExpandCanvas/.test(js5) && /drawImage\(S\.docCanvas, 0, 0, 1, S\.docH/.test(js5));
+    /function buildExpandCanvas/.test(js5) && /drawImage\(src, 0, 0, 1, S\.docH/.test(js5));
+  // 扩图必须拿「修完的画面」去扩，不能拿原片 ——
+  // 否则用户之前所有的生成/调色都白做（扩出来是原片+补边）。
+  t('★★★ 扩图取的是 viewCanvas（当前修完的画面），不是 docCanvas（原片）',
+    /const src = S\.viewCanvas \|\| S\.docCanvas/.test(js5));
+  t('★★ 扩图面板与执行入口都判 viewCanvas（不判 docCanvas）',
+    /function openExpand\(\)[\s\S]{0,200}S\.viewCanvas/.test(js5) &&
+    /async function runExpand\(\)[\s\S]{0,200}S\.viewCanvas/.test(js5));
   t('★ 返回键能关掉扩图面板',
     /id: 'expand'/.test(fsN5.readFileSync(__dirname + '/../app/core.js', 'utf8')));
 })();

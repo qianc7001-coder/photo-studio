@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/qianc7001-coder/photo-studio/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-4650%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-4657%20passed-brightgreen.svg)](#测试)
 
 给摄影师用的**局部修图**工具：在照片上框选任意区域，交给生图模型修改，结果自动贴回原位置。
 
 **核心特点**：结果无缝融合，非破坏性可调，保留拍摄信息。
 
-> 最新版本 **v3.10.1** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
+> 最新版本 **v3.10.2** · [下载 APK](https://github.com/qianc7001-coder/photo-studio/releases/latest) · [更新日志](CHANGELOG.md)
 
 ---
 
@@ -301,7 +301,7 @@ node tools/migrate-test.js     # 配置迁移（模拟老用户升级路径）
 node tools/e2e-test.js         # 端到端（jsdom + 真实 canvas，逐像素校验）
 ```
 
-当前规模：**4650 项**（1777 单元 + 1495 回归 + 23 配置迁移 + 1356 端到端）。
+当前规模：**4657 项**（1779 单元 + 1495 回归 + 23 配置迁移 + 1360 端到端）。
 
 端到端测试会：
 - 启动一个假生图模型服务器
@@ -427,7 +427,8 @@ WebView 里用 `file://` 打开页面时，跨域请求会被拦截，而且 `lo
 
 | 版本 | 主要变化 |
 |---|---|
-| **v3.10.1** | 修复扩图报「模型没有收到照片」：请求组装的返回值漏了「接口端点」，导致判断表单/JSON 时恒为空值，OpenAI 系模型走了 JSON 路径、图片没按表单上传；顺带修了表单图片字段名写死的问题 |
+| **v3.10.2** | 修复扩图取错底图：之前拿导入时的原片，用户已修的图层和调色全被丢掉，扩出来是「原片+补边」；现在用当前修完的画面 |
+| [v3.10.1](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.10.1) | 修复扩图报「模型没有收到照片」：请求组装的返回值漏了「接口端点」，导致判断表单/JSON 时恒为空值，OpenAI 系模型走了 JSON 路径、图片没按表单上传；顺带修了表单图片字段名写死的问题 |
 | [v3.10.0](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.10.0) | 新增「扩图」：把竖图补成横版（3:2 / 16:9 / 4:3 / 1:1），原图原样贴中间、模型只补两侧，逐条写明不许改动原图内容；结果作为新照片打开 |
 | [v3.9.9](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.9.9) | 修复「导入手机竖拍照片直接被压扁」：竖拍 JPEG 像素是横的（4032×3024）+ EXIF 旋转标记，解码器会转正但算缩放用的是未转正尺寸，导致竖图被硬缩成横图；现在按旋转标记互换宽高 |
 | [v3.9.8](https://github.com/qianc7001-coder/photo-studio/releases/tag/v3.9.8) | 适配竖屏照片：3:4 竖图配模型 2:3 档位时，贴回要裁掉上下约 6%（选区内容被裁 17.4%）——现在发请求前按模型比例补齐请求图，实测裁切降到 0%；整张竖图用边缘像素外延，不补黑边 |

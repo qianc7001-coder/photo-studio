@@ -8070,7 +8070,10 @@
   const expand = { ratio: '3:2', anchor: 'center', note: '', busy: false };
 
   function openExpand() {
-    if (!S.docCanvas) { toast('先打开一张照片'); return; }
+    // 判 viewCanvas：扩图要的是「当前修完的画面」。
+    // 只判 docCanvas 的话，万一 viewCanvas 还没建好，
+    // 会进到面板然后扩出一张空图。
+    if (!S.viewCanvas) { toast('先打开一张照片'); return; }
     const p = C.planExpand({ imgW: S.docW, imgH: S.docH, ratioId: expand.ratio, anchor: expand.anchor });
     if (!p.ok && /不需要扩图/.test(p.note)) {
       // 已经是横图了：直接把原因说清楚，别让用户点进去发现没反应
@@ -8166,14 +8169,27 @@
   function buildExpandCanvas(plan) {
     const c = makeCanvas(plan.w, plan.h);
     const cx = c.getContext('2d', { willReadFrequently: true });
-    // 先把原图贴到中间
-    cx.drawImage(S.docCanvas, 0, 0, S.docW, S.docH, plan.x, plan.y, S.docW, S.docH);
-    // 再往两侧延伸边缘像素
+
+    // 用 **viewCanvas**（当前修完的画面），不是 docCanvas（原片）。
+    //
+    // 这里踩过一次：扩图取的是导入时那张原图，于是用户修了半天的结果
+    // （生成的图层、调色、去瑕疵）全被丢掉，扩出来的是「原片 + 补边」——
+    // 相当于把之前的修图白做了。
+    // 扩图是「在现在这张成片上继续往外补」，不是「拿底片重来」。
+    //
+    // docCanvas 只在「重建 viewCanvas」时用（见 rebuildViewCanvas），
+    // 任何面向用户输出的地方都该用 viewCanvas。
+    const src = S.viewCanvas || S.docCanvas;
+    if (!src) return c;
+
+    // 先把当前画面贴到中间
+    cx.drawImage(src, 0, 0, S.docW, S.docH, plan.x, plan.y, S.docW, S.docH);
+    // 再往两侧延伸边缘像素（同样取当前画面的最外一列）
     if (plan.padLeft > 0) {
-      cx.drawImage(S.docCanvas, 0, 0, 1, S.docH, 0, 0, plan.padLeft, S.docH);
+      cx.drawImage(src, 0, 0, 1, S.docH, 0, 0, plan.padLeft, S.docH);
     }
     if (plan.padRight > 0) {
-      cx.drawImage(S.docCanvas, S.docW - 1, 0, 1, S.docH,
+      cx.drawImage(src, S.docW - 1, 0, 1, S.docH,
         plan.x + S.docW, 0, plan.padRight, S.docH);
     }
     return c;
@@ -8182,7 +8198,7 @@
   /** 跑一次扩图 */
   async function runExpand() {
     if (expand.busy) return;
-    if (!S.docCanvas) { toast('先打开一张照片'); return; }
+    if (!S.viewCanvas) { toast('先打开一张照片'); return; }
     if (!S.cfg.apiKey) { toast('先去设置里填 API Key', 3000); return; }
 
     const plan = C.planExpand({
