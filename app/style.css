@@ -328,29 +328,53 @@ button:disabled { opacity: .38; cursor: default; }
 #toast.show { opacity: 1; transform: translate(-50%, 0); }
 
 /* 生成中 */
+/* 生成进度条：贴在画布顶部的一条，**不挡任何操作**。
+   以前是全屏遮罩，生成期间界面完全点不动，只能干等。 */
 #busy {
-  position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 50;
-  display: flex; align-items: center; justify-content: center;
-  background: var(--overlay);
-  backdrop-filter: blur(3px);
+  position: absolute;
+  left: 10px; right: 10px; top: 10px;
+  z-index: 50;
+  /* 关键：不接收点击，让它下面的画布/工具栏照常可用 */
+  pointer-events: none;
 }
 .busy-card {
-  text-align: center; padding: 26px 30px;
-  background: var(--panel); border: 1px solid var(--line);
-  border-radius: 16px; box-shadow: var(--sh);
-  min-width: 220px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px;
+  background: var(--chrome);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  box-shadow: var(--sh);
+  max-width: 100%;
 }
+/* 卡片本身要能点（取消按钮），但卡片外的空白不拦事件 */
+.busy-card { pointer-events: auto; }
 .spinner {
-  width: 34px; height: 34px; margin: 0 auto 14px;
-  border: 3px solid rgba(77, 163, 255, .2);
+  flex: 0 0 auto;
+  width: 16px; height: 16px;
+  border: 2px solid rgba(77, 163, 255, .2);
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: spin .9s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-.busy-title { font-weight: 600; font-size: 14.5px; }
-.busy-sub { font-size: 11.5px; color: var(--text-faint); margin-top: 5px; min-height: 16px; }
-.busy-card .ghost { margin-top: 16px; }
+.busy-text { flex: 1 1 auto; min-width: 0; text-align: left; }
+.busy-title {
+  font-weight: 600; font-size: 12.5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.busy-sub {
+  font-size: 10.5px; color: var(--text-faint); margin-top: 1px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.busy-card .ghost {
+  flex: 0 0 auto;
+  margin-top: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
 
 /* 悬浮控件 */
 #hud {
@@ -417,6 +441,80 @@ ul.whatsnew {
 ul.whatsnew li { margin-bottom: 5px; }
 
 /* ============================ 生成失败面板 ============================ */
+
+/* ---------- 应用内结果弹窗 ---------- */
+#result-popup {
+  position: fixed;
+  inset: 0;
+  z-index: 160;              /* 高于所有面板：结果出来时必须盖在最上面 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.rp-mask {
+  position: absolute;
+  inset: 0;
+  background: var(--scrim);
+}
+.rp-card {
+  position: relative;
+  width: 100%;
+  max-width: 340px;
+  padding: 20px 18px 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--sh);
+  text-align: center;
+  animation: rpIn .18s ease-out;
+}
+@keyframes rpIn {
+  from { opacity: 0; transform: scale(.94) translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+.rp-ico {
+  width: 46px; height: 46px;
+  margin: 0 auto 10px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(53, 208, 127, .15);
+  color: var(--ok);
+  font-size: 24px;
+  line-height: 1;
+}
+#result-popup.bad .rp-ico {
+  background: rgba(255, 90, 90, .15);
+  color: var(--bad);
+}
+.rp-title {
+  font-size: 15.5px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+.rp-body {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  word-break: break-word;
+  margin-bottom: 14px;
+}
+.rp-actions { display: flex; gap: 9px; }
+.rp-actions button { flex: 1 1 0; }
+.rp-actions .primary {
+  background: var(--accent);
+  color: #06121f;
+  font-weight: 600;
+  border-radius: var(--r-sm);
+  padding: 9px 12px;
+}
+.rp-actions .ghost {
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 9px 12px;
+  color: var(--text-dim);
+}
 
 #gen-error {
   position: absolute;

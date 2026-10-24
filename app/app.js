@@ -1061,13 +1061,30 @@
     } catch (e) { /* 不支持就算了，启动时读一次足够 */ }
   }
 
+  /**
+   * 生成状态。
+   *
+   * 关键改动：**不再用全屏遮罩挡住界面**。
+   *
+   * 以前生成一开始就盖一层「正在生成…」的遮罩，整个界面点不动 ——
+   * 用户只能干等 30~60 秒，想接着修下一张必须先等这一张完。
+   * 但任务本来就是异步的（请求在后台跑、结果自带归属），
+   * 挡住界面纯属自己给自己上锁。
+   *
+   * 现在改成：只在画布上方显示一条**细进度条**，不挡任何操作。
+   * 用户可以立刻换下一张照片、框选、甚至再发起一次生成。
+   */
   function setBusy(on, title, sub) {
     S.busy = on;
-    $('busy').hidden = !on;
-    if (title) $('busy-title').textContent = title;
-    $('busy-sub').textContent = sub || '';
-    // 有照片就能生成：没有框选时按整张图处理（见 effectiveRect）
-    $('btn-generate').disabled = on || !S.img || !S.docCanvas;
+    const bar = $('busy');
+    if (bar) bar.hidden = !on;
+    const t = $('busy-title');
+    if (t && title) t.textContent = title;
+    const s = $('busy-sub');
+    if (s) s.textContent = sub || '';
+    // 有照片就能生成：没有框选时按整张图处理（见 effectiveRect）。
+    // **不能因为「已有一个任务在跑」就禁用按钮** —— 用户就是要接着处理下一张。
+    $('btn-generate').disabled = !S.img || !S.docCanvas;
     // 生成状态变化直接驱动保活：这是「正在花钱」的时刻，最需要钉住进程
     syncKeepAlive();
   }
@@ -1149,10 +1166,94 @@
   }
 
   /** 生成完成：请原生发一条「好了」的通知，用户切走后也能知道 */
-  function notifyGenDone(text) {
+  /**
+   * 生成结果提示：应用内弹窗 + 系统通知。
+   *
+   * 为什么两个都要：
+   *   - **应用在前台**：系统通知只在顶部状态栏闪一下，用户正盯着画面根本不会注意。
+   *     直接在屏幕中央弹一个卡片，想不看见都难。
+   *   - **应用在后台**：页面不可见，弹窗看不见，只能靠系统通知。
+   *   - Android 13+ 没授权通知权限时系统会**静默丢弃**，所以前台必须有弹窗兜底。
+   *
+   * @param {string} text 提示文字
+   * @param {object} [opt] { ok:boolean, title:string, detail:string, onOpen:function }
+   */
+  function notifyGenDone(text, opt) {
+    const o = opt || {};
+    const msg = text || '生成完成，点开查看效果';
+    // 1) 系统通知（后台时靠它；前台时也发，用户切走还能看到）
     const b = bridge();
-    if (!b) return;
-    try { b.notifyDone(text || '生成完成，点开查看效果'); } catch (e) { /* ignore */ }
+    if (b) {
+      try { b.notifyDone(msg); } catch (e) { /* ignore */ }
+    }
+    // 2) 应用内弹窗：只要页面可见就弹
+    try {
+      if (!document.hidden) {
+        showResultPopup({
+          ok: o.ok !== false,
+          title: o.title || (o.ok === false ? '生成失败' : '生成完成'),
+          body: o.detail || msg,
+          onOpen: o.onOpen
+        });
+      }
+    } catch (e) { /* 弹窗失败不该影响主流程 */ }
+  }
+
+  /* ---------------- 应用内结果弹窗 ---------------- */
+
+  /** 当前弹窗的「去看看」回调 */
+  let resultPopupAction = null;
+  /** 自动关闭定时器 */
+  let resultPopupTimer = 0;
+
+  /**
+   * 弹一个结果卡片。
+   *
+   * 设计取舍：
+   *   - 成功时 **8 秒后自动关**（用户可能就在看画面，不需要额外点一下），
+   *     但失败时**不自动关** —— 失败信息需要用户主动读，自动消失等于没提示。
+   *   - 「去看看」只在有明确去处时显示（比如后台生成的那张照片），
+   *     否则只留「知道了」，避免点了没反应。
+   */
+  function showResultPopup(o) {
+    const opt = o || {};
+    const el = $('result-popup');
+    if (!el) return;
+    clearTimeout(resultPopupTimer);
+
+    el.className = opt.ok === false ? 'bad' : '';
+    const ico = $('rp-ico');
+    if (ico) ico.textContent = opt.ok === false ? '!' : '✓';
+    const title = $('rp-title');
+    if (title) title.textContent = opt.title || (opt.ok === false ? '生成失败' : '生成完成');
+    const body = $('rp-body');
+    if (body) body.textContent = opt.body || '';
+
+    resultPopupAction = typeof opt.onOpen === 'function' ? opt.onOpen : null;
+    const openBtn = $('rp-open');
+    if (openBtn) {
+      openBtn.hidden = !resultPopupAction;
+      openBtn.textContent = opt.openLabel || '去看看';
+    }
+    el.hidden = false;
+
+    // 成功才自动关；失败留着让用户看清原因
+    if (opt.ok !== false && !resultPopupAction) {
+      resultPopupTimer = setTimeout(() => { closeResultPopup(); }, 8000);
+    }
+  }
+
+  function closeResultPopup() {
+    clearTimeout(resultPopupTimer);
+    resultPopupTimer = 0;
+    const el = $('result-popup');
+    if (el) el.hidden = true;
+    resultPopupAction = null;
+  }
+
+  function resultPopupOpen() {
+    const el = $('result-popup');
+    return !!el && !el.hidden;
   }
 
   /**
@@ -1433,13 +1534,18 @@
     // 兜底：万一某条路径还是给出了超大位图，这里强制按工作尺寸绘制，
     // 绝不把全尺寸图塞进 canvas（否则仍然会 OOM）
     const hardMax = 8192;
-    // 换图时**只中止当前这张照片的任务**，其它照片的后台任务继续跑。
-    // 这是「一张图进 AI 生图后可以放在后台处理下一张」的核心：
-    // 旧实现无条件 abort 全局请求，等于换图就把上一张的钱白花了。
-    // 当前这张的请求必须中止 —— 它的结果已经无处可落（文档被卸载了），
-    // 而且留着会让它跑完才发现白干。
-    cancelJobsForCurrentDoc('换图');
-    S.genToken++;                 // 让旧请求的后续步骤全部失效
+    // 换图时**不中止任何任务** —— 包括刚离开的这一张。
+    //
+    // 以前这里会 cancelJobsForCurrentDoc('换图')，理由是「结果无处可落」。
+    // 但现在结果有去处了：planJobLanding 会把「用户在别处」的结果
+    // 存进那件作品的记录里（library 路径），回来就能贴回。
+    // 所以取消它反而是在扔掉用户已经花钱的请求 ——
+    // 而且直接和「可以接着处理下一张」这个功能冲突：
+    // 用户点了生成、立刻换下一张，第一张就被悄悄取消了。
+    //
+    // 这里只做「当前文档的后续 UI 回调失效」这件事（见下面 genToken++），
+    // 请求本身继续跑完，结果落进作品库。
+    S.genToken++;                 // 让旧请求的 UI 回调失效（结果仍会落库）
     S.pending = null;
     const cmpEl = $('compare');
     if (cmpEl) cmpEl.hidden = true;   // 否则对比面板会残留旧图，且 Esc/应用都关不掉
@@ -3977,8 +4083,32 @@
   }
 
   /** 主流程入口：先做预检，再执行生成 */
+  /** 上次发起生成的时间（用于挡住连点；不是永久锁） */
+  let genLastAt = 0;
+  /** 上次发起时所在的文档版本（去重只在同一张照片上生效） */
+  let genLastDocVersion = -1;
+
   async function generate() {
-    if (S.busy) { toast('正在生成，请稍候'); return; }   // 防重复点击
+    // **不再因为「已有任务在跑」而拒绝**。
+    //
+    // 以前这里有一道 `if (S.busy) return`，于是同一时间只能跑一个任务，
+    // 用户必须等上一张完成才能发起下一张 —— 而任务本来就是异步的、
+    // 结果也自带归属，完全可以并行。
+    //
+    // 但「连点两下」必须挡住：那是同一次意图，发两次就是白扣一次钱。
+    // 用短时间去重（不是永久锁）：手指连点的间隔通常 <600ms，
+    // 而真的想再生成一次的人不会在半秒内完成选图/写提示词。
+    // 去重只针对「同一张照片、极短时间内的连点」：
+    //   - 换到别的照片再发起 → 必须允许（这正是「处理下一张」）
+    //   - 同一张但隔了一会儿   → 必须允许（用户就是想再生成一版）
+    //
+    // 实现上用「距上次发起 <400ms 且仍是同一份文档」。
+    // 注意这不是「生成中禁止再点」——那个限制已经删掉了。
+    const now = Date.now();
+    if (genLastAt && now - genLastAt < 400 && genLastDocVersion === S.docVersion) {
+      toast('刚刚已经发起了，不用再点', 2000);
+      return;
+    }
     if (!S.img) { toast('先打开一张照片'); return; }
     // 没有框选 = 整张图（见 effectiveRect），不再要求用户先框选
     if (!effectiveRect()) { toast('先打开一张照片'); return; }
@@ -4019,6 +4149,9 @@
     if (S._dbg) S._dbg.gen = { est: est && { usd: est.totalUsd, known: est.known } };
     if (!confirmCostIfNeeded(est)) { if (S._dbg) S._dbg.gen.blocked = 'cost'; return; }
 
+    // 到这里才算真的发起：记下时间和文档版本，挡住随后的连点
+    genLastAt = Date.now();
+    genLastDocVersion = S.docVersion;
     return runGenerate();
   }
 
@@ -4434,8 +4567,10 @@
     clearErrorPanel();
     refreshJobsUI();
 
-    // 立刻告诉用户「可以走，结果不会丢」——这是这个功能存在的意义
-    toast('已开始生成 · 可以切到别的照片，好了会通知你', 3600);
+    // 立刻告诉用户「可以走，结果不会丢」——这是这个功能存在的意义。
+    // 明确写出「可以接着修下一张」：这是用户最想知道的那句话，
+    // 不写清楚的话他会以为还得等这一张跑完。
+    toast('已开始生成 · 现在就能修下一张，好了会通知你', 4000);
 
     try {
       const r = await runJob(job);
@@ -4476,7 +4611,11 @@
         // 只写「生成失败」等于让用户回到应用再猜一遍为什么。
         // 原因做截断（通知栏只有一行可见），完整信息仍在错误面板里。
         const why = (err && (err.message || (err.json && err.json.error && err.json.error.message))) || '未知错误';
-        notifyGenDone('生成失败：' + String(why).replace(/\s+/g, ' ').slice(0, 60));
+        notifyGenDone('生成失败：' + String(why).replace(/\s+/g, ' ').slice(0, 60), {
+          ok: false,
+          title: '生成失败',
+          detail: String(why).replace(/\s+/g, ' ').slice(0, 200)
+        });
         console.error('[枫叶修图] 生成失败', err);
       }
       pruneJobs();
@@ -4518,7 +4657,11 @@
       refreshJobsUI();
       // 生成完就发通知 —— 不再只在「切走了」时才发。
       // 用户可能在应用里做别的事（看历史、改设置），系统通知能让他不盯屏幕也知道好了。
-      notifyGenDone('生成完成，点开对比效果');
+      notifyGenDone('生成完成，点开对比效果', {
+        ok: true,
+        title: '生成完成',
+        detail: '拖动中间竖线可以对比修改前后。满意就点「应用」，不满意点「放弃」不花第二次钱。'
+      });
       if (job.upscale && job.upscale.scale > 1.05) {
         toast('生成完成（选区较小，已放大 ' + job.upscale.scale.toFixed(1) +
           ' 倍发送，贴回时按原分辨率还原）', 3600);
@@ -4533,7 +4676,13 @@
       const ok = stashJobResult(job, r);
       if (ok) {
         job.seen = false;
-        notifyGenDone('后台生成完成，回到那张照片即可贴回');
+        notifyGenDone('后台生成完成，回到那张照片即可贴回', {
+          ok: true,
+          title: '后台生成完成',
+          detail: '回到「' + (job.workName || '那张照片') + '」就能把结果贴回。',
+          openLabel: '回首页看看',
+          onOpen: () => { try { goHome(); openLibrary(); } catch (e) { /* ignore */ } }
+        });
         toast('后台生成完成 · 回到「' + (job.workName || '那张照片') + '」就能贴回', 4200);
       } else {
         job.status = 'failed';
@@ -6345,7 +6494,8 @@
         calllog: !!$('calllog') && !$('calllog').hidden,
         tutorial: tutorialOpen(),
         compare: !!$('compare') && !$('compare').hidden,
-        genError: !!$('gen-error') && !$('gen-error').hidden
+        genError: !!$('gen-error') && !$('gen-error').hidden,
+        resultPopup: resultPopupOpen()
       };
       const plan = C.planBackAction({
         open, busy: !!S.busy, mode: S.mode, editing: !!S.img
@@ -6360,6 +6510,7 @@
             case 'settings': closeSettings(); break;
             case 't2i': closeT2i(); break;
             case 'expand': closeExpand(); break;
+            case 'resultPopup': closeResultPopup(); break;
             case 'library': closeLibrary(); break;
             case 'history': closeHistory(); break;
             case 'layers': closeLayers(); break;
@@ -6375,9 +6526,20 @@
         case 'cancel-gen':
           // 只取消**当前这张照片**的任务。别的照片的后台任务不该被牵连 ——
           // 用户按返回键是想离开这一张，不是想放弃所有在跑的生成。
-          cancelJobsForCurrentDoc('返回键');
-          setBusy(false);
-          toast('已取消生成');
+          //
+          // 但现在「生成中按返回」不该直接取消：任务本来就是后台跑的，
+          // 用户按返回多半是想「回去干别的」，不是想放弃这次花钱的请求。
+          // 所以改成：**先按「离开这张照片」处理**（回首页），
+          // 任务继续跑，结果落进作品记录 —— 这与点「取消这张」按钮区分开，
+          // 那个按钮才是真的放弃。
+          {
+            const hadEdits = S.edits.length > 0;
+            const saved = hadEdits ? forceSaveNow({ silent: true }) : { ok: true, why: '' };
+            goHome();
+            toast(saved.ok
+              ? '生成继续在后台跑，好了会通知你'
+              : ('生成继续在后台跑（本次修改没能存住：' + (saved.why || '未知') + '）'), 3600);
+          }
           break;
         case 'mode':
           S.mode = 'select';
@@ -7728,7 +7890,11 @@
     // 生成按钮。
     // 有照片就能生成：没有框选时按整张图处理（见 effectiveRect），
     // 所以这里的判断从「必须有合法选区」放宽成「必须有照片」。
-    const canGen = !!S.img && !!S.docCanvas && !S.busy;
+    //
+    // **不再带 !S.busy**：任务在后台跑的时候，用户照样可以
+    // 接着框下一张、再发起一次生成。以前这里禁用了按钮，
+    // 等于把「处理下一张」这条路堵死。
+    const canGen = !!S.img && !!S.docCanvas;
     $('btn-generate').disabled = !canGen;
     const m = C.findModel(S.cfg.provider, S.cfg.model);
     const dev = aspectDevPct();
@@ -8045,7 +8211,11 @@
       await openAsNewPhoto(gen, '文生图-' + Date.now().toString(36) + '.jpg');
       // 文生图同样要发通知：它比修图更慢（十几秒起步），
       // 用户很可能趁这段时间切出去看别的。
-      notifyGenDone('文生图完成，共生成 1 张');
+      notifyGenDone('文生图完成，共生成 1 张', {
+        ok: true,
+        title: '文生图完成',
+        detail: '已作为新照片打开，可以继续框选精修。'
+      });
       toast('已生成新照片，可以继续框选精修', 3000);
     } catch (err) {
       if (err && err.name === 'AbortError') return;
@@ -8056,7 +8226,11 @@
         error: describeCallError(err), workId: ''
       });
       const why = (err && err.message) || '未知错误';
-      notifyGenDone('文生图失败：' + String(why).replace(/\s+/g, ' ').slice(0, 60));
+      notifyGenDone('文生图失败：' + String(why).replace(/\s+/g, ' ').slice(0, 60), {
+        ok: false,
+        title: '文生图失败',
+        detail: String(why).replace(/\s+/g, ' ').slice(0, 200)
+      });
       showGenError(err, { kind: 't2i', model: S.cfg.model, baseUrl: S.cfg.baseUrl });
     } finally {
       S.t2iAborter = null;
@@ -8329,7 +8503,11 @@
       closeExpand();
       const baseName = ($('file-name').textContent || 'photo.jpg').replace(/（已恢复）$/, '').replace(/\.\w+$/, '');
       await openAsNewPhoto(out, baseName + '-扩图-' + plan.ratioLabel.replace(':', 'x') + '.jpg');
-      notifyGenDone('扩图完成，已打开横版照片');
+      notifyGenDone('扩图完成，已打开横版照片', {
+        ok: true,
+        title: '扩图完成',
+        detail: '已打开 ' + plan.w + '×' + plan.h + ' 的横版照片。原图仍完整留在修图记录里。'
+      });
       toast('扩图完成：' + plan.w + '×' + plan.h + '（原图 ' + S.docW + '×' + S.docH + ' 已保留在记录里）', 4000);
     } catch (err) {
       if (err && err.name === 'AbortError') return;
@@ -8339,7 +8517,11 @@
         error: describeCallError(err)
       }));
       const why = (err && err.message) || '未知错误';
-      notifyGenDone('扩图失败：' + String(why).replace(/\s+/g, ' ').slice(0, 60));
+      notifyGenDone('扩图失败：' + String(why).replace(/\s+/g, ' ').slice(0, 60), {
+        ok: false,
+        title: '扩图失败',
+        detail: String(why).replace(/\s+/g, ' ').slice(0, 200)
+      });
       showGenError(err, { kind: 'edit', model: S.cfg.model, baseUrl: S.cfg.baseUrl });
     } finally {
       S.expandAborter = null;
@@ -9437,6 +9619,18 @@
     $('hist-jump').onclick = commitHistoryJump;
     $('btn-library').onclick = () => { closeMoreMenu(); openLibrary(); };
     document.querySelectorAll('#library [data-close]').forEach((el) => { el.onclick = closeLibrary; });
+    // 结果弹窗
+    document.querySelectorAll('#result-popup [data-rp-close]').forEach((el) => {
+      el.onclick = closeResultPopup;
+    });
+    if ($('rp-open')) {
+      $('rp-open').onclick = () => {
+        const fn = resultPopupAction;
+        closeResultPopup();
+        if (fn) { try { fn(); } catch (e) { /* ignore */ } }
+      };
+    }
+
     // 扩图
     if ($('btn-expand')) $('btn-expand').onclick = openExpand;
     if ($('expand-go')) $('expand-go').onclick = runExpand;
@@ -10552,6 +10746,8 @@
     keepAliveSupported,
     updateKeepAliveUI,
     notifyGenDone,
+    // 结果弹窗（供测试与外部调用）
+    showResultPopup, closeResultPopup, resultPopupOpen,
     applyCompat,
     compat: () => S.compat,
     // 检查更新（供测试与外部调用）
@@ -10587,6 +10783,8 @@
     openExpand, closeExpand, expandOpen, renderExpandUI, runExpand,
     buildExpandCanvas,
     expandState: () => Object.assign({}, expand),
+    // 重置「防连点」窗口（供测试用：连续用例之间不该互相挡住）
+    resetGenDebounce: () => { genLastAt = 0; genLastDocVersion = -1; },
     setExpandState: (o) => { Object.assign(expand, o || {}); renderExpandUI(); },
     bgState: () => C.normalizeBg(S.cfg.bg),
     resetBgCache: () => { bgImage = null; bgImageKey = ''; },

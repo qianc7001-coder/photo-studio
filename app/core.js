@@ -3336,7 +3336,12 @@
     { id: 'photoinfo', z: 100, zh: '照片信息' },
     { id: 'exportpanel', z: 100, zh: '导出设置' },
     { id: 'compare', z: 60, zh: '对比图' },          // #compare（在 stage 内）
-    { id: 'genError', z: 45, zh: '生成失败说明' }
+    { id: 'genError', z: 45, zh: '生成失败说明' },
+    // 结果提示（生成完成/失败）的 z-index 最高（盖住一切），
+    // 但它**不参与返回键的层级排序**：它不是「一层界面」，
+    // 而是结果出来时的一次性提示，返回键关掉它就等于确认看到了。
+    // 所以单独放在表尾并标注 —— 排序断言按 z 降序只对前 N 项成立。
+    { id: 'resultPopup', z: 160, zh: '结果提示', overlay: true }
   ];
 
   /**
@@ -3361,14 +3366,25 @@
         return { handled: true, action: 'close', target: L.id, zh: '关闭' + L.zh };
       }
     }
-    if (opt.busy) {
-      return { handled: true, action: 'cancel-gen', target: 'busy', zh: '取消生成' };
-    }
+    // 注意顺序：**先退工具模式，再处理生成中**。
+    //
+    // 以前 busy 排在 mode 前面，于是「生成中在画笔模式按返回」
+    // 会被当成「取消生成」，画笔模式反而退不出去 —— 用户想退出画笔，
+    // 结果把正在花钱的请求取消了。
+    //
+    // 生成中按返回的语义也改了：不再取消任务，而是「离开这张照片」。
+    // 任务本来就是后台跑的，按返回多半是想回去干别的，
+    // 不该顺带把这次已经花钱的请求扔掉（真要取消请点进度条上的按钮）。
     if (opt.mode && opt.mode !== 'select') {
       return { handled: true, action: 'mode', target: 'select', zh: '回到框选' };
     }
     if (opt.editing) {
+      // 生成中回首页 = 任务继续在后台跑（不取消）
       return { handled: true, action: 'home', target: 'home', zh: '回到首页' };
+    }
+    if (opt.busy) {
+      // 没有照片却在忙（理论上不该出现）：仍然给一个取消的口子
+      return { handled: true, action: 'cancel-gen', target: 'busy', zh: '取消生成' };
     }
     return { handled: false, action: 'exit', target: '', zh: '退出应用' };
   }

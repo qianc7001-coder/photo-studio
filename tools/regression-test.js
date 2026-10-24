@@ -3104,8 +3104,11 @@ console.log('\n【返回】按一下返回键不能直接退出应用');
   t('安卓侧 null 也放行', /value == null \|\| value\.indexOf\("true"\) < 0/.test(javaSrc));
 
   /* 顺序正确性：必须与 z-index 一致 */
-  t('层级顺序与 z-index 一致',
-    C.BACK_LAYERS.every((L, i) => i === 0 || C.BACK_LAYERS[i - 1].z >= L.z));
+  // 结果提示（overlay）的 z 最高但留在表尾，不参与面板层级排序
+  t('层级顺序与 z-index 一致（不含 overlay 提示）', (() => {
+    const list = C.BACK_LAYERS.filter((L) => !L.overlay);
+    return list.every((L, i) => i === 0 || list[i - 1].z >= L.z);
+  })());
   t('关闭最上层（不是最下层）', (() => {
     const r = C.planBackAction({ open: { settings: true, workPreview: true } });
     return r.target === 'workPreview';
@@ -3123,9 +3126,12 @@ console.log('\n【返回】按一下返回键不能直接退出应用');
       if (r.action === 'close') st = Object.assign({}, st, { open: {} });
       else if (r.action === 'cancel-gen') st = Object.assign({}, st, { busy: false });
       else if (r.action === 'mode') st = Object.assign({}, st, { mode: 'select' });
-      else if (r.action === 'home') st = Object.assign({}, st, { editing: false });
+      else if (r.action === 'home') st = Object.assign({}, st, { editing: false, busy: false });
     }
-    return JSON.stringify(seq) === JSON.stringify(['close', 'cancel-gen', 'mode', 'home', 'exit']);
+    // 新的顺序：浮层 → 工具模式 → 回首页 → 退出。
+    // 「生成中」不再是单独一级（任务在后台跑，按返回就是离开这张照片），
+    // 这样「生成中在画笔模式按返回」才不会把正在花钱的请求顺手取消掉。
+    return JSON.stringify(seq) === JSON.stringify(['close', 'mode', 'home', 'exit']);
   })(), (() => {
     let st = { open: { settings: true }, busy: true, mode: 'brush', editing: true };
     const seq = [];
@@ -3447,12 +3453,21 @@ console.log('\n【后台生成】一张图进 AI 生图后，可以放到后台�
   t('有「只取消当前文档任务」的函数', /function cancelJobsForCurrentDoc\(/.test(appSrc));
   t('取消时按 docVersion 过滤',
     /function cancelJobsForCurrentDoc[\s\S]{0,700}j\.docVersion !== docVer/.test(appSrc));
-  t('换图会取消当前文档的任务',
-    /function setImage[\s\S]{0,700}cancelJobsForCurrentDoc\(/.test(appSrc));
+  // 行为已改：换图**不取消**任务（结果会落进作品记录，回来能贴回）。
+  // 取消它等于扔掉用户已经花钱的请求，也和「处理下一张」冲突。
+  // 断言「没有真的调用」：注释里提到旧代码是正常的，要排除注释行。
+  t('★★ 换图不取消任务（钱不白花）', (() => {
+    const body = appSrc.slice(appSrc.indexOf('function setImage'),
+      appSrc.indexOf('function setImage') + 1400);
+    const code = body.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+    return code.indexOf('cancelJobsForCurrentDoc(') < 0;
+  })());
   t('恢复作品会取消当前文档的任务',
     /async function restoreSession[\s\S]{0,900}cancelJobsForCurrentDoc\(/.test(appSrc));
-  t('返回键取消当前文档的任务',
-    /case 'cancel-gen':[\s\S]{0,300}cancelJobsForCurrentDoc\(/.test(appSrc));
+  // 行为已改：生成中按返回 = 回首页、任务继续跑（不再取消）。
+  // 真正取消的入口是进度条上的「取消这张」。
+  t('★★ 生成中按返回不取消任务（任务继续在后台跑）',
+    /case 'cancel-gen':[\s\S]{0,800}生成继续在后台跑/.test(appSrc));
   t('取消按钮取消当前文档的任务',
     /\$\('btn-cancel'\)\.onclick[\s\S]{0,150}cancelJobsForCurrentDoc\(/.test(appSrc));
   // 关键：取消不能牵连别的照片的任务（那是用户已经花的钱）
@@ -3519,8 +3534,9 @@ console.log('\n【后台生成】一张图进 AI 生图后，可以放到后台�
     /w\.bgResult && !jt[\s\S]{0,200}有生成结果待贴回/.test(appSrc));
   t('状态标有样式区分', /\.home-tag\.job-done/.test(css) && /\.home-tag\.job-running/.test(css));
   // 发起时明确告知「可以走」——这是这个功能存在的意义
-  t('发起后提示可以切到别的照片',
-    /已开始生成 · 可以切到别的照片，好了会通知你/.test(appSrc));
+  // 文案更新成更明确的「现在就能修下一张」
+  t('发起后提示可以接着处理下一张',
+    /已开始生成 · 现在就能修下一张/.test(appSrc));
   t('后台完成时发原生通知', /notifyGenDone\('后台生成完成/.test(appSrc));
 
   /* ---------- 5) 任务表不落盘（应用被杀时请求也断了） ---------- */
@@ -3554,7 +3570,7 @@ console.log('\n【后台生成】一张图进 AI 生图后，可以放到后台�
   t('失败通知原因做了截断（通知栏只有一行）',
     /slice\(0, 60\)/.test(appSrc.slice(appSrc.indexOf("notifyGenDone('生成失败：'"), appSrc.indexOf("notifyGenDone('生成失败：'") + 200)));
   // 成功也一样：不再依赖 document.hidden
-  t('成功也一定发通知', /notifyGenDone\('生成完成，点开对比效果'\);/.test(appSrc));
+  t('成功也一定发通知', /notifyGenDone\('生成完成，点开对比效果'/.test(appSrc));
   t('成功通知不再被 document.hidden 卡着',
     !/document\.hidden\) notifyGenDone\('生成完成/.test(appSrc));
 

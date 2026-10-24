@@ -588,8 +588,11 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('浏览器里没有桥时不报错（bridge 判空）', /function bridge\(\)[\s\S]{0,200}PSBridge[\s\S]{0,200}null/.test(appSrc2));
   // 通知改成了「无条件发送」：不再只在切走时发。
   // 用户在应用里做别的事（看历史、改设置）时，系统通知同样有用。
+  // 现在通知带第二参数（应用内弹窗用），断言匹配到参数开始即可
   t('生成完成就发通知（不依赖是否切走）',
-    /notifyGenDone\('生成完成，点开对比效果'\);/.test(appSrc2));
+    /notifyGenDone\('生成完成，点开对比效果'/.test(appSrc2));
+  t('★★ 前台还额外弹应用内卡片（系统通知容易被忽略）',
+    /function notifyGenDone\(text, opt\)[\s\S]{0,600}showResultPopup/.test(appSrc2));
   t('生成失败也发通知（不依赖是否切走）',
     /notifyGenDone\('生成失败：'\s*\+/.test(appSrc2));
   t('失败通知带上具体原因（不是笼统一句）',
@@ -1161,15 +1164,22 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('更多菜单次之（必须盖住所有面板，否则点不到）',
     C.BACK_LAYERS[1].id === 'moremenu', C.BACK_LAYERS[1].id);
   t('作品预览排第三', C.BACK_LAYERS[2].id === 'workPreview', C.BACK_LAYERS[2].id);
-  t('层级表按 z-index 降序',
-    C.BACK_LAYERS.every((L, i) => i === 0 || C.BACK_LAYERS[i - 1].z >= L.z),
-    C.BACK_LAYERS.map((L) => L.id + ':' + L.z));
+  // 结果提示（resultPopup）标了 overlay:true：它的 z 最高但要留在表尾
+  // （不是「一层界面」，是结果出来时的一次性提示）。
+  // 排序断言只针对**非 overlay** 的层级。
+  t('层级表按 z-index 降序（不含 overlay 提示）', (() => {
+    const list = C.BACK_LAYERS.filter((L) => !L.overlay);
+    return list.every((L, i) => i === 0 || list[i - 1].z >= L.z);
+  })(), C.BACK_LAYERS.map((L) => L.id + ':' + L.z));
   t('对比图排在浮层之后', (() => {
     const ci = C.BACK_LAYERS.findIndex((L) => L.id === 'compare');
     const si = C.BACK_LAYERS.findIndex((L) => L.id === 'settings');
     return ci > si;
   })());
-  t('生成失败说明在最后', C.BACK_LAYERS[C.BACK_LAYERS.length - 1].id === 'genError');
+  t('生成失败说明在最后（不含 overlay 提示）', (() => {
+    const list = C.BACK_LAYERS.filter((L) => !L.overlay);
+    return list[list.length - 1].id === 'genError';
+  })(), C.BACK_LAYERS.map((L) => L.id));
   t('每个层级都有中文名（用于提示）', C.BACK_LAYERS.every((L) => !!L.zh));
 
   /* ---------- 规划逻辑 ---------- */
@@ -1190,10 +1200,16 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('对比图优先于失败说明', P({ open: { compare: true, genError: true } }).target === 'compare');
   t('浮层优先于取消生成', P({ open: { settings: true }, busy: true }).action === 'close');
 
-  // 生成中
-  t('生成中 → 取消生成', P({ busy: true }).action === 'cancel-gen');
-  t('取消生成优先于模式切换', P({ busy: true, mode: 'brush' }).action === 'cancel-gen');
-  t('取消生成优先于回首页', P({ busy: true, editing: true }).action === 'cancel-gen');
+  // 生成中 —— 行为已改：
+  //   任务本来就是后台跑的，生成中按返回 = 「离开这张照片」，任务继续跑。
+  //   只有「没有照片却还在忙」这种异常态才给取消的口子。
+  t('★★ 生成中（有照片）→ 回首页，不取消任务',
+    P({ busy: true, editing: true }).action === 'home',
+    P({ busy: true, editing: true }).action);
+  t('★★★ 生成中 + 画笔模式 → 先退工具模式（不能顺手取消掉正在花钱的请求）',
+    P({ busy: true, mode: 'brush' }).action === 'mode',
+    P({ busy: true, mode: 'brush' }).action);
+  t('★ 没有照片却还在忙 → 仍然可以取消', P({ busy: true }).action === 'cancel-gen');
 
   // 工具模式
   t('画笔模式 → 退回框选', P({ mode: 'brush' }).action === 'mode');
@@ -1206,12 +1222,15 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('编辑中 → 回首页', P({ editing: true }).action === 'home');
   t('回首页带中文说明', /首页/.test(P({ editing: true }).zh), P({ editing: true }).zh);
 
-  // 优先级整体：浮层 > 生成 > 模式 > 编辑 > 退出
+  // 优先级整体：浮层 > 模式 > 编辑（回首页）> 退出
+  //
+  // 「生成中」不再是单独一级：任务在后台跑，按返回就是离开这张照片。
+  // 放在模式之后，是为了避免「生成中在画笔模式按返回」被当成取消生成。
   t('完整优先级链', (() => {
     const full = { open: { settings: true }, busy: true, mode: 'brush', editing: true };
     if (P(full).action !== 'close') return false;
-    if (P({ busy: true, mode: 'brush', editing: true }).action !== 'cancel-gen') return false;
-    if (P({ mode: 'brush', editing: true }).action !== 'mode') return false;
+    if (P({ busy: true, mode: 'brush', editing: true }).action !== 'mode') return false;
+    if (P({ busy: true, editing: true }).action !== 'home') return false;
     if (P({ editing: true }).action !== 'home') return false;
     return P({}).action === 'exit';
   })());
@@ -1235,8 +1254,14 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   })());
   // 取消生成：现在按「当前这张照片的任务」取消，不再用全局 aborter
   // （别的照片的后台任务必须继续跑，否则用户已经花的钱就白扔了）
-  t('生成中取消走任务取消（只取消当前这张）',
-    /case 'cancel-gen':[\s\S]{0,300}cancelJobsForCurrentDoc\(/.test(appSrc));
+  // 取消仍然只针对「当前这张」（别的照片的任务不能受牵连）。
+  // 但生成中按返回已经**不走这条**了 —— 那条路改成「回首页，任务继续」。
+  // 返回键的 cancel-gen 分支现在做的是「回首页，任务继续」；
+  // 真正取消的入口是进度条上的「取消这张」按钮。
+  t('★★ 生成中按返回不取消任务（回首页，任务继续跑）',
+    /case 'cancel-gen':[\s\S]{0,800}生成继续在后台跑/.test(appSrc));
+  t('★ 取消按钮仍然只取消当前这张',
+    /btn-cancel'\)\.onclick = [\s\S]{0,120}cancelJobsForCurrentDoc\(/.test(appSrc));
   t('模式动作回到框选', /case 'mode':[\s\S]{0,200}S\.mode = 'select'/.test(appSrc));
   // 位置放宽到 600 字：这里现在先做一次「强制保存并核对结果」再 goHome，
   // 代码变长是正常的；要保住的语义是「回首页这道分支里确实调了 goHome」，
@@ -2164,9 +2189,13 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   t('有整图判定包装', /function editingWholeImage\(rect\)/.test(appSrc7));
 
   // 四个工具入口都要接受「没有选区」
-  t('AI 生图不要求先框选', /function generate\(\)[\s\S]{0,400}if \(!effectiveRect\(\)\)/.test(appSrc7) &&
-    !/function generate\(\)[\s\S]{0,400}toast\('先在照片上框选要修改的位置'\)/.test(appSrc7));
-  t('生成按钮不再要求选区', /btn-generate'\)\.disabled = on \|\| !S\.img \|\| !S\.docCanvas;/.test(appSrc7));
+  // 范围放宽到 900 字：generate() 里现在还有「防连点」等前置判断，
+  // 但语义没变 —— 仍然不要求先框选。
+  t('AI 生图不要求先框选', /function generate\(\)[\s\S]{0,900}if \(!effectiveRect\(\)\)/.test(appSrc7) &&
+    !/function generate\(\)[\s\S]{0,900}toast\('先在照片上框选要修改的位置'\)/.test(appSrc7));
+  // 按钮不再因「正在生成」而禁用（可以接着处理下一张）
+  t('生成按钮不再要求选区、也不再因生成中而禁用',
+    /btn-generate'\)\.disabled = !S\.img \|\| !S\.docCanvas;/.test(appSrc7));
   t('成本预估照常给（整图也要能看要花多少钱）',
     /function currentEstimate\(\)[\s\S]{0,300}const rect = effectiveRect\(\);/.test(appSrc7));
   t('调色不要求先框选', /function openGradeTool\(rect\)[\s\S]{0,500}if \(!effectiveRect\(\)\)/.test(appSrc7) &&
@@ -2577,8 +2606,15 @@ t('timestampName ext', /^photo_\d{8}_\d{6}\.jpg$/.test(C.timestampName('photo','
   // 教程是全屏引导，盖在菜单之上；菜单仍是「面板类」里最靠前的一层
   t('教程盖在最上面', C.BACK_LAYERS[0].id === 'tutorial');
   t('菜单紧跟教程之后', C.BACK_LAYERS[1].id === 'moremenu');
-  t('菜单 z-index 高于所有面板',
-    C.BACK_LAYERS.slice(1).every((L) => C.BACK_LAYERS[0].z > L.z),
+  // 结果提示（resultPopup）的 z 比菜单更高，但它是 overlay 提示、
+  // 不在「面板层级」的排序里，所以比较时排除它。
+  t('菜单 z-index 高于所有面板（不含 overlay 提示）',
+    (() => {
+      const menu = C.BACK_LAYERS.find((L) => L.id === 'moremenu');
+      // 只和「面板类」比：排除教程（全屏引导，盖在菜单之上是设计）与 overlay 提示
+      const panels = C.BACK_LAYERS.filter((L) => L.id !== 'tutorial' && !L.overlay);
+      return panels.every((L) => L.id === 'moremenu' || menu.z > L.z);
+    })(),
     C.BACK_LAYERS.map((L) => L.id + ':' + L.z));
 
   /* ---------- 样式：不能挡住别的层 ---------- */

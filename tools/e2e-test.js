@@ -495,7 +495,8 @@ async function run() {
   console.log('\n【4】生成（模型返回纯红图）');
   fake.setColor([220, 40, 40]);
   doc.getElementById('prompt').value = '把这块白色方块换成红色';
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await waitGen(S);
 
   t('模型已收到请求', fake.seen.length === 1, fake.seen.length);
@@ -557,7 +558,8 @@ async function run() {
   const bandBase = [];
   for (let dx = 0; dx <= 12; dx++) bandBase.push(docPixel(200 + dx, 110)[0]);
   doc.getElementById('prompt').value = '换成深色';
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await waitGen(S);
   t('第二次请求已发出', fake.seen.length === 2, fake.seen.length);
   if (S.pending) {
@@ -628,7 +630,8 @@ async function run() {
   fake.setColor([0, 200, 0]);
   doc.getElementById('prompt').value = '换成绿色';
   const before3 = fake.seen.length;
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await waitGen(S);
   t('带掩膜的请求已发出', fake.seen.length === before3 + 1, fake.seen.length);
   if (fake.seen.length > before3) {
@@ -665,7 +668,8 @@ async function run() {
   };
   S.rect = { x: 10, y: 10, w: 60, h: 60 };
   doc.getElementById('prompt').value = 'test';
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await waitGen(S);
   const errEl = doc.getElementById('gen-error');
   t('401 时弹出错误面板', errEl.hidden === false);
@@ -677,7 +681,8 @@ async function run() {
 
   // 网络异常
   window.fetch = async () => { throw new TypeError('Failed to fetch'); };
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await waitGen(S);
   const errEl2 = doc.getElementById('gen-error');
   t('网络异常弹出错误面板', errEl2.hidden === false);
@@ -693,7 +698,8 @@ async function run() {
   const savedKey = S.cfg.apiKey;
   S.cfg.apiKey = '';
   S.rect = { x: 10, y: 10, w: 50, h: 50 };
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await sleep(120);
   t('未填 Key 时打开设置面板', doc.getElementById('settings').hidden === false);
   t('未填 Key 时提示用户', doc.getElementById('toast').textContent.includes('API Key'), doc.getElementById('toast').textContent);
@@ -709,7 +715,8 @@ async function run() {
   S.rect = { x: 150, y: 100, w: 100, h: 100 };
   doc.getElementById('prompt').value = 'small area test';
   const beforeSmall = fake.seen.length;
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await waitGen(S);
   t('小选区请求已发出', fake.seen.length > beforeSmall, fake.seen.length - beforeSmall);
   if (fake.seen.length > beforeSmall) {
@@ -772,7 +779,8 @@ async function run() {
   S.cfg.feather = 0; S.cfg.colorMatch = 0; // 8:1 的细长选区，模型会返回 16:9 → 必须裁切而不是拉伸
   S.rect = { x: 20, y: 20, w: 320, h: 40 };
   doc.getElementById('prompt').value = 'band test';
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await waitGen(S);
   t('细长选区生成了结果', !!S.pending);
   if (S.pending) {
@@ -803,7 +811,8 @@ async function run() {
   S.cfg.feather = 0; S.cfg.colorMatch = 0; S.rect = { x: 30, y: 30, w: 120, h: 120 };
   doc.getElementById('prompt').value = 'race test';
   const seenBeforeRace = fake.seen.length;
-  // 连点两次生成
+  // 连点两次生成：只重置一次，第二次必须被防连点挡住
+  try { window.__PS_API.resetGenDebounce(); } catch (e) {}
   doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await waitGen(S);
@@ -815,7 +824,8 @@ async function run() {
   const editsBefore = S.edits.length;
   S.rect = { x: 10, y: 10, w: 80, h: 80 };
   doc.getElementById('prompt').value = 'switch photo';
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await sleep(30);
   // 立刻换一张图（docVersion 递增）
   const src2 = napi.createCanvas(300, 200);
@@ -853,7 +863,8 @@ async function run() {
   S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.upscaleSmall = false;
   S.rect = { x: 30, y: 30, w: 200, h: 200 };
   doc.getElementById('prompt').value = 'remove the trash bin';
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await waitGen(S);
   t('OpenAI 编辑请求已发出', fake.seen.length > openaiBefore, fake.seen.length - openaiBefore);
   const last = fake.seen[fake.seen.length - 1];
@@ -903,7 +914,8 @@ async function run() {
     await sleep(80);
     const gptBefore = fake.seen.length;
     doc.getElementById('prompt').value = '把天空换成晚霞';
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 8000);
     const gptReqs = fake.seen.slice(gptBefore).filter((x) => x.multipart && x.multipart.files.image);
     t('GPT 请求带上了 image 文件', gptReqs.length > 0, gptReqs.length);
@@ -971,7 +983,8 @@ async function run() {
 
   const beforeTintCheck = fake.seen.length;
   doc.getElementById('prompt').value = 'test no tint';
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await waitGen(S);
   t('带笔迹的请求已发出', fake.seen.length > beforeTintCheck, fake.seen.length - beforeTintCheck);
   if (fake.seen.length > beforeTintCheck) {
@@ -1046,7 +1059,8 @@ async function run() {
   for (let i = 0; i < 6; i++) {
     S.rect = { x: 100 + i * 30, y: 100 + i * 20, w: 200, h: 200 };
     doc.getElementById('prompt').value = 'edit ' + i;
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S);
     if (S.pending) {
       doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
@@ -1153,7 +1167,8 @@ async function run() {
   S.rect = { x: 60, y: 60, w: 200, h: 160 };
   doc.getElementById('prompt').value = '非破坏性测试';
   const ndSeenBefore = fake.seen.length;
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await waitGen(S);
   t('生成了一次修改', fake.seen.length === ndSeenBefore + 1, fake.seen.length - ndSeenBefore);
   if (S.pending) { doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click')); await sleep(100); }
@@ -1298,7 +1313,8 @@ async function run() {
   S.rect = { x: 60, y: 60, w: 180, h: 140 };
   fake.setColor([220, 40, 40]);
   doc.getElementById('prompt').value = '撤销测试';
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await waitGen(S);
   if (S.pending) { doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click')); await sleep(100); }
   t('生成了 1 个图层', S.edits.length === 1, S.edits.length);
@@ -1505,7 +1521,8 @@ async function run() {
   fake.setColor([200, 60, 60]);
   doc.getElementById('prompt').value = '成本测试';
   const csBefore = S.spend.calls;
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await waitGen(S);
   t('生成后累计调用次数增加', S.spend.calls > csBefore, [csBefore, S.spend.calls]);
   t('累计金额大于 0', S.spend.usd > 0, S.spend.usd);
@@ -1564,7 +1581,8 @@ async function run() {
   await sleep(100);
   const csEstConfirm = window.__PS_API.currentEstimate();
   t('预估金额达到确认阈值', csEstConfirm && csEstConfirm.totalUsd >= 0.2, csEstConfirm && csEstConfirm.totalUsd);
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await sleep(200);
   t('大额生成前弹出确认', csConfirmCalled);
   t('确认信息含金额', /\$/.test(csConfirmMsg), csConfirmMsg.slice(0, 80));
@@ -1634,7 +1652,8 @@ async function run() {
   S.cfg.apiKey = 'sk-test';
   S.rect = { x: 20, y: 20, w: 120, h: 120 };
   doc.getElementById('prompt').value = '去掉这个物体';
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await waitGen(S);
   const errEl3 = doc.getElementById('gen-error');
   t('对话式回复被识别', errEl3.hidden === false && /对话回复，不是图片/.test(errEl3.textContent), errEl3.textContent.slice(0, 90));
@@ -1656,7 +1675,8 @@ async function run() {
   S.cfg.model = 'Qwen/Qwen-Image-Edit';
   S.rect = { x: 20, y: 20, w: 120, h: 120 };
   doc.getElementById('prompt').value = 'x';
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await waitGen(S);
   const errEl4 = doc.getElementById('gen-error');
   // 「请上传…我会…」这种是助手口吻的回复，现在会被正确识别为「上游返回文字」而非「缺图」
@@ -1670,7 +1690,8 @@ async function run() {
   S.cfg.model = 'Qwen/Qwen-Image';
   S.rect = { x: 20, y: 20, w: 100, h: 100 };
   const seenBefore = fake.seen.length;
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await waitGen(S);
   t('文生图模型仍可调用（不参考原图）', fake.seen.length > seenBefore, fake.seen.length - seenBefore);
   if (fake.seen.length > seenBefore) {
@@ -1703,7 +1724,8 @@ async function run() {
   S.rect = { x: 20, y: 20, w: 160, h: 90 };
   doc.getElementById('prompt').value = 'make it snowy';
   const before4 = fake.seen.length;
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await waitGen(S);
   t('Kontext 请求已发出', fake.seen.length > before4);
   if (fake.seen.length > before4) {
@@ -1832,7 +1854,8 @@ async function run() {
     fake.setColor(color);
     S.rect = rect;
     doc.getElementById('prompt').value = prompt;
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S);
     if (S.pending) {
       doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
@@ -2226,7 +2249,8 @@ async function run() {
       fake.setColor([180, 90, 40]);
       S.rect = { x: Math.round(S.docW * 0.2), y: Math.round(S.docH * 0.2), w: 300, h: 240 };
       doc.getElementById('prompt').value = '第 ' + (n + 1) + ' 张';
-      doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+            try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+            doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
       await waitGen(S, 20000);
       // waitGen 只看 busy 标志，偶尔会在「作业刚结束但结果还没落地」时返回。
       // 这里再等到真的产生对比图（或明确没有结果），否则 apply 会点空、
@@ -2374,7 +2398,8 @@ async function run() {
   fake.setColor([90, 200, 120]);
   S.rect = { x: 40, y: 40, w: 120, h: 90 };
   doc.getElementById('prompt').value = '保活测试';
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   // 请求还没回来时（busy 为真）就应该已经开了保活
   await sleep(80);
   const duringGen = kaCalls.filter((c) => 'genOn' in c);
@@ -2528,7 +2553,8 @@ async function run() {
   fake.setColor([130, 90, 220]);
   S.rect = { x: 60, y: 60, w: 200, h: 150 };
   doc.getElementById('prompt').value = '对比缩放测试';
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await waitGen(S);
   await sleep(120);
   t('已进入对比视图', doc.getElementById('compare').hidden === false);
@@ -2753,7 +2779,8 @@ async function run() {
   };
   doc.getElementById('prompt').value = '把这块换成花丛';
   const envSeenBefore = fake.seen.length;
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await waitGen(S);
   await sleep(120);
 
@@ -2792,7 +2819,8 @@ async function run() {
     w: Math.round(S.docW * 0.34), h: Math.round(S.docH * 0.34)
   };
   doc.getElementById('prompt').value = '把这块换成花丛';
-  doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
   await waitGen(S);
   await sleep(120);
   const offReq = fake.seen[fake.seen.length - 1] || {};
@@ -3410,7 +3438,8 @@ async function run() {
     const before28 = fake.seen.length;
     fake.setColor([90, 200, 90]);
     doc.getElementById('prompt').value = '换成阴天';
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 6000);
     if (S.pending) {
       doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
@@ -3702,7 +3731,8 @@ async function run() {
     const before30 = fake.seen.length;
     fake.setColor([120, 180, 120]);
     doc.getElementById('prompt').value = '给她生成长发';
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 8000);
     const gen30 = fake.seen.slice(before30).filter((x) => x.body && x.body.prompt);
     t('发起了请求', gen30.length > 0, gen30.length);
@@ -3795,7 +3825,8 @@ async function run() {
 
     const beforeC = fake.seen.length;
     fake.setColor([120, 180, 120]);
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 8000);
     const genC = fake.seen.slice(beforeC).filter((x) => x.body && x.body.prompt);
     if (genC.length) {
@@ -3838,7 +3869,8 @@ async function run() {
     S.cfg.guideStrokeOverlay = false;
     const beforeOff = fake.seen.length;
     fake.setColor([120, 180, 120]);
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 8000);
     const genOff = fake.seen.slice(beforeOff).filter((x) => x.body && x.body.prompt);
     t('旧配置残留 false 时仍发起了请求', genOff.length > 0, genOff.length);
@@ -4102,7 +4134,8 @@ async function run() {
     const before31 = fake.seen.length;
     fake.setColor([200, 120, 60]);
     doc.getElementById('prompt').value = '整体调成暖色调';
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 10000);
     const sent31 = fake.seen.slice(before31).filter((x) => x.body && x.body.prompt);
     t('大选区只发了 1 个请求（不再分块）', sent31.length === 1, sent31.length);
@@ -4253,7 +4286,8 @@ async function run() {
     window.__PS_API.updateUI();
     fake.setColor([180, 180, 60]);
     doc.getElementById('prompt').value = '测试提醒';
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 8000);
     t('第一次生成：提醒已记录', window.__PS_API.hintSeen('gen-keepalive') === true);
     if (S.pending) {
@@ -4579,7 +4613,8 @@ async function run() {
     await sleep(80);
     fake.setColor([10, 220, 90]);
     doc.getElementById('prompt').value = '把整张照片调亮一点';
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S);
     const n40 = fake.seen.length;
     t('整图生成：请求已发出（没被「先框选」拦住）', n40 > 0, n40);
@@ -4772,7 +4807,8 @@ async function run() {
     S.rect = { x: 40, y: 40, w: 120, h: 100 };
     fake.setColor([200, 80, 60]);
     doc.getElementById('prompt').value = '返回键测试';
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 8000);
     if (S.pending) {
       doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
@@ -4806,6 +4842,11 @@ async function run() {
     t('再按一次关掉记录面板', doc.getElementById('library').hidden === true);
 
     // ---- c) 工具模式：退回框选 ----
+    // 先关掉可能存在的「结果提示」浮层。
+    // 它层级最高（结果出来时盖在最上面），返回键会先关它 ——
+    // 这是正确行为，但会把这个用例的「返回键应退出画笔模式」挡住。
+    try { window.__PS_API.closeResultPopup(); } catch (e) {}
+    await sleep(60);
     doc.querySelector('.tool[data-mode="brush"]').dispatchEvent(new window.Event('click'));
     await sleep(80);
     t('已进入画笔模式', S.mode === 'brush');
@@ -4818,7 +4859,8 @@ async function run() {
     S.rect = { x: 60, y: 60, w: 100, h: 80 };
     fake.setColor([80, 160, 200]);
     doc.getElementById('prompt').value = '对比图测试';
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 8000);
     t('进入对比态', !!S.pending && doc.getElementById('compare').hidden === false);
     const editsBefore = S.edits.length;
@@ -4829,26 +4871,64 @@ async function run() {
     t('没有把未确认的结果写进编辑记录', S.edits.length === editsBefore, S.edits.length);
     t('照片仍在', !!S.img);
 
-    // ---- e) 生成中：返回键取消生成 ----
-    // 让假服务慢下来，确保按下返回时请求确实还在进行中
+    // ---- e) 生成中：返回键 = 离开这张照片，任务继续在后台跑 ----
+    //
+    // 行为变更说明：以前生成中按返回会**取消**这次请求。
+    // 但任务本来就是后台跑的，用户按返回多半是想回去干别的，
+    // 不是想放弃这次已经花钱的请求。现在改成「回首页，任务继续」。
+    // 真想取消请点进度条上的「取消这张」。
+    // 先确保没有残留浮层挡在返回键前面（结果弹窗/对比图等）
+    try { window.__PS_API.closeResultPopup(); } catch (e) {}
+    S.pending = null;
+    try { doc.getElementById('compare').hidden = true; } catch (e) {}
+    await sleep(80);
+
     fake.setDelay(3000);
     fake.setColor([180, 180, 80]);
     doc.getElementById('prompt').value = '生成中测试';
+    try { window.__PS_API.resetGenDebounce(); } catch (e) {}
     doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await sleep(200);
     t('确实处于生成中', S.busy === true, S.busy);
-    t('生成中界面有「取消」按钮', doc.getElementById('busy').hidden === false);
+    t('生成中界面有「取消这张」按钮', doc.getElementById('busy').hidden === false);
+    const jobsBeforeBack = S.jobs.filter((j) => j.status === 'running').length;
     handled = window.__PS_API.handleBack();
-    await sleep(200);
+    await sleep(300);
     t('生成中按返回：被处理（不退出应用）', handled === true);
-    t('生成中按返回：已停止等待', S.busy === false, S.busy);
-    t('生成中按返回：忙碌界面已隐藏', doc.getElementById('busy').hidden === true);
-    t('生成中按返回：照片仍在', !!S.img);
-    // 迟到的响应不能把结果贴上来（genToken 已递增）
-    await sleep(400);
-    t('取消后迟到的结果被丢弃', S.pending === null, !!S.pending);
+    t('★★ 生成中按返回：照片已卸下（回到首页）', S.img === null, !!S.img);
+    t('★★★ 生成中按返回：任务**继续在后台跑**（没有白花钱）',
+      S.jobs.filter((j) => j.status === 'running').length === jobsBeforeBack,
+      { before: jobsBeforeBack, now: S.jobs.map((j) => j.status) });
+    t('★ 生成中按返回：不显示「正在生成」遮罩（已离开那张照片）',
+      doc.getElementById('busy').hidden === true);
+    // 等它跑完：结果应落进作品记录，不丢
+    const tWait = Date.now();
+    while (S.jobs.some((j) => j.status === 'running') && Date.now() - tWait < 12000) await sleep(150);
+    t('★★★ 后台跑完的结果没有丢（落进了作品记录或待贴回）',
+      S.jobs.some((j) => j.status === 'done') ||
+      window.__PS_API.library().some((w) => !!w.bgResult),
+      S.jobs.map((j) => j.status));
     fake.setDelay(0);
+    // 关掉可能弹出的结果提示，避免影响后面的用例
+    try { window.__PS_API.closeResultPopup(); } catch (e) {}
+    S.jobs = [];
     if (S.pending) { doc.getElementById('cmp-discard').dispatchEvent(new window.Event('click')); await sleep(100); }
+    // 这一段结束时已经回到首页了；后面 f) 期望「在编辑页」，
+    // 所以重新打开一张照片
+    {
+      const c = napi.createCanvas(400, 300);
+      const x = c.getContext('2d');
+      x.fillStyle = 'rgb(60, 60, 60)';
+      x.fillRect(0, 0, 400, 300);
+      const inp = doc.getElementById('file-input');
+      Object.defineProperty(inp, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], 'back.jpg', { type: 'image/png' })],
+        configurable: true
+      });
+      inp.dispatchEvent(new window.Event('change'));
+      await sleep(400);
+    }
+    t('★ 重新打开一张照片（为后续用例准备）', !!S.img);
 
     // ---- f) 编辑页：返回键回首页（且不丢修改）----
     const libBefore = window.__PS_API.library().length;
@@ -5178,7 +5258,8 @@ async function run() {
     fake.setColor([200, 60, 60]);
     S.rect = { x: 60, y: 60, w: 160, h: 120 };
     doc.getElementById('prompt').value = '把这里改成红色';
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 15000);
 
     const afterOk = window.__PS_API.callLog();
@@ -5217,7 +5298,8 @@ async function run() {
     fake.setColor([10, 200, 10]);
     S.rect = { x: 40, y: 40, w: 120, h: 100 };
     doc.getElementById('prompt').value = '这次会失败';
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 15000);
     window.fetch = clRealFetch;
 
@@ -5652,7 +5734,8 @@ async function run() {
     S.rect = { x: 60, y: 60, w: 160, h: 120 };
     doc.getElementById('prompt').value = '后台生成测试';
     const bgSeenBefore = fake.seen.length;
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await sleep(120);
 
     t('生成中 busy 为真（当前这张）', S.busy === true, S.busy);
@@ -5697,7 +5780,8 @@ async function run() {
     fake.setColorFor('第二张的修改', [40, 200, 90]);
     S.rect = { x: 40, y: 40, w: 120, h: 100 };
     doc.getElementById('prompt').value = '第二张的修改';
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await sleep(120);
     t('B 上也能发起生成（两个任务并存）', S.jobs.length === 2, S.jobs.length);
     t('两个任务分属不同文档',
@@ -5824,18 +5908,23 @@ async function run() {
     // 在 A 上发起一个
     S.rect = { x: 20, y: 20, w: 100, h: 80 };
     doc.getElementById('prompt').value = 'A 的取消测试';
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await sleep(100);
     t('A 上有一个任务在跑', S.jobs.filter((j) => j.status === 'running').length === 1,
       S.jobs.map((j) => j.status));
     const jobAId = S.jobs[0].id;
-    // 换到 B（会取消 A 的当前任务 —— 结果已无处可落）
+    // 换到 B —— **不取消** A 的任务（这正是「可以接着处理下一张」）
+    //
+    // 行为变更说明：以前换图会取消上一张的任务，理由是「结果无处可落」。
+    // 但现在结果有去处了（存进作品记录，回来能贴回），
+    // 取消它等于扔掉用户已经花钱的请求，也和「处理下一张」直接冲突。
     await loadPhoto('bg-c.png', [10, 10, 10]);
     await sleep(200);
-    t('换图取消了上一张的任务（结果已无处可落）',
-      S.jobs.every((j) => j.status !== 'running' || j.docVersion === S.docVersion),
+    t('★★★ 换图不会取消上一张的任务（钱不白花）',
+      S.jobs.some((j) => j.id === jobAId && j.status === 'running'),
       S.jobs.map((j) => ({ s: j.status, d: j.docVersion })));
-    t('取消后没有把结果贴到新图上', S.pending === null && S.edits.length === 0);
+    t('★ 换图后没有把结果误贴到新图上', S.pending === null && S.edits.length === 0);
 
     // ---- 10) 失败的任务不能假装成功 ----
     S.jobs = [];
@@ -5853,7 +5942,8 @@ async function run() {
     };
     S.rect = { x: 20, y: 20, w: 100, h: 80 };
     doc.getElementById('prompt').value = '会失败的后台任务';
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await sleep(600);
     window.fetch = bgRealFetch;
     t('失败的任务被标成 failed', S.jobs.some((j) => j.status === 'failed'),
@@ -5990,7 +6080,8 @@ async function run() {
     pEl.value = '把天空换成晚霞';
     pEl.dispatchEvent(new window.Event('input'));
     await sleep(60);
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 12000);
     t('生成成功', S.pending !== null || S.jobs.length > 0);
     t('★ 成功后提示词被清空', pEl.value === '', pEl.value);
@@ -6012,7 +6103,8 @@ async function run() {
     pEl.value = '这次一定会失败';
     pEl.dispatchEvent(new window.Event('input'));
     await sleep(60);
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 15000);
     window.fetch = realFetch;
     t('失败时提示词被保留（能照着改）', pEl.value === '这次一定会失败', pEl.value);
@@ -6027,7 +6119,8 @@ async function run() {
     pEl.value = '第一条要求';
     pEl.dispatchEvent(new window.Event('input'));
     await sleep(60);
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     // 请求还在飞的时候改写输入框
     await sleep(80);
     pEl.value = '第二条要求，我正在写';
@@ -6041,7 +6134,8 @@ async function run() {
     pEl.value = '';
     pEl.dispatchEvent(new window.Event('input'));
     await sleep(60);
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 12000);
     t('空提示词生成后仍是空（不崩）', pEl.value === '');
     if (S.pending) { doc.getElementById('cmp-discard').dispatchEvent(new window.Event('click')); await sleep(80); }
@@ -6209,7 +6303,8 @@ async function run() {
     doc.getElementById('prompt').value = '历史记录测试';
     // 清掉前面段落遗留的错误面板，否则会把旧错误误当成这次的
     var _ep = doc.getElementById('gen-error'); if (_ep) _ep.hidden = true;
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 12000);
     if (S.pending) {
       doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));
@@ -6323,7 +6418,8 @@ async function run() {
     const beforeOk = kaCalls.filter((c) => c.notify).length;
     S.rect = { x: 40, y: 40, w: 160, h: 120 };
     doc.getElementById('prompt').value = '通知成功测试';
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 12000);
     {
       const t1 = Date.now();
@@ -6351,7 +6447,8 @@ async function run() {
     const beforeFail = kaCalls.filter((c) => c.notify).length;
     S.rect = { x: 40, y: 40, w: 120, h: 100 };
     doc.getElementById('prompt').value = '通知失败测试';
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 15000);
     {
       const t2 = Date.now();
@@ -6546,7 +6643,8 @@ async function run() {
     S.rect = { x: 40, y: 40, w: 160, h: 120 };
     doc.getElementById('prompt').value = '参考图测试';
     const before = fake.seen.length;
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 15000);
     {
       const tw = Date.now();
@@ -7007,7 +7105,8 @@ async function run() {
     S.rect = { x: 40, y: 40, w: 160, h: 120 };
     doc.getElementById('prompt').value = 'multipart 参考图测试';
     const before = fake.seen.length;
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 15000);
     {
       const tw = Date.now();
@@ -7409,7 +7508,8 @@ async function run() {
     fake.setColor([0, 200, 0]);
     doc.getElementById('prompt').value = '整块变绿';
     const b1 = fake.seen.length;
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S);
     t('请求已发出', fake.seen.length === b1 + 1, fake.seen.length);
     if (S.pending) { doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click')); await sleep(80); }
@@ -7433,7 +7533,8 @@ async function run() {
     fake.setColor([220, 30, 30]);
     doc.getElementById('prompt').value = '只改这一小块';
     const b2 = fake.seen.length;
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S);
     t('第二次请求已发出', fake.seen.length === b2 + 1, fake.seen.length);
     if (S.pending) { doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click')); await sleep(80); }
@@ -7645,6 +7746,105 @@ async function run() {
     S.rect = null;
     api.goHome();
     await sleep(100);
+  }
+
+  /* ---------- 生成不挡界面：可以接着处理下一张 ---------- */
+  console.log('\n【74】生成时界面不锁死：可以立刻处理下一张');
+  {
+    const api = window.__PS_API;
+    S.jobs = [];
+    S.library = [];
+    api.saveLibrary();
+    api.goHome();
+    await sleep(150);
+
+    S.cfg.provider = 'siliconflow';
+    S.cfg.baseUrl = 'https://api.siliconflow.cn/v1';
+    S.cfg.model = 'Qwen/Qwen-Image-Edit';
+    S.cfg.apiKey = 'sk-test';
+    S.cfg.netMode = 'direct';
+    S.cfg.feather = 0; S.cfg.colorMatch = 0; S.cfg.contextPct = 0;
+    S.cfg.upscaleSmall = false; S.cfg.autoGrade = false;
+    window.confirm = () => true;
+
+    const loadPhoto = async (name, color) => {
+      const c = napi.createCanvas(400, 300);
+      const x = c.getContext('2d');
+      x.fillStyle = 'rgb(' + color.join(',') + ')';
+      x.fillRect(0, 0, 400, 300);
+      const inp = doc.getElementById('file-input');
+      Object.defineProperty(inp, 'files', {
+        value: [new window.File([new Uint8Array(c.toBuffer('image/png'))], name, { type: 'image/png' })],
+        configurable: true
+      });
+      inp.dispatchEvent(new window.Event('change'));
+      await sleep(400);
+    };
+
+    // 让模型慢一点，才有「生成中继续操作」的窗口
+    fake.setDelay(1200);
+    await loadPhoto('nb-a.png', [30, 90, 160]);
+    t('★ 第一张已载入', S.docW === 400, S.docW);
+
+    fake.setColorFor('第一张修改', [200, 40, 40]);
+    S.rect = { x: 40, y: 40, w: 200, h: 150 };
+    doc.getElementById('prompt').value = '第一张修改';
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await sleep(150);
+
+    t('★★ 生成已开始（有任务在跑）', S.jobs.length === 1 && S.jobs[0].status === 'running',
+      S.jobs.map((j) => j.status));
+
+    // 关键 1：生成中界面不能被遮罩挡住
+    {
+      const busy = doc.getElementById('busy');
+      t('★★★ 生成中不显示全屏遮罩（busy 是细条，不是覆盖层）', busy.hidden === false);
+      // 检查主样式表文件（不是内联 <style>）：
+      // #busy 的 pointer-events 规则写在 app/style.css 里。
+      const fsCss = require('fs');
+      const cssFile = fsCss.readFileSync(__dirname + '/../app/style.css', 'utf8');
+      t('★★ 进度条设了 pointer-events:none（不拦点击）',
+        /#busy\s*\{[^}]*pointer-events:\s*none/.test(cssFile),
+        (cssFile.match(/#busy \{[^}]*\}/) || [''])[0]);
+    }
+
+    // 关键 2：生成按钮不能被禁用
+    t('★★★ 生成中「生成」按钮仍可点（可以接着修下一张）',
+      doc.getElementById('btn-generate').disabled === false);
+
+    // 关键 3：真的能载入下一张照片
+    await loadPhoto('nb-b.png', [90, 40, 140]);
+    t('★★★ 生成中能载入第二张照片', S.docW === 400 && S.imgW === 400);
+    t('★★ 第一张的任务仍在跑（换图不会杀掉它）',
+      S.jobs.length === 1 && S.jobs[0].status === 'running', S.jobs.map((j) => j.status));
+    t('★★ 在第二张上不显示「正在生成」遮罩（不假装在忙）',
+      doc.getElementById('busy').hidden === true);
+
+    // 关键 4：在第二张上再发起一次生成，两个任务并存
+    fake.setColorFor('第二张修改', [40, 200, 90]);
+    S.rect = { x: 30, y: 30, w: 150, h: 120 };
+    doc.getElementById('prompt').value = '第二张修改';
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+    await sleep(150);
+    t('★★★ 生成中能再发起一次（两个任务并行）', S.jobs.length === 2, S.jobs.length);
+    t('★★ 两个任务分属不同文档',
+      S.jobs[0].docVersion !== S.jobs[1].docVersion,
+      S.jobs.map((j) => j.docVersion));
+
+    // 等两个都完成
+    const t0 = Date.now();
+    while (S.jobs.filter((j) => j.status === 'done').length < 2 && Date.now() - t0 < 15000) await sleep(150);
+    t('★★★ 两个任务都完成了',
+      S.jobs.filter((j) => j.status === 'done').length === 2,
+      S.jobs.map((j) => j.status));
+
+    // 收尾
+    S.jobs = [];
+    api.goHome();
+    await sleep(150);
+    fake.setDelay(0);
   }
 
   /* ---------- 扩图：竖图补成横版，原图内容必须原样保留 ---------- */
@@ -7989,7 +8189,8 @@ async function run() {
     doc.getElementById('prompt').value = '竖屏适配测试';
     const ep = doc.getElementById('gen-error'); if (ep) ep.hidden = true;
     const before = fake.seen.length;
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 15000);
     t('★ 竖屏请求已发出', fake.seen.length > before, fake.seen.length - before);
 
@@ -8070,7 +8271,8 @@ async function run() {
     fake.setColor([240, 20, 20]);
     doc.getElementById('prompt').value = '大选区测试';
     const ep = doc.getElementById('gen-error'); if (ep) ep.hidden = true;
-    doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
+        try { window.__PS_API.resetGenDebounce(); } catch (e) {}
+        doc.getElementById('btn-generate').dispatchEvent(new window.Event('click'));
     await waitGen(S, 20000);
     if (S.pending) {
       doc.getElementById('cmp-apply').dispatchEvent(new window.Event('click'));

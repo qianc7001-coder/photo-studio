@@ -117,12 +117,24 @@
     <button id="job-badge" hidden></button>
 
     <!-- 生成中 -->
+    <!--
+      生成进度条：**不挡界面**。
+
+      以前这里是一层全屏遮罩，生成一开始整个界面就点不动了，
+      用户只能干等 30~60 秒才能修下一张。但请求本来就是后台跑的，
+      挡住界面等于自己给自己上锁。
+
+      现在是一条贴在画布顶部的细条：显示进度和「取消当前这张」，
+      其它一切操作照常 —— 换图、框选、再发一次生成都不受影响。
+    -->
     <div id="busy" hidden>
       <div class="busy-card">
         <div class="spinner"></div>
-        <div class="busy-title" id="busy-title">正在生成…</div>
-        <div class="busy-sub" id="busy-sub"></div>
-        <button class="ghost small" id="btn-cancel">取消</button>
+        <div class="busy-text">
+          <div class="busy-title" id="busy-title">正在生成…</div>
+          <div class="busy-sub" id="busy-sub"></div>
+        </div>
+        <button class="ghost small" id="btn-cancel">取消这张</button>
       </div>
     </div>
 
@@ -142,6 +154,30 @@
 
     <!-- 生成失败说明 -->
     <div id="gen-error" hidden></div>
+
+    <!--
+      应用内结果弹窗：生成完成 / 失败时**直接弹在屏幕中央**。
+
+      为什么不能只靠系统通知：
+        1. 用户正看着这个应用时，系统通知只会出现在顶部状态栏，很容易完全没注意
+        2. Android 13+ 没授权通知权限时，系统会**静默丢弃** —— 应用看起来一切正常，
+           用户什么都收不到
+        3. 切走后回来，通知可能已被划掉
+
+      所以：应用在前台 → 直接弹这个；切到后台 → 系统通知兜底。
+    -->
+    <div id="result-popup" hidden>
+      <div class="rp-mask" data-rp-close></div>
+      <div class="rp-card">
+        <div class="rp-ico" id="rp-ico"></div>
+        <div class="rp-title" id="rp-title"></div>
+        <div class="rp-body" id="rp-body"></div>
+        <div class="rp-actions">
+          <button class="ghost" id="rp-close" data-rp-close>知道了</button>
+          <button class="primary" id="rp-open">去看看</button>
+        </div>
+      </div>
+    </div>
 
     <!-- 对比预览 -->
     <div id="compare" hidden>
